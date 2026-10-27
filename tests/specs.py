@@ -106,3 +106,71 @@ _BASE = {
         }
     },
 }
+
+
+def sdk_doc() -> dict:
+    """``base_doc`` plus Stripe's SDK metadata, a custom action, a nested sub-resource and a namespaced resource."""
+    doc = base_doc()
+    paths, schemas = doc["paths"], doc["components"]["schemas"]
+    charge_param = {"name": "charge", "in": "path", "required": True, "schema": {"type": "string"}}
+    paths["/v1/charges/{charge}/capture"] = {
+        "post": {
+            "parameters": [charge_param],
+            "requestBody": _form({"amount": {"type": "integer"}}),
+            "responses": {"200": {"content": {"application/json": {"schema": charge_ref()}}}},
+        }
+    }
+    paths["/v1/charges/{charge}/refunds"] = {
+        "post": {
+            "parameters": [charge_param],
+            "requestBody": _form({"amount": {"type": "integer"}, "reason": {"type": "string", "enum": ["duplicate", "fraudulent"]}}),
+            "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/refund"}}}}},
+        }
+    }
+    paths["/v1/checkout/sessions"] = {
+        "post": {
+            "requestBody": _form(
+                {
+                    "mode": {"type": "string", "enum": ["payment", "subscription"]},
+                    "success_url": {"type": "string"},
+                    "line_items": {
+                        "type": "array",
+                        "items": {"type": "object", "properties": {"price": {"type": "string"}, "quantity": {"type": "integer"}}},
+                    },
+                },
+                required=["success_url"],
+            ),
+            "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/checkout.session"}}}}},
+        }
+    }
+    schemas["charge"]["x-stripeResource"] = {"class_name": "Charge", "in_package": ""}
+    schemas["charge"]["x-stripeOperations"] = [
+        _op("list", "list", "get", "/v1/charges"),
+        _op("create", "create", "post", "/v1/charges"),
+        _op("retrieve", "retrieve", "get", "/v1/charges/{charge}"),
+        _op("capture", "custom", "post", "/v1/charges/{charge}/capture"),
+    ]
+    schemas["refund"] = {
+        "type": "object",
+        "properties": {"id": {"type": "string"}, "amount": {"type": "integer"}},
+        "x-stripeResource": {"class_name": "Refund", "in_package": ""},
+        "x-stripeOperations": [_op("create", "create", "post", "/v1/charges/{charge}/refunds")],
+    }
+    schemas["checkout.session"] = {
+        "type": "object",
+        "properties": {"id": {"type": "string"}, "url": {"type": "string"}},
+        "x-stripeResource": {"class_name": "Session", "in_package": "Checkout"},
+        "x-stripeOperations": [_op("create", "create", "post", "/v1/checkout/sessions")],
+    }
+    return doc
+
+
+def _form(properties: dict, required: list | None = None) -> dict:
+    schema = {"type": "object", "properties": properties}
+    if required:
+        schema["required"] = required
+    return {"content": {"application/x-www-form-urlencoded": {"schema": schema}}}
+
+
+def _op(name: str, kind: str, method: str, path: str) -> dict:
+    return {"method_name": name, "method_type": kind, "method_on": "service", "operation": method, "path": path}

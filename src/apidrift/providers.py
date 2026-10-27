@@ -15,7 +15,7 @@ class Provider:
 PROVIDERS: dict[str, Provider] = {
     "stripe": Provider(
         name="stripe",
-        spec_url="https://raw.githubusercontent.com/stripe/openapi/master/openapi/spec3.json",
+        spec_url="https://raw.githubusercontent.com/stripe/openapi/master/openapi/spec3.sdk.json",
         changelog_url="https://docs.stripe.com/changelog",
     ),
 }

@@ -68,11 +68,24 @@ class Schema:
     fields: dict[str, Field]
 
 
+@dataclass(frozen=True)
+class SdkOp:
+    """How the official SDKs expose one operation, from Stripe's ``x-stripeOperations``."""
+
+    class_name: str
+    package: str
+    method_name: str
+    method_type: str
+    method: str
+    path: str
+
+
 @dataclass
 class Spec:
     version: str
     operations: dict[tuple[str, str], Operation] = field(default_factory=dict)
     schemas: dict[str, Schema] = field(default_factory=dict)
+    sdk_ops: list[SdkOp] = field(default_factory=list)
 
     def operations_returning(self, schema_name: str) -> list[str]:
         """Labels of operations whose 2xx response is this schema (directly or as list items)."""
@@ -265,4 +278,25 @@ def load_spec(doc: dict) -> Spec:
                 deprecated=bool(schema.get("deprecated", False)),
                 fields=flatten(schema),
             )
+            spec.sdk_ops += _sdk_ops(name, schema, spec)
     return spec
+
+
+def _sdk_ops(name: str, schema: dict, spec: Spec) -> list[SdkOp]:
+    """SDK method metadata for a resource schema, when the spec carries it."""
+    raw_ops = schema.get("x-stripeOperations")
+    if not isinstance(raw_ops, list):
+        return []
+    resource = schema.get("x-stripeResource") or {}
+    fallback = "".join(part.capitalize() for part in re.split(r"[._]", name))
+    class_name = str(resource.get("class_name") or fallback)
+    package = str(resource.get("in_package") or "")
+    out: list[SdkOp] = []
+    for raw in raw_ops:
+        if not isinstance(raw, dict):
+            continue
+        method, path = str(raw.get("operation", "")).lower(), str(raw.get("path", ""))
+        if (method, path) not in spec.operations or not raw.get("method_name"):
+            continue
+        out.append(SdkOp(class_name, package, str(raw["method_name"]), str(raw.get("method_type", "custom")), method, path))
+    return out
