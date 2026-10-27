@@ -1,0 +1,178 @@
+/* apidrift: one text face, one mono face, one accent, 1 px rules. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #faf9f6;
+  --fg: #1a1a1a;
+  --muted: #5a5a5a;
+  --rule: #d3cfc7;
+  --accent: #a83a2a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #151515;
+    --fg: #e4e1db;
+    --muted: #a3a09a;
+    --rule: #3c3c3c;
+    --accent: #d8695a;
+  }
+}
+
+html {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  max-width: 70ch;
+  margin: 0 auto;
+  padding: 2.5rem 16px 2rem;
+}
+
+h1,
+h2 {
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 2em 0 0.6em;
+}
+
+h1 {
+  font-size: 1.75rem;
+  margin-top: 0;
+}
+
+h2 {
+  font-size: 1.2rem;
+  margin-top: 1.5em;
+  padding-bottom: 0.2em;
+  border-bottom: 1px solid var(--rule);
+}
+
+p,
+ol,
+ul,
+pre {
+  margin: 0 0 1em;
+}
+
+.lede {
+  font-size: 1.15rem;
+}
+
+.site {
+  margin-bottom: 2.5rem;
+  font-weight: 600;
+}
+
+a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.15em;
+}
+
+code,
+pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.875em;
+}
+
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+  padding: 0.75em 1em;
+  border: 1px solid var(--rule);
+}
+
+code {
+  white-space: nowrap;
+}
+
+.finding {
+  display: block;
+  padding-left: 2ch;
+  text-indent: -2ch;
+}
+
+.finding + .finding {
+  margin-top: 0.6em;
+}
+
+.legend {
+  display: block;
+  margin-top: 0.6em;
+}
+
+.finding .detail {
+  display: block;
+  padding-left: 4ch;
+  text-indent: -2ch;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.mark {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.mark.possible {
+  color: inherit;
+}
+
+.button {
+  display: inline-block;
+  padding: 0.5em 1em;
+  border: 1px solid var(--fg);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.button:hover,
+.button:focus {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+ol,
+ul {
+  padding-left: 1.5em;
+}
+
+li {
+  margin-bottom: 0.3em;
+}
+
+footer {
+  margin-top: 3rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+  color: var(--muted);
+  font-size: 0.9375rem;
+}
+
+footer p {
+  margin: 0;
+}
+
+@media (max-width: 480px) {
+  body {
+    padding-top: 1.5rem;
+  }
+
+  h1 {
+    font-size: 1.5rem;
+  }
+
+  code,
+  pre {
+    font-size: 0.8125em;
+  }
+}

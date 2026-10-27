@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from . import snapshot as snap
+from .app.commands import add_parsers as add_app_parsers
 from .diff import BREAKING, diff_specs
 from .impact import assess, render_impact_json, render_impact_text
 from .openapi import Spec, load_spec
@@ -134,6 +135,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_imp.add_argument("--all", action="store_true", help="also list call sites the upgrade does not hit")
     p_imp.add_argument("--json", action="store_true", help="emit JSON instead of text")
     p_imp.set_defaults(func=cmd_impact)
+
+    add_app_parsers(sub)  # serve, worker, check, app-setup (the GitHub App)
     return parser
 
 

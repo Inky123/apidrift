@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{{ title }}</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main>
+{% block masthead %}<p class="site"><a href="/">apidrift</a></p>
+{% endblock %}{% block content required %}{% endblock %}
+</main>
+<footer>
+<p>Built by Zach Zapata · <a href="https://github.com/Inky123/apidrift">Source</a> · <a href="/privacy">Privacy</a> · Not affiliated with Stripe.</p>
+</footer>
+</body>
+</html>

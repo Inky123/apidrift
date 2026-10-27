@@ -47,6 +47,33 @@ def test_resolve_latest_previous_prefix_and_file(tmp_path):
     assert snap.resolve(None, str(plain)) == plain
 
 
+def test_save_is_atomic_so_a_full_disk_leaves_no_truncated_snapshot(monkeypatch):
+    real_open = snap.gzip.open
+
+    class Truncating:
+        def __init__(self, fh):
+            self.fh = fh
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.fh.close()
+
+        def write(self, data):
+            self.fh.write(data[:10])
+            raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(snap.gzip, "open", lambda path, mode: Truncating(real_open(path, mode)))
+    with pytest.raises(OSError):
+        snap.save(STRIPE, raw())
+    folder = snap.snapshot_dir("stripe")
+    assert list(folder.iterdir()) == [] and snap.list_snapshots("stripe") == []
+    monkeypatch.setattr(snap.gzip, "open", real_open)
+    path = snap.save(STRIPE, raw())
+    assert path is not None and [p.name for p in folder.iterdir()] == [path.name]
+
+
 def test_resolve_rejects_unknown_and_ambiguous_refs():
     snap.save(STRIPE, raw(), now=datetime(2026, 1, 1, tzinfo=timezone.utc))
     snap.save(STRIPE, raw(extra={"get": {}}), now=datetime(2026, 1, 2, tzinfo=timezone.utc))

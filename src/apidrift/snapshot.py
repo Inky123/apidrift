@@ -59,8 +59,14 @@ def save(provider: Provider, raw: bytes, now: datetime | None = None) -> Path | 
     folder = snapshot_dir(provider.name)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{stamp}_{safe_version}_{sha}{SUFFIX}"
-    with gzip.open(path, "wb") as fh:
-        fh.write(raw)
+    tmp = path.with_name(path.name + ".tmp")  # written whole, then renamed: a full disk never leaves a truncated snapshot
+    try:
+        with gzip.open(tmp, "wb") as fh:
+            fh.write(raw)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     return path
 
 

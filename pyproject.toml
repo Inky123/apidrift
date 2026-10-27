@@ -7,7 +7,13 @@ name = "apidrift"
 version = "0.1.0"
 description = "Detect breaking changes in third-party API specs before they break your integration"
 requires-python = ">=3.11"
-dependencies = ["httpx>=0.27"]
+dependencies = [
+    "httpx>=0.27",
+    "starlette>=0.40",
+    "uvicorn>=0.30",
+    "jinja2>=3.1",
+    "PyJWT[crypto]>=2.9",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
@@ -17,6 +23,9 @@ apidrift = "apidrift.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+apidrift = ["app/templates/*.html", "app/static/*", "app/demo.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

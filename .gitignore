@@ -6,3 +6,6 @@ __pycache__/
 *.egg-info/
 .env
 .claude-flow/
+.claude/launch.json
+build/
+dist/

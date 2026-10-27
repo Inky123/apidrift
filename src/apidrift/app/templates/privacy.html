@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Privacy</h1>
+
+<h2>What is accessed</h2>
+
+<p>When a check runs, apidrift downloads a snapshot of the repository's default branch through the GitHub API and reads it. It also reads repository metadata (name, default branch, whether Issues are enabled) and creates, updates or closes one issue. apidrift asks GitHub for three permissions, as its consent screen labels them: Metadata: read (GitHub requires it of every App), Contents: read, and Issues: read and write. Nothing else.</p>
+
+<h2>What is stored</h2>
+
+<p>The repository's id and name, the number of Stripe call sites scanned, the number affected, a hash of the finding set, and the issue number. Never file paths, never source code, never tokens: an installation token is held in memory for one check and is not logged.</p>
+
+<h2>When it is deleted</h2>
+
+<p>The snapshot is deleted at the end of every check, whether the check succeeded or failed. Everything the server at {{ host }} holds for an installation is deleted when the App is uninstalled.</p>
+
+<h2>How to uninstall</h2>
+
+<p>In GitHub, open <a href="https://github.com/settings/installations">Settings, Applications</a> (or the organization's settings), choose apidrift, and uninstall. Nothing else is needed.</p>
+
+<h2>Contact</h2>
+
+<p><a href="mailto:zachzap2@gmail.com">zachzap2@gmail.com</a></p>
+{% endblock %}

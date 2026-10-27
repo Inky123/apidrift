@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block masthead %}{% endblock %}
+{% block content %}
+<h1>apidrift</h1>
+<p class="lede">Stripe changed its API. This is the line in your code that breaks.</p>
+
+<h2>A real example</h2>
+
+<p>Stripe's <code>{{ demo.new_version }}</code> release removed <code>payment_method_types</code> from <a href="https://docs.stripe.com/api/payment_intents/create"><code>POST /v1/payment_intents</code></a> (<a href="https://docs.stripe.com/changelog">Stripe's changelog</a>). Run against Stripe's own sample repository, <a href="{{ demo.repo_url }}/tree/{{ demo.sha }}">{{ demo.repo }} at {{ demo.sha_short }}</a>, apidrift flags the {{ demo.findings|length }} servers that still send it, with a link to each line.</p>
+
+{% set possible = demo.findings | selectattr("certainty", "equalto", "possible") | list -%}
+<pre class="findings">Stripe {{ demo.new_version }} breaks {{ demo.findings|length }} Stripe call sites
+
+{% for f in demo.findings -%}
+<span class="finding"><b class="mark{{ ' possible' if f.certainty == 'possible' }}">{{ '?' if f.certainty == 'possible' else '!' }}</b> <a href="{{ f.url }}">{{ f.file }}:{{ f.line }}</a>
+<span class="detail"><span class="nowrap">{{ f.label }}</span>  via {{ f.call }}
+</span><span class="detail">[{{ f.change_kind }}] {{ f.change_message }}
+</span><span class="detail">why: {{ f.reason }}
+</span></span>
+{%- endfor %}
+{%- if possible %}
+<span class="legend"><b class="mark">!</b> affected   <b class="mark possible">?</b> possibly affected (arguments not visible to the scanner)</span>
+{%- endif %}</pre>
+
+<p>{{ demo.call_sites }} Stripe call sites were scanned; the {{ demo.unaffected }} that are unaffected are not reported.</p>
+
+<p>apidrift watches Stripe's published OpenAPI spec. When a release removes a field, retires an endpoint, or makes a new parameter required, it finds the call sites in your repository that send exactly that, and opens one issue with a link to each line. Nothing else: no digest of every change, no issue when you are unaffected.</p>
+
+<p><a class="button" href="{{ install_url }}">Install on GitHub</a></p>
+
+<p>Read access to code and permission to open issues; nothing else. apidrift downloads a snapshot of your default branch, reads it, and deletes it when the check ends. It never runs your code. It checks after each push to your default branch and whenever Stripe publishes a new spec.</p>
+
+<h2>How it works</h2>
+
+<ol>
+<li>Stripe publishes <a href="https://github.com/stripe/openapi"><code>spec3.sdk.json</code></a>; apidrift keeps every version{% if stripe_latest %} (the latest it holds is <code>{{ stripe_latest }}</code>){% endif %}.</li>
+<li>Each release is diffed against the one your code last passed.</li>
+<li>Your Python, JavaScript, TypeScript and Ruby are parsed for Stripe calls and the fields they send. Only the calls the diff touches are reported.</li>
+</ol>
+
+<h2>What it does not do yet</h2>
+
+<ul>
+<li>No fix pull requests. That is next.</li>
+<li>Stripe only.</li>
+<li>It does not read which API version your account is pinned to.</li>
+<li>Calls whose arguments it cannot see are marked <code>?</code> (possibly affected), not guessed.</li>
+<li>Other languages get endpoint-level matches from literal URLs only.</li>
+</ul>
+{% endblock %}

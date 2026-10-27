@@ -1,0 +1,80 @@
+# Runs at /opt/apidrift on the droplet. First boot, in this order:
+#   1. `apidrift app-setup` (anywhere) prints the registration values and the seven .env lines; write .env here.
+#   2. mkdir -p data/snapshots secrets; copy the App's .pem to secrets/app.pem
+#   3. seed the snapshots from the laptop:  scp -r data/snapshots/stripe apidrift:/opt/apidrift/data/snapshots/
+#   4. then hand everything to the container uid (after the seed, so nothing is root-owned):
+#        chown -R 10001:10001 data && chown 10001:10001 secrets/app.pem && chmod 400 secrets/app.pem
+#   5. docker compose up -d --build
+# Only 443 is published: port 80 belongs to the pinline project on the same host.
+x-app: &app
+  image: apidrift:latest
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    APIDRIFT_DATA: /data
+    APIDRIFT_GITHUB_PRIVATE_KEY_PATH: /secrets/app.pem
+  volumes:
+    - ./data:/data
+    - ./secrets/app.pem:/secrets/app.pem:ro
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  web:
+    <<: *app
+    build: .
+    command: ["apidrift", "serve", "--host", "0.0.0.0", "--port", "8000"]
+    pids_limit: 128
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  worker:
+    <<: *app
+    command: ["apidrift", "worker"]
+    mem_limit: 3g
+    pids_limit: 256
+    depends_on:
+      - web
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    environment:
+      APIDRIFT_HOST: ${APIDRIFT_HOST:-142-93-123-94.sslip.io}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    depends_on:
+      - web
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,68 @@
+{
+  "repo": "stripe-samples/accept-a-payment",
+  "repo_url": "https://github.com/stripe-samples/accept-a-payment",
+  "sha": "1a57c3b2f5aaf4ecd8de59ab0b1c3c5638827625",
+  "sha_short": "1a57c3b",
+  "old_version": "2026-08-26.dahlia",
+  "new_version": "2026-10-28.endive",
+  "call_sites": 39,
+  "unaffected": 35,
+  "findings": [
+    {
+      "file": "custom-payment-flow/server/node-typescript/src/server.ts",
+      "line": 145,
+      "url": "https://github.com/stripe-samples/accept-a-payment/blob/1a57c3b2f5aaf4ecd8de59ab0b1c3c5638827625/custom-payment-flow/server/node-typescript/src/server.ts#L145",
+      "method": "POST",
+      "path": "/v1/payment_intents",
+      "label": "POST /v1/payment_intents",
+      "call": "stripe.paymentIntents.create",
+      "language": "typescript",
+      "change_kind": "body_removed",
+      "change_message": "body field payment_method_types was removed",
+      "reason": "payment_method_types is sent here",
+      "certainty": "affected"
+    },
+    {
+      "file": "custom-payment-flow/server/node/server.js",
+      "line": 151,
+      "url": "https://github.com/stripe-samples/accept-a-payment/blob/1a57c3b2f5aaf4ecd8de59ab0b1c3c5638827625/custom-payment-flow/server/node/server.js#L151",
+      "method": "POST",
+      "path": "/v1/payment_intents",
+      "label": "POST /v1/payment_intents",
+      "call": "stripe.paymentIntents.create",
+      "language": "javascript",
+      "change_kind": "body_removed",
+      "change_message": "body field payment_method_types was removed",
+      "reason": "payment_method_types is sent here",
+      "certainty": "affected"
+    },
+    {
+      "file": "custom-payment-flow/server/python/server.py",
+      "line": 118,
+      "url": "https://github.com/stripe-samples/accept-a-payment/blob/1a57c3b2f5aaf4ecd8de59ab0b1c3c5638827625/custom-payment-flow/server/python/server.py#L118",
+      "method": "POST",
+      "path": "/v1/payment_intents",
+      "label": "POST /v1/payment_intents",
+      "call": "stripe.PaymentIntent.create",
+      "language": "python",
+      "change_kind": "body_removed",
+      "change_message": "body field payment_method_types was removed",
+      "reason": "payment_method_types is sent here",
+      "certainty": "affected"
+    },
+    {
+      "file": "custom-payment-flow/server/ruby/server.rb",
+      "line": 82,
+      "url": "https://github.com/stripe-samples/accept-a-payment/blob/1a57c3b2f5aaf4ecd8de59ab0b1c3c5638827625/custom-payment-flow/server/ruby/server.rb#L82",
+      "method": "POST",
+      "path": "/v1/payment_intents",
+      "label": "POST /v1/payment_intents",
+      "call": "Stripe::PaymentIntent.create",
+      "language": "ruby",
+      "change_kind": "body_removed",
+      "change_message": "body field payment_method_types was removed",
+      "reason": "payment_method_types is sent here",
+      "certainty": "affected"
+    }
+  ]
+}

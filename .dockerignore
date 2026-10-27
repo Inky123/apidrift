@@ -1,0 +1,16 @@
+.git
+.venv
+.env
+.env.*
+secrets/
+data/
+tests/
+.pytest_cache/
+.claude-flow/
+.claude/
+__pycache__/
+*.pyc
+*.egg-info/
+Dockerfile
+compose.yaml
+Caddyfile
