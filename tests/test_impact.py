@@ -116,3 +116,16 @@ def test_documentation_hits_are_listed_separately_and_not_counted():
     payload = json.loads(render_impact_json(result, impacts, "old", "new"))
     assert payload["call_sites"] == 1 and payload["documentation_matches"] == 1
     assert payload["summary"]["breaking"] == 1 and len(payload["impacts"]) == 2
+
+
+def test_a_call_that_sends_the_documented_replacement_has_migrated():
+    removed = change("body_removed", "payment_method_types", path="/v1/payment_intents")
+    migrated = usage({"allowed_payment_method_types", "amount"}, complete=False, path="/v1/payment_intents")
+    assert assess([migrated], [removed]) == []
+    still_old = usage({"payment_method_types"}, complete=False, path="/v1/payment_intents")
+    assert one([still_old], [removed]).certainty == AFFECTED
+    not_yet = usage({"amount"}, complete=False, path="/v1/payment_intents")
+    assert one([not_yet], [removed]).certainty == POSSIBLE
+    # the same field names at an endpoint outside the migration table change nothing
+    elsewhere = usage({"allowed_payment_method_types"}, complete=False, path="/v1/charges")
+    assert one([elsewhere], [change("body_removed", "payment_method_types")]).certainty == POSSIBLE

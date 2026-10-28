@@ -372,3 +372,14 @@ def test_unread_sentence_wording():
     assert unread_sentence({"C#": 2, "Go": 1, "PHP": 3}).startswith(
         "apidrift does not read C#, Go or PHP call sites yet: 2 C# files, 1 Go file and 3 PHP files mention Stripe"
     )
+
+
+def test_scan_text_matches_scan_repo_for_one_file_and_needs_no_filesystem(result):
+    from apidrift.scanner import scan_text
+
+    index = SdkIndex.build(load_spec(sdk_doc()))
+    usages, unresolved, unread = scan_text(JS, "pay.js", index)
+    assert usages == [u for u in result.usages if u.file == "pay.js"]
+    assert unresolved == [(f, line, call) for f, line, call in result.unresolved if f == "pay.js"] and unread is None
+    assert scan_text(GO, "x/main.go", index)[2] == "Go"
+    assert scan_text(README, "docs/x.md", index)[0][0].language == "doc"

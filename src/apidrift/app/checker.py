@@ -27,7 +27,7 @@ from ..openapi import Spec, load_spec
 from ..report import filter_changes
 from ..scanner import ScanResult, scan_repo
 from ..sdkmap import SdkIndex
-from . import db, issue
+from . import db, fixpr, issue
 from .checkout import ExtractError, extract_tarball
 from .config import Settings
 from .github import GitHubClient, GitHubError, RateLimited, TarballTooLarge, scrub
@@ -87,6 +87,7 @@ class LocalCheck:
     old_spec: Spec
     new_spec: Spec
     versions: list[str] = field(default_factory=list)
+    extra: dict = field(default_factory=dict)  # the fix plan (``--fix``): fixes, unfixable, pins, migrations, leftovers
 
     @property
     def old_label(self) -> str:
@@ -104,11 +105,15 @@ class LocalCheck:
         data = json.loads(render_impact_json(self.result, self.impacts, self.old_label, self.new_label))
         data["old_version"], data["new_version"] = self.old_spec.version, self.new_spec.version
         data["versions"] = self.versions
+        data.update(self.extra)
         return data
 
 
-def run_local(repo_dir: Path, old: str, new: str) -> LocalCheck:
-    """Diff two Stripe snapshots and cross the breaking changes with the call sites in ``repo_dir``."""
+def run_local(repo_dir: Path, old: str, new: str, fix: bool = False) -> LocalCheck:
+    """Diff two Stripe snapshots and cross the breaking changes with the call sites in ``repo_dir``.
+
+    With ``fix`` the documented renames are planned too (``fixer.plan_fixes``) and land in the payload.
+    """
     old_path, new_path = snap.resolve("stripe", old), snap.resolve("stripe", new)
     old_spec, new_spec = load_spec(snap.load(old_path)), load_spec(snap.load(new_path))
     index = SdkIndex.build(old_spec, new_spec)
@@ -118,7 +123,12 @@ def run_local(repo_dir: Path, old: str, new: str) -> LocalCheck:
     changes, versions = diff_chain([old_spec, *middle, new_spec])
     changes = filter_changes(changes, min_severity=BREAKING)
     result = scan_repo(Path(repo_dir), index)
-    return LocalCheck(result, assess(result.usages, changes), old_path, new_path, old_spec, new_spec, versions)
+    check = LocalCheck(result, assess(result.usages, changes), old_path, new_path, old_spec, new_spec, versions)
+    if fix:
+        from ..fixer import plan_fixes  # the child process only; imported here so the parent never loads it
+
+        check.extra = dict(plan_fixes(check.result, check.impacts, index, Path(repo_dir)).to_dict())
+    return check
 
 
 def _last_line(stderr: bytes) -> str:
@@ -127,13 +137,16 @@ def _last_line(stderr: bytes) -> str:
 
 
 def scan_subprocess(
-    tree: Path, old: str, new: str, data_dir: Path, max_mem_mb: int = DEFAULT_MAX_MEM_MB, timeout: int = SCAN_TIMEOUT
+    tree: Path, old: str, new: str, data_dir: Path, max_mem_mb: int = DEFAULT_MAX_MEM_MB, timeout: int = SCAN_TIMEOUT,
+    fix: bool = False,
 ) -> dict:
     """Run ``apidrift check --local`` on ``tree`` in an isolated child and return its JSON payload."""
     cmd = [
         sys.executable, "-I", "-m", "apidrift.cli", "check", "--local", str(tree), "--old", old, "--new", new,
         "--json", "--max-mem-mb", str(max_mem_mb),
     ]
+    if fix:
+        cmd.append("--fix")
     # A minimal environment: no webhook secret, app id or key path reaches the process that parses untrusted bytes.
     env = {key: os.environ[key] for key in CHILD_ENV_KEYS if key in os.environ}
     env["APIDRIFT_DATA"] = str(data_dir)
@@ -234,7 +247,8 @@ def _check(job: sqlite3.Row, conn: sqlite3.Connection, gh: GitHubClient, setting
     if meta.get("archived") or not meta.get("has_issues", True):
         db.update_repo(conn, repo["id"], last_result="skipped", last_checked_at=db.now())
         return "skipped: issues are disabled or the repository is archived"
-    sha = gh.branch_sha(token, full_name, str(meta.get("default_branch") or "main"))
+    default_branch = str(meta.get("default_branch") or "main")
+    sha = gh.branch_sha(token, full_name, default_branch)
     snaps = snapshots(settings.data)
     if not snaps:
         raise CheckError("no Stripe snapshot is stored yet")
@@ -247,12 +261,32 @@ def _check(job: sqlite3.Row, conn: sqlite3.Connection, gh: GitHubClient, setting
         work.mkdir(parents=True)
         size = gh.download_tarball(token, full_name, sha, work / "src.tgz", MAX_TARBALL_BYTES)
         tree = extract_tarball(work / "src.tgz", work / "tree")
-        payload = scan_subprocess(tree, baseline.name, latest.name, settings.data)
+        payload = scan_subprocess(tree, baseline.name, latest.name, settings.data, fix=True)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     logger.info("job %s (repo %s): tarball %d bytes, %s -> %s scanned in %.1f s",
                 job["id"], repo["id"], size, baseline.name, latest.name, time.monotonic() - started)
-    return _reconcile(conn, gh, settings, token, repo, full_name, sha, payload, latest)
+    outcome = _reconcile(conn, gh, settings, token, repo, full_name, sha, payload, latest)
+    return outcome + _fix_step(conn, gh, settings, token, repo, full_name, default_branch, sha, payload, latest)
+
+
+def _fix_step(
+    conn: sqlite3.Connection, gh: GitHubClient, settings: Settings, token: str, repo: sqlite3.Row,
+    full_name: str, default_branch: str, sha: str, payload: dict, latest: Path,
+) -> str:
+    """After the issue is settled: open or refresh the fix PR while the issue is open and the child planned fixes;
+    close the PR on a clean check. Never raises except RateLimited (fixpr records its own failures)."""
+    repo = db.get_repo(conn, repo["id"]) or repo
+    if not issue.breaking(payload):
+        note = fixpr.run_clean(conn, gh, repo, full_name, fixpr.clean_comment(sha))
+    elif repo["issue_state"] != "open" or repo["issue_number"] is None:
+        return ""
+    elif not payload.get("fixes"):  # findings remain but none the fixer can rename: an open PR has nothing left to do
+        note = fixpr.run_clean(conn, gh, repo, full_name, fixpr.gone_comment(sha))
+    else:  # the version names our snapshot, never the child's text: it steers the branch name and the title
+        version = version_of(latest)
+        note = fixpr.run_fix(conn, gh, settings, repo, full_name, default_branch, sha, payload, int(repo["issue_number"]), version, token)
+    return f"; pr: {note}" if note else ""
 
 
 def _baseline(name: str | None, snaps: list[Path]) -> Path:

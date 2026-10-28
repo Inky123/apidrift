@@ -35,8 +35,8 @@ def test_app_setup_lists_the_permissions_and_urls(no_config, monkeypatch, capsys
     out = capsys.readouterr().out
     for needle in (
         "https://apidrift.test/", "https://apidrift.test/installed", "Redirect on update",
-        "https://apidrift.test/github/webhook", "Webhook secret:", "Contents: Read-only", "Issues: Read and write",
-        "Metadata: Read-only", "Push only", "Any account", "APIDRIFT_GITHUB_APP_ID: MISSING", "private key: file not found",
+        "https://apidrift.test/github/webhook", "Webhook secret:", "Contents: Read and write", "Issues: Read and write",
+        "Pull requests: Read and write", "Metadata: Read-only", "Push only", "Any account", "APIDRIFT_GITHUB_APP_ID: MISSING", "private key: file not found",
     ):
         assert needle in out
 

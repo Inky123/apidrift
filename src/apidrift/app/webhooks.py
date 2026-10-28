@@ -104,6 +104,10 @@ def _installation(conn: sqlite3.Connection, payload: dict, data_dir: Path) -> li
     actions = [f"installation {installation_id} {action}"]
     actions += _add_repos(conn, installation_id, payload.get("repositories"), data_dir)
     if action == "new_permissions_accepted":
+        # the re-queued checks decide again whether a fix pull request can be opened
+        cleared = db.clear_fix_state(conn, installation_id, "needs_permissions")
+        if cleared:
+            actions.append(f"{cleared} repos may get a fix pull request now")
         for repo in db.active_repos(conn):
             if repo["installation_id"] == installation_id:
                 db.enqueue(conn, "check", repo["id"], "install")

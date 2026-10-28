@@ -111,9 +111,11 @@ def test_default_client_follows_redirects(settings):
 
 
 def test_revoke_token_deletes_the_installation_token(gh, fake):
-    fake.responses[("DELETE", "/installation/token")] = httpx.Response(204)
     gh.revoke_token(TOKEN)
     request = fake.requests[-1]
     assert (request.method, request.url.path, request.headers["authorization"]) == ("DELETE", "/installation/token", f"Bearer {TOKEN}")
-    with pytest.raises(GitHubError):  # the fake knows no such route without a canned answer: callers ignore this
+    gh.revoke_token(TOKEN)
+    assert fake.revoked == 2  # the fake counts revocations, so tests can check every minted token is given back
+    fake.responses[("DELETE", "/installation/token")] = httpx.Response(500, json={})
+    with pytest.raises(GitHubError):  # callers ignore this: the token expires within the hour anyway
         gh.revoke_token(TOKEN)

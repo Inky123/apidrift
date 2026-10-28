@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from .jsparse import Mask, Source
 
 NAME = r"[A-Za-z_$][\w$]*"
-TYPE_ANN = r"(?:\s*:\s*[\w.<>\[\]|, ]+?)?"
+TYPE_ANN = r"(?:[ \t]*:[ \t]*[\w.<>\[\]|, ]+?)?"  # a type annotation never crosses a newline (``default:`` is a label)
 CALL_ARGS = r"\((?:[^()]|\([^()]*\))*\)"
 NO_ASSIGN_OP = r"(?<![=!<>+\-*/%&|^])=(?![=>])"
 STRIPE_ROOTS = [
@@ -40,7 +40,11 @@ ARROW_NAME = re.compile(
     rf"(?:const|let|var)\s+({NAME}){TYPE_ANN}\s*=\s*(?:async\s*)?(?:{CALL_ARGS}|{NAME})\s*(?::[^=]*?)?\s*$"
 )
 RETURNS_CLIENT = re.compile(rf"\breturn\s+(?:(?P<new>new\s+Stripe\s*\()|(?:this\s*\.\s*)?(?P<name>{NAME})\b)")
-ASSIGN = re.compile(rf"(?<![\w$.])({NAME}){TYPE_ANN}\s*{NO_ASSIGN_OP}\s*")
+ASSIGN = re.compile(rf"(?<![\w$.])(?<!case )(?<!case\t)(?!(?:default|case)\b)({NAME}){TYPE_ANN}\s*{NO_ASSIGN_OP}\s*")
+COND_HEADS = {"if", "else", "for", "while", "do", "case", "default", "switch"}  # a body or label: the binding is conditional
+LOOP_HEADS = {"for", "while", "do"}
+RUBY_LOOP = re.compile(r"\b(?:each|each_with_index|each_with_object|map|loop|while|until|times|upto|downto|for)\b")
+PARAM_SPLIT = re.compile(r"\((?:[^()]|\([^()]*\))*\)")
 
 
 @dataclass(frozen=True)
@@ -54,6 +58,13 @@ class Binding:
 class Mutation:
     key: str | None  # the key written when it is visible (``params.x =``, ``params['x'] =``)
     literal: int | None  # ``{`` of an object merged in (``Object.assign(params, {...})``)
+    start: int = 0  # statement span in the original text
+    end: int = 0
+    key_start: int = 0  # span of the key name alone (no quotes or colon), when ``key`` is set
+    key_end: int = 0
+
+
+RUBY_WINDOW = re.compile(r"^[ \t]*(def|do|get|post|put|delete|patch)\b", re.M)
 
 
 class Scopes:
@@ -61,6 +72,7 @@ class Scopes:
 
     def __init__(self, src: Source, mask: Mask) -> None:
         self.functions: list[tuple[int, int, str | None]] = []  # (open brace, past close brace, name)
+        self.params: dict[int, set[str]] = {}  # open brace -> parameter names of that function
         if src.ruby:
             return
         text = src.text
@@ -72,7 +84,23 @@ class Scopes:
             if m.group("arrow"):
                 before = ARROW_NAME.search(text, max(0, m.start() - 200), m.start())
                 name = before.group(1) if before else None
+                head = _arrow_params(text, m.start())
+            else:
+                paren = text.find("(", m.start(), open_)
+                if paren < 0:
+                    head = ""
+                else:  # a default value may hold braces: ``function go(params = { a: 1 }) {``
+                    close = src.skip_balanced(paren)
+                    head = text[paren:close]
+                    body = text.find("{", close)
+                    if body > open_ and not mask.covers(body) and ";" not in text[close:body]:
+                        open_ = body
             self.functions.append((open_, src.skip_balanced(open_), name))
+            self.params[open_] = {n for n in re.findall(NAME, head) if n not in ("this", "new")}
+
+    def enclosing(self, pos: int) -> list[tuple[int, int, str | None]]:
+        """Functions whose body holds ``pos``, innermost first."""
+        return sorted((fn for fn in self.functions if fn[0] < pos < fn[1]), key=lambda fn: -fn[0])
 
     def innermost(self, pos: int) -> tuple[int, int, str | None] | None:
         best = None
@@ -108,15 +136,197 @@ class Bindings:
         return None
 
     def mutations(self, name: str, after: int, before: int) -> list[Mutation]:
-        """Writes into ``name`` between its literal and the call that uses it."""
+        """Writes into ``name`` between its literal and the call that uses it, in the call's own function."""
         out: list[Mutation] = []
-        for m in _mutation_re(name).finditer(self.src.text, after, before):
-            if self.mask.covers(m.start()):
-                continue
-            key = m.group("attr") or m.group("key") or m.group("sym")
-            literal = m.start("obj") if m.group("obj") else None
-            out.append(Mutation(key, literal))
+        for m in self._in_function(_mutation_re(name), after, before):
+            group = next((g for g in ("attr", "key", "sym") if m.group(g)), None)
+            key = m.group(group) if group else None
+            literal = next((m.start(g) for g in ("obj", "obj2") if m.group(g)), None)
+            key_start, key_end = (m.start(group), m.end(group)) if group else (0, 0)
+            out.append(Mutation(key, literal, m.start(), _statement_end(self.src, m.end()), key_start, key_end))
         return out
+
+    def touches(self, name: str, after: int, before: int) -> list[Mutation]:
+        """Reads, in-place operations and deletes of a key through ``name`` (``params.k.push(x)``,
+        ``delete params.k``, ``opts[:k] << x``): anything but a plain ``name.k = value`` write."""
+        out: list[Mutation] = []
+        for m in self._in_function(_touch_re(name), after, before):
+            group = next(g for g in ("attr", "key", "sym") if m.group(g))
+            out.append(Mutation(m.group(group), None, m.start(), m.end(), m.start(group), m.end(group)))
+        return out
+
+    def _in_function(self, pattern: re.Pattern[str], after: int, before: int):
+        """Matches between ``after`` and ``before`` outside strings, in the same innermost function as ``before``
+        (Ruby: inside the call's window)."""
+        if self.src.ruby:
+            after = max(after, self._ruby_window(before)[0])
+        fn = self.scopes.innermost(before)
+        for m in pattern.finditer(self.src.text, after, before):
+            if not self.mask.covers(m.start()) and self.scopes.innermost(m.start()) == fn:
+                yield m
+
+    def reaching(self, name: str, at: int) -> list[Binding]:
+        """Every binding of ``name`` that can be the one in force at ``at``, nearest first.
+
+        Walks the visible bindings backwards and stops after the first whose innermost enclosing
+        block also encloses the call and that is not the body of a brace-less ``if``/``else``/loop or a
+        ``case`` label: an unconditional rebinding earlier in the same block kills older ones, while
+        conditional bindings are all kept. Ruby has no block spans, so it takes the nearest binding plus
+        every other binding between the call and the previous line-start ``def``/``do``/route keyword.
+        Non-literal bindings are included so the caller sees that the value is not fully visible; a
+        synthetic one (``literal=None``) stands for a shadowing parameter or a rebinding later in an
+        enclosing loop, which make the value at the call unknowable here.
+        """
+        if self.src.ruby:
+            return self._reaching_ruby(name, at)
+        out: list[Binding] = []
+        dominator: Binding | None = None
+        for binding in reversed(self.by_name.get(name, ())):
+            if binding.pos >= at or not self.scopes.visible(binding.pos, at):
+                continue
+            out.append(binding)
+            block = self._innermost_block(binding.pos)
+            if block is not None and not (block[0] < at < block[1]):
+                continue
+            if _head_before(self.src.text, binding.pos) in COND_HEADS:
+                continue
+            dominator = binding
+            break
+        shadow = self._shadowing_parameter(name, at, dominator)
+        if shadow is not None or self._rebound_in_loop(name, at):
+            return [Binding(name, shadow if shadow is not None else at, None)]
+        return out
+
+    def _shadowing_parameter(self, name: str, at: int, dominator: Binding | None) -> int | None:
+        """Start of a function enclosing ``at`` whose parameter ``name`` is not rebound unconditionally before the call."""
+        bound_in = self.scopes.innermost(dominator.pos) if dominator is not None else None
+        for fn in self.scopes.enclosing(at):
+            if dominator is not None and fn == bound_in:
+                return None
+            if name in self.scopes.params.get(fn[0], ()):
+                return fn[0]
+        return None
+
+    def _rebound_in_loop(self, name: str, at: int) -> bool:
+        fn = self.scopes.innermost(at)
+        for binding in self.by_name.get(name, ()):
+            if binding.pos <= at or self.scopes.innermost(binding.pos) != fn:
+                continue
+            for open_, close, head in self._blocks_with_heads():
+                if head in LOOP_HEADS and open_ < at < close and open_ < binding.pos < close:
+                    return True
+        return False
+
+    def _reaching_ruby(self, name: str, at: int) -> list[Binding]:
+        window, keyword = self._ruby_window(at)
+        nearest = self.at(name, at)
+        if nearest is None:
+            return []
+        text = self.src.text
+        if keyword == "def":
+            line_end = text.find("\n", window)
+            head = text[window:line_end if line_end >= 0 else len(text)]
+            if name in set(re.findall(r"[A-Za-z_]\w*", head.split("def", 1)[1].split("(")[-1] if "(" in head else head.split("def", 1)[1].partition(" ")[2])):
+                return [Binding(name, window, None)]  # a parameter of this method
+            if nearest.pos < window:
+                return [Binding(name, window, None)]  # a local of another method
+        if RUBY_LOOP.search(text, window, at) and self._ruby_later_binding(name, at):
+            return [Binding(name, at, None)]
+        out = [nearest]
+        for binding in reversed(self.by_name.get(name, ())):
+            if window <= binding.pos < at and binding != nearest:
+                out.append(binding)
+        return out
+
+    def _ruby_window(self, at: int) -> tuple[int, str]:
+        starts = [(m.start(), m.group(1)) for m in RUBY_WINDOW.finditer(self.src.text, 0, at)]
+        return starts[-1] if starts else (0, "")
+
+    def _ruby_later_binding(self, name: str, at: int) -> bool:
+        nxt = RUBY_WINDOW.search(self.src.text, at)
+        limit = nxt.start() if nxt else self.src.n
+        return any(at < b.pos < limit for b in self.by_name.get(name, ()))
+
+    def _innermost_block(self, pos: int) -> tuple[int, int] | None:
+        best = None
+        for open_, close, _ in self._blocks_with_heads():
+            if open_ < pos < close and (best is None or open_ > best[0]):
+                best = (open_, close)
+        return best
+
+    def _blocks_with_heads(self) -> list[tuple[int, int, str | None]]:
+        if not hasattr(self, "_blocks"):
+            text = self.src.text
+            self._blocks = [
+                (i, self.src.skip_balanced(i), _head_before(text, i))
+                for i, c in enumerate(text) if c == "{" and not self.mask.covers(i)
+            ]
+        return self._blocks
+
+
+def _head_before(text: str, pos: int) -> str | None:
+    """The keyword that governs the statement or block starting at ``pos``: ``if`` for ``if (x) <here>``,
+    ``else``, ``for``, ``case`` for a ``case X:``/``default:`` label, else the preceding word or None."""
+    j = pos
+    while j > 0 and text[j - 1].isspace():
+        j -= 1
+    if j == 0:
+        return None
+    if text[j - 1] == ":":
+        return "case"
+    if text[j - 1] == ")":
+        depth, k = 0, j - 1
+        while k >= 0:
+            if text[k] == ")":
+                depth += 1
+            elif text[k] == "(":
+                depth -= 1
+                if depth == 0:
+                    break
+            k -= 1
+        if k < 0:
+            return None
+        j = k
+        while j > 0 and text[j - 1].isspace():
+            j -= 1
+    m = re.search(r"([A-Za-z_$][\w$]*)$", text[max(0, j - 40):j])
+    return m.group(1) if m else None
+
+
+def _arrow_params(text: str, arrow: int) -> str:
+    """The parameter list before a ``=>`` at ``arrow``: ``(a, b)`` or a bare name."""
+    j = arrow
+    while j > 0 and text[j - 1].isspace():
+        j -= 1
+    if j > 0 and text[j - 1] == ")":
+        depth, k = 0, j - 1
+        while k >= 0:
+            depth += (text[k] == ")") - (text[k] == "(")
+            if depth == 0:
+                return text[k:j]
+            k -= 1
+        return ""
+    m = re.search(rf"({NAME})$", text[max(0, j - 80):j])
+    return m.group(1) if m else ""
+
+
+def _statement_end(src: Source, i: int) -> int:
+    """Past the value of an assignment starting at ``i``: up to ``;`` or a closer; in Ruby a newline too."""
+    text = src.text
+    while i < src.n:
+        c = text[i]
+        if c == ";" or c in "})]" or (src.ruby and c == "\n"):
+            return i
+        if c in "\"'`":
+            i = src.skip_string(i)
+        elif c in "([{":
+            i = src.skip_balanced(i)
+        elif (src.ruby and c == "#") or (not src.ruby and text.startswith("//", i)):
+            end = text.find("\n", i)
+            i = src.n if end < 0 else end
+        else:
+            i += 1
+    return i
 
 
 def _mutation_re(name: str) -> re.Pattern[str]:
@@ -125,7 +335,16 @@ def _mutation_re(name: str) -> re.Pattern[str]:
         rf"(?<![\w$.:]){n}\s*(?:\.\s*(?P<attr>{NAME})|\[\s*(?:['\"](?P<key>[\w$]+)['\"]|:(?P<sym>\w+)|[^\]]*)\s*\])"
         rf"(?:\s*(?:\.\s*{NAME}|\[[^\]]*\]))*\s*{NO_ASSIGN_OP}"
         rf"|Object\.assign\(\s*{n}\s*,\s*(?P<obj>\{{)?"
-        rf"|(?<![\w$.:]){n}\s*\.\s*(?:merge!|update|store|deep_merge!)\b"
+        rf"|(?<![\w$.:]){n}\s*\.\s*(?:merge!|deep_merge!|(?:update|store)\b)(?:\s*\(\s*(?P<obj2>\{{))?"
+    )
+
+
+def _touch_re(name: str) -> re.Pattern[str]:
+    """``name.k`` / ``name['k']`` / ``name[:k]`` not followed by a plain ``=``: a read, in-place op, deeper write or delete."""
+    n = re.escape(name)
+    return re.compile(
+        rf"(?<![\w$.:]){n}\s*(?:\.\s*(?P<attr>{NAME})|\[\s*(?:['\"](?P<key>[\w$]+)['\"]|:(?P<sym>\w+))\s*\])"
+        rf"(?!\s*{NO_ASSIGN_OP})(?!\s*\()"
     )
 
 

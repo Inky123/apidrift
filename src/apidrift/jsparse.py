@@ -40,10 +40,31 @@ CLOSERS = set(OPENERS.values())
 QUOTES = "\"'`"
 
 
+@dataclass(frozen=True)
+class Span:
+    """Where a key sits in the ORIGINAL text (``Source`` rewrites are length-preserving).
+
+    ``kind``: quoted (``'k':``), bare (``k:``), shorthand (``{ k }``), symbol (``:k =>``) or
+    rocket_quoted (``"k" =>``). ``key_start``/``key_end`` cover the key token including quotes or the
+    leading colon; ``entry_end`` is the index of the comma or closer after the value.
+    """
+
+    key_start: int
+    key_end: int
+    entry_end: int
+    kind: str
+
+
 @dataclass
 class Fields:
     paths: set[str] = field(default_factory=set)
     complete: bool = True
+    spans: dict[str, list[Span]] = field(default_factory=dict)
+
+    def add(self, path: str, span: Span | None = None) -> None:
+        self.paths.add(path)
+        if span is not None:
+            self.spans.setdefault(path, []).append(span)
 
 
 @dataclass
@@ -207,14 +228,17 @@ class Source:
                 i = self.skip_scalar(i + 1) if i < self.n and text[i] == ":" else i
                 continue
             key: str | None = None
+            key_start, kind = i, "bare"
             if c in "'\"":
                 key, i = self.read_string(i)
+                kind = "quoted"
             elif c == "`":
                 out.complete = False
                 i = self.skip_string(i)
             elif self.ruby and c == ":":
                 m = IDENT.match(text, i + 1)
                 key, i = (m.group(0), m.end()) if m else (None, i + 1)
+                kind = "symbol"
             else:
                 m = IDENT.match(text, i)
                 if not m:
@@ -222,9 +246,11 @@ class Source:
                     i = self.skip_scalar(i + 1)
                     continue
                 key, i = m.group(0), m.end()
+            key_end = i
             i = self.skip_space(i)
             if text.startswith("=>", i):
                 sep = 2
+                kind = "rocket_quoted" if kind == "quoted" else kind
             elif i < self.n and text[i] == ":" and not text.startswith("::", i):
                 sep = 1
             else:
@@ -234,8 +260,11 @@ class Source:
                     i = self.skip_space(self.skip_balanced(i))
                     if i < self.n and text[i] == "{":
                         i = self.skip_balanced(i)
-                elif key is not None:  # shorthand property { amount, currency }
-                    out.paths.add(prefix + key)
+                elif key is not None and kind == "bare":  # shorthand property { amount, currency }
+                    i = self.skip_scalar(i)
+                    out.add(prefix + key, Span(key_start, key_end, i, "shorthand"))
+                elif key is not None:
+                    out.add(prefix + key)
                     i = self.skip_scalar(i)
                 else:
                     i = self.skip_scalar(i)
@@ -244,8 +273,8 @@ class Source:
                 i = self.skip_scalar(i + sep)
                 continue
             path = prefix + key
-            out.paths.add(path)
             i = self.value(i + sep, path, out)
+            out.add(path, Span(key_start, key_end, i, kind))
         return i
 
     def value(self, i: int, path: str, out: Fields) -> int:
@@ -304,18 +333,42 @@ def eligible(chain: list[str], roots: set[str]) -> bool:
     return any(part in ("v1", "v2") for part in chain[1:-1])  # client.v1.payment_intents.create
 
 
+@dataclass
+class Call:
+    """One resolved SDK call before its arguments are read: what the fixer walks to find edit sites."""
+
+    line: int
+    call: str
+    resolved: Resolved
+    pos: int  # index of the call's ``(`` (or the first argument of a paren-less Ruby call)
+    args_src: Source  # the source the argument spans index into (a copy for paren-less Ruby calls)
+    spans: list[tuple[int, int]]
+    bindings: jsroots.Bindings
+
+
 def extract(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> tuple[list[Found], list[tuple[int, str]]]:
     """Stripe SDK calls in a JS/TS/Ruby source, plus (line, call) pairs that matched no endpoint.
 
     ``resolve`` maps a call chain to a :class:`Resolved` operation (defaults to ``index.resolve``).
     """
+    found: list[Found] = []
+    resolved_calls, unresolved = calls(text, index, ruby=ruby, resolve=resolve)
+    for c in resolved_calls:
+        fields = Fields()
+        collect(c.args_src, c.spans, "{" in c.resolved.path, c.bindings, fields, ruby=ruby)
+        found.append(Found(c.line, c.call, c.resolved, fields))
+    return found, unresolved
+
+
+def calls(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> tuple[list[Call], list[tuple[int, str]]]:
+    """Resolved SDK calls with their argument spans, plus the (line, call) pairs that matched no endpoint."""
     src = Source(text, ruby=ruby)
     mask = Mask(src.text, ruby=ruby)
     scopes = jsroots.Scopes(src, mask)
     roots = jsroots.stripe_roots(src, mask, scopes)
     bindings = jsroots.Bindings(src, mask, scopes)
     resolve = resolve or index.resolve
-    found: list[Found] = []
+    found: list[Call] = []
     unresolved: list[tuple[int, str]] = []
     for m in (RUBY_CALL if ruby else JS_CALL).finditer(src.text):
         if mask.covers(m.start()):
@@ -332,15 +385,13 @@ def extract(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> 
         if resolved is None:
             unresolved.append((line, call))
             continue
-        fields = Fields()
         if ruby and m.group(2) is None:  # Stripe::PaymentIntent.create amount: 1, currency: 'usd'
             end = src.line_end(m.end())
             args_src = Source(src.text[:end] + ")", ruby=True)
             spans = args_src.args(m.end() - 1)
         else:
             args_src, spans = src, src.args(m.end() - 1)
-        collect(args_src, spans, "{" in resolved.path, bindings, fields, ruby=ruby)
-        found.append(Found(line, call, resolved, fields))
+        found.append(Call(line, call, resolved, m.end() - 1, args_src, spans, bindings))
     return found, unresolved
 
 
@@ -406,4 +457,6 @@ def merge(out: Fields, sub: Fields) -> None:
     if top and top <= OPTION_KEYS:
         return
     out.paths |= sub.paths
+    for path, spans in sub.spans.items():
+        out.spans.setdefault(path, []).extend(spans)
     out.complete = out.complete and sub.complete

@@ -38,6 +38,10 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     p_check.add_argument(
         "--max-mem-mb", type=int, default=DEFAULT_MAX_MEM_MB, help="with --local: RLIMIT_AS cap on Linux; 0 for none"
     )
+    p_check.add_argument(
+        "--fix", action="store_true",
+        help="with --local: also plan the documented renames (fixes, unfixable, pins, migrations, leftovers in the JSON)",
+    )
     p_check.set_defaults(func=cmd_check)
 
     p_status = sub.add_parser("status", help="installations, repos, issues, recent jobs and the last Stripe poll")
@@ -127,7 +131,7 @@ def _check_local(args: argparse.Namespace) -> int:
     limit_memory(args.max_mem_mb)  # first action of the sandboxed child; a no-op off Linux
     # No load_dotenv here: the sandboxed child only needs APIDRIFT_DATA, which the parent passes in its environment,
     # and it must not read the App's secrets from a .env in the cwd.
-    check = run_local(Path(args.local), args.old, args.new)
+    check = run_local(Path(args.local), args.old, args.new, fix=args.fix)
     if args.json:
         print(json.dumps(check.payload(), indent=2))
     else:
@@ -154,6 +158,7 @@ def render_status(summary: dict, hours: int = 24) -> str:
     repos = summary["repos"] or {}
     lines.append("repos: " + (", ".join(f"{n} {state}" for state, n in sorted(repos.items())) or "none"))
     lines.append(f"open issues: {summary['open_issues']}")
+    lines.append(f"open pull requests: {summary.get('open_prs', 0)}")
     jobs = summary["jobs"]
     lines.append(f"jobs (last {hours} h): {jobs['queued']} queued, {jobs['running']} running, {jobs['done']} done, {jobs['failed']} failed")
     for err in summary["job_errors"]:
@@ -174,8 +179,9 @@ def cmd_app_setup(args: argparse.Namespace) -> int:
     print(f"  Webhook URL:          {base}/github/webhook   (webhook active)")
     print(f"  Webhook secret:       {secrets.token_hex(32)}   (generated now; if .env already has one, keep that)")
     print("  Repository permissions:")
-    print("    Contents: Read-only")
+    print("    Contents: Read and write   (the fix branch; the default branch is never written)")
     print("    Issues: Read and write")
+    print("    Pull requests: Read and write")
     print("    Metadata: Read-only (granted automatically)")
     print("  Subscribe to events:  Push only (installation events reach every App automatically)")
     print("  Where can it be installed: Any account")

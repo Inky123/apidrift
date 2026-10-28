@@ -25,8 +25,9 @@ ISSUE_STATES = ("open", "closed_by_us", "closed_by_user")
 REPO_FIELDS = frozenset({
     "installation_id", "full_name", "baseline", "last_sha", "last_result", "last_checked_at",
     "issue_number", "issue_state", "issue_fingerprint", "issue_items", "issue_body_sha", "issue_version", "gone",
-    "unread_issue",
+    "unread_issue", "pr_number", "pr_branch", "pr_head_sha", "pr_pending_sha", "pr_fingerprint", "pr_items", "fix_state",
 })
+# fix_state: NULL | needs_permissions | open | merged | declined | diverged | failed (no CHECK: states will grow)
 META_KEYS = ("last_poll_at", "last_poll_status", "latest_snapshot")
 
 MIGRATIONS: list[str] = [
@@ -87,6 +88,19 @@ MIGRATIONS: list[str] = [
     # the one-time "apidrift cannot read <language> here yet" issue, so it is never posted twice
     """
     ALTER TABLE repos ADD COLUMN unread_issue INTEGER;
+    """,
+    # the fix pull request: its number, branch, the commit apidrift last pushed, what it fixed, and where it stands
+    """
+    ALTER TABLE repos ADD COLUMN pr_number INTEGER;
+    ALTER TABLE repos ADD COLUMN pr_branch TEXT;
+    ALTER TABLE repos ADD COLUMN pr_head_sha TEXT;
+    ALTER TABLE repos ADD COLUMN pr_fingerprint TEXT;
+    ALTER TABLE repos ADD COLUMN pr_items TEXT;
+    ALTER TABLE repos ADD COLUMN fix_state TEXT;
+    """,
+    # the commit apidrift built but has not yet confirmed on the branch (a failed ref update must not read as "diverged")
+    """
+    ALTER TABLE repos ADD COLUMN pr_pending_sha TEXT;
     """,
 ]
 
@@ -285,6 +299,16 @@ def update_repo(conn: sqlite3.Connection, repo_id: int, **fields: object) -> Non
         )
 
 
+def clear_fix_state(conn: sqlite3.Connection, installation_id: int, state: str) -> int:
+    """Forget ``fix_state == state`` on every repo of an installation (e.g. once it accepts write permissions)."""
+    with write(conn):
+        cursor = conn.execute(
+            "UPDATE repos SET fix_state = NULL, updated_at = ? WHERE installation_id = ? AND fix_state = ?",
+            (now(), installation_id, state),
+        )
+    return cursor.rowcount
+
+
 # --- jobs ---------------------------------------------------------------------
 
 
@@ -451,6 +475,7 @@ def status_summary(conn: sqlite3.Connection, hours: int = 24) -> dict:
     ):
         repos[row["state"]] = row["n"]
     open_issues = conn.execute("SELECT count(*) AS n FROM repos WHERE issue_state = 'open'").fetchone()["n"]
+    open_prs = conn.execute("SELECT count(*) AS n FROM repos WHERE fix_state = 'open'").fetchone()["n"]
     jobs = {"queued": 0, "running": 0, "done": 0, "failed": 0}
     errors: list[dict] = []
     for job in recent_jobs(conn, hours):
@@ -459,5 +484,5 @@ def status_summary(conn: sqlite3.Connection, hours: int = 24) -> dict:
             errors.append({"id": job["id"], "repo_id": job["repo_id"], "status": job["status"], "error": job["error"]})
     return {
         "installations": installations, "suspended_installations": suspended, "repos": repos,
-        "open_issues": open_issues, "jobs": jobs, "job_errors": errors, **all_meta(conn),
+        "open_issues": open_issues, "open_prs": open_prs, "jobs": jobs, "job_errors": errors, **all_meta(conn),
     }

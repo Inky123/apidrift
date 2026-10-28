@@ -151,25 +151,35 @@ def scan_repo(root: Path, index: SdkIndex) -> ScanResult:
         if not STRIPE_HINT.search(text):
             continue
         scanned += 1
-        rel = path.relative_to(base).as_posix()
-        reads = _reads(text)
-        language = LANGUAGES.get(path.suffix.lower())
-        found: list[Usage] = []
-        if language == "python":
-            found, missing = _scan_python(text, rel, index, reads)
-        elif language:
-            found, missing = _scan_dynamic(text, rel, index, reads, language)
-        else:
-            missing = []
-            name = UNREAD_LANGUAGES.get(path.suffix.lower())
-            if name:
-                unread[name] = unread.get(name, 0) + 1
+        found, missing, unread_name = scan_text(text, path.relative_to(base).as_posix(), index)
+        if unread_name:
+            unread[unread_name] = unread.get(unread_name, 0) + 1
         unresolved += missing
-        url_language = "doc" if _doc_like(rel, path.suffix.lower()) else "http"
-        found += _scan_urls(text, rel, index, reads, {u.line for u in found}, url_language)
         usages += found
     usages.sort(key=lambda u: (u.file, u.line, u.path))
     return ScanResult(str(root), usages, scanned, unresolved, skipped_files, skipped_dirs, dict(sorted(unread.items())))
+
+
+def scan_text(text: str, rel: str, index: SdkIndex) -> tuple[list[Usage], list[tuple[str, int, str]], str | None]:
+    """Usages and unresolved calls of one file's text at repo-relative path ``rel``, with no filesystem.
+
+    The third item names the language when the file is in one the scanner cannot parse yet (else None).
+    """
+    suffix = os.path.splitext(rel)[1].lower()
+    reads = _reads(text)
+    language = LANGUAGES.get(suffix)
+    found: list[Usage] = []
+    unread_name: str | None = None
+    if language == "python":
+        found, missing = _scan_python(text, rel, index, reads)
+    elif language:
+        found, missing = _scan_dynamic(text, rel, index, reads, language)
+    else:
+        missing = []
+        unread_name = UNREAD_LANGUAGES.get(suffix)
+    url_language = "doc" if _doc_like(rel, suffix) else "http"
+    found += _scan_urls(text, rel, index, reads, {u.line for u in found}, url_language)
+    return found, missing, unread_name
 
 
 def unread_sentence(unread: dict[str, int]) -> str:

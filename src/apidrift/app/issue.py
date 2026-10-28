@@ -347,3 +347,18 @@ def _render_groups(lines: list[str], groups: list[dict], budget: int) -> int:
             shown += 1
         lines += tail
     return shown
+
+
+# What the child may name in a fix: a Stripe field, a Stripe path, a method, a version. Anything else is dropped
+# before it reaches a commit message or a title, and rendered in code spans everywhere else.
+FIELD_RE = re.compile(r"[a-z0-9_]{1,80}")
+PATH_RE = re.compile(r"/v[12](?:/[a-z0-9_{}]+)+")
+METHOD_RE = re.compile(r"get|post|delete")
+VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def render_pr(*args, **kwargs) -> tuple[str, str]:
+    """The pull request body lives in :mod:`prbody` (which builds on this module); forwarded for convenience."""
+    from .prbody import render_pr as render
+
+    return render(*args, **kwargs)

@@ -13,6 +13,7 @@ import json
 import re
 from dataclasses import dataclass
 
+from . import migrations
 from .diff import BREAKING, INFO, SEVERITY_RANK, WARNING, Change
 from .scanner import ScanResult, Usage, unread_sentence
 
@@ -114,9 +115,18 @@ def _request_impact(change: Change, usage: Usage) -> Impact | None:
         return None
     if use == OPAQUE:
         return Impact(usage, change, POSSIBLE, f"{parent} is sent here but its contents are not visible")
-    if usage.complete:
+    if usage.complete or _migrated(change, usage, action):
         return None
     return Impact(usage, change, POSSIBLE, "arguments are not fully visible at this call")
+
+
+def _migrated(change: Change, usage: Usage, action: str) -> bool:
+    """The call does not send a removed field but does send its documented replacement: it has migrated,
+    so the fields that are not visible are not assumed to still carry the old name."""
+    if action != "removed":
+        return False
+    migration = migrations.lookup(change)
+    return migration is not None and migration.replacement in usage.fields
 
 
 def _required_impact(change: Change, usage: Usage, target: str, parent: str, use: str) -> Impact | None:

@@ -1,4 +1,4 @@
-"""Command-line entry point: ``apidrift snapshot | list | diff | scan | impact``."""
+"""Command-line entry point: ``apidrift snapshot | list | diff | scan | impact | fix``."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path
 from . import snapshot as snap
 from .app.commands import add_parsers as add_app_parsers
 from .diff import BREAKING, Change, diff_chain
+from .fixer import plan_fixes, render_fix_text
 from .impact import assess, render_impact_json, render_impact_text
 from .openapi import Spec, load_spec
 from .providers import PROVIDERS, get_provider
@@ -116,6 +117,20 @@ def cmd_impact(args: argparse.Namespace) -> int:
     return 1 if any(i.severity == BREAKING and i.usage.language != "doc" for i in impacts) else 0
 
 
+def cmd_fix(args: argparse.Namespace) -> int:
+    """Dry run of the documented renames: unified diffs, API-version pins and what is left for a person."""
+    old_path, old_spec = _spec(args.provider, args.old)
+    new_path, new_spec = _spec(args.provider, args.new)
+    index = SdkIndex.build(old_spec, new_spec)
+    _require_sdk(index, args.provider)
+    changes, _ = _changes(args.provider, old_path, old_spec, new_path, new_spec)
+    changes = filter_changes(changes, min_severity=BREAKING)
+    result = scan_repo(Path(args.repo), index)
+    plan = plan_fixes(result, assess(result.usages, changes), index, Path(args.repo))
+    print(json.dumps(plan.to_dict(), indent=2) if args.json else render_fix_text(plan, result.root))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="apidrift", description="Detect breaking changes in third-party API specs.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -155,6 +170,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_imp.add_argument("--all", action="store_true", help="also list call sites the upgrade does not hit")
     p_imp.add_argument("--json", action="store_true", help="emit JSON instead of text")
     p_imp.set_defaults(func=cmd_impact)
+
+    p_fix = sub.add_parser("fix", help="dry run: show the documented renames that would fix the breaking call sites")
+    p_fix.add_argument("repo", help="directory (or single file) to scan; nothing is written")
+    p_fix.add_argument("--provider", choices=providers, default="stripe")
+    p_fix.add_argument("--old", default="previous", help="file path, snapshot name or prefix, or 'previous' (default)")
+    p_fix.add_argument("--new", default="latest", help="file path, snapshot name or prefix, or 'latest' (default)")
+    p_fix.add_argument("--json", action="store_true", help="emit the fix plan as JSON instead of diffs")
+    p_fix.set_defaults(func=cmd_fix)
 
     add_app_parsers(sub)  # serve, worker, check, app-setup (the GitHub App)
     return parser
