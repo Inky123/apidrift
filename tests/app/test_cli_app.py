@@ -1,9 +1,10 @@
 import json
+import logging
 
 import pytest
 from conftest import NEW_VERSION, REPO, SECRET, install_payload
 
-from apidrift.app import db
+from apidrift.app import commands, db
 from apidrift.app.checker import run_local
 from apidrift.app.config import REQUIRED
 from apidrift.app.webhooks import handle_event
@@ -119,3 +120,80 @@ def test_check_job_runs_the_claimed_job_in_process(configured, fake, capsys):
     with pytest.raises(SystemExit, match="is not queued"):
         main(["check", "--job", "999"])
     conn.close()
+
+
+def test_check_local_never_reads_a_dotenv(data_dir, monkeypatch, tmp_path, capsys):
+    """The sandboxed child gets APIDRIFT_DATA from its parent; a .env in the cwd must stay unread."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("APIDRIFT_GITHUB_WEBHOOK_SECRET=hunter2\nAPIDRIFT_DATA=/nonexistent\n")
+    monkeypatch.delenv("APIDRIFT_GITHUB_WEBHOOK_SECRET", raising=False)
+    monkeypatch.setattr(commands, "load_dotenv", lambda *a, **k: pytest.fail("_check_local called load_dotenv"))
+    assert main(["check", "--local", str(REPO), "--json", "--max-mem-mb", "0"]) == 1
+    assert json.loads(capsys.readouterr().out)["new_version"] == NEW_VERSION
+    import os
+    assert "APIDRIFT_GITHUB_WEBHOOK_SECRET" not in os.environ
+
+
+def test_serve_and_worker_still_load_dotenv(no_config, monkeypatch, tmp_path, settings):
+    lines = [
+        f"APIDRIFT_GITHUB_APP_ID={settings.github_app_id}", f"APIDRIFT_GITHUB_APP_SLUG={settings.github_app_slug}",
+        f"APIDRIFT_GITHUB_WEBHOOK_SECRET={SECRET}", f"APIDRIFT_GITHUB_PRIVATE_KEY_PATH={settings.github_private_key_path}",
+        f"APIDRIFT_DATA={settings.data}",
+    ]
+    (tmp_path / ".env").write_text("\n".join(lines) + "\n")
+    seen = {}
+    monkeypatch.setattr("apidrift.app.worker.loop", lambda s, once=False: seen.update(data=s.data, once=once))
+    assert main(["worker", "--once"]) == 0 and seen == {"data": settings.data, "once": True}
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: seen.update(port=kw["port"]))
+    assert main(["serve", "--port", "8123"]) == 0 and seen["port"] == 8123
+
+
+def test_healthz_probes_are_filtered_from_the_access_log():
+    keep = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d', ("1.2.3.4:1", "GET", "/", "1.1", 200), None)
+    drop = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d', ("10.0.0.1:2", "GET", "/healthz", "1.1", 200), None)
+    assert commands.HealthzFilter().filter(keep) and not commands.HealthzFilter().filter(drop)
+
+
+def test_check_stale_queues_repos_behind_the_latest_snapshot(configured, fake, capsys):
+    conn = db.connect(configured.db_path)
+    db.migrate(conn)
+    handle_event(conn, "installation", "d-1", install_payload(fake), configured.data)
+    db.finish_job(conn, db.claim_job(conn)["id"], "failed", "gave up")
+    db.upsert_repo(conn, 502, 77, "octo/fresh", None)
+    db.update_repo(conn, 502, last_checked_at=db.now())
+    assert main(["check", "--stale"]) == 0
+    assert "queued 1 checks for stale repositories" in capsys.readouterr().out
+    assert [(j["repo_id"], j["reason"]) for j in db.queued_jobs(conn)] == [(501, "release")]
+    conn.close()
+
+
+def test_status_prints_counts_jobs_and_the_last_poll(configured, fake, capsys):
+    conn = db.connect(configured.db_path)
+    db.migrate(conn)
+    handle_event(conn, "installation", "d-1", install_payload(fake), configured.data)
+    db.upsert_repo(conn, 502, 77, "octo/other", None)
+    db.update_repo(conn, 501, issue_state="open", last_result="findings")
+    db.update_repo(conn, 502, last_result="too_large")
+    db.finish_job(conn, db.claim_job(conn)["id"], "failed", "tarball exceeds the cap")
+    db.enqueue(conn, "check", 502, "manual")
+    db.set_meta(conn, last_poll_at="2026-10-27T12:00:00Z", last_poll_status="304", latest_snapshot="snap.json.gz")
+    summary = db.status_summary(conn)
+    assert summary["installations"] == 1 and summary["repos"] == {"findings": 1, "too_large": 1}
+    assert summary["open_issues"] == 1 and summary["jobs"] == {"queued": 1, "running": 0, "done": 0, "failed": 1}
+    assert summary["job_errors"] == [{"id": 1, "repo_id": 501, "status": "failed", "error": "tarball exceeds the cap"}]
+    assert summary["last_poll_status"] == "304" and summary["latest_snapshot"] == "snap.json.gz"
+    conn.close()
+    assert main(["status"]) == 0
+    out = capsys.readouterr().out
+    for needle in (
+        "installations: 1 active, 0 suspended", "repos: 1 findings, 1 too_large", "open issues: 1",
+        "jobs (last 24 h): 1 queued, 0 running, 0 done, 1 failed", "job 1 repo 501 failed: tarball exceeds the cap",
+        "last poll: 2026-10-27T12:00:00Z (304)", "latest snapshot: snap.json.gz",
+    ):
+        assert needle in out, needle
+
+
+def test_status_on_an_empty_database(configured, capsys):
+    assert main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "repos: none" in out and "last poll: never (no status)" in out and "latest snapshot: none" in out

@@ -27,6 +27,7 @@ class Param:
     type: str
     enum: tuple[str, ...] | None = None
     deprecated: bool = False
+    open_enum: bool = False  # Stripe marks enums it will extend or not validate; they do not bind clients
 
     @property
     def key(self) -> str:
@@ -40,6 +41,7 @@ class Field:
     required: bool
     enum: tuple[str, ...] | None = None
     deprecated: bool = False
+    open_enum: bool = False
 
 
 @dataclass
@@ -151,6 +153,15 @@ def _enum_of(schema: Any) -> tuple[str, ...] | None:
     return None
 
 
+def _open_enum(schema: Any) -> bool:
+    """True for an enum Stripe documents as open-ended (``x-stripeEnum.kind == "open"``) or does not validate."""
+    if not isinstance(schema, dict):
+        return False
+    meta = schema.get("x-stripeEnum")
+    kind = meta.get("kind") if isinstance(meta, dict) else None
+    return kind == "open" or bool(schema.get("x-stripeBypassValidation"))
+
+
 def _object_like(schema: Any) -> dict | None:
     """Return the schema whose properties should be flattened, if there is exactly one."""
     if not isinstance(schema, dict):
@@ -181,6 +192,7 @@ def flatten(schema: Any, prefix: str = "", depth: int = 0) -> dict[str, Field]:
             required=name in required,
             enum=_enum_of(sub),
             deprecated=bool(sub.get("deprecated", False)),
+            open_enum=_open_enum(sub),
         )
         child, child_prefix = sub, f"{path}."
         if sub.get("type") == "array" and isinstance(sub.get("items"), dict):
@@ -235,6 +247,7 @@ def _params(raw: list, components: dict) -> dict[str, Param]:
             type=_type_of(schema),
             enum=_enum_of(schema),
             deprecated=bool(item.get("deprecated", False)),
+            open_enum=_open_enum(schema),
         )
         out[param.key] = param
     return out

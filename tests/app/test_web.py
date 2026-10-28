@@ -36,11 +36,11 @@ def deliveries(conn):
 
 
 @needs_template("landing.html")
-def test_landing_renders_the_four_demo_findings(client):
+def test_landing_renders_every_demo_finding(client):
     response = client.get("/")
     assert response.status_code == 200 and "text/html" in response.headers["content-type"]
     demo = load_demo()
-    assert len(demo["findings"]) == 4
+    assert len(demo["findings"]) >= 4
     for finding in demo["findings"]:
         assert finding["file"] in response.text
     assert "/install" in response.text
@@ -59,6 +59,20 @@ def test_privacy_page(client):
 
 
 # --- plumbing -------------------------------------------------------------------
+
+
+def test_robots_txt_allows_everything(client):
+    response = client.get("/robots.txt")
+    assert response.status_code == 200 and response.headers["content-type"].startswith("text/plain")
+    assert response.text == "User-agent: *\nAllow: /\n"
+
+
+@needs_template("privacy.html")
+def test_each_page_gets_its_own_description(client):
+    landing, privacy = client.get("/").text, client.get("/privacy").text
+    assert '<meta name="description" content="Stripe changed its API.' in landing
+    assert '<meta name="description" content="What apidrift reads, stores and deletes when it checks a repository.">' in privacy
+    assert '<meta property="og:title" content="Privacy">' in privacy
 
 
 def test_healthz_reports_the_latest_stripe_version(client):

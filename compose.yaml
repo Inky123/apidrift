@@ -23,7 +23,12 @@ x-app: &app
     - ./secrets/app.pem:/secrets/app.pem:ro
   read_only: true
   tmpfs:
-    - /tmp
+    - /tmp:size=256m
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
   cap_drop:
     - ALL
   security_opt:
@@ -35,6 +40,7 @@ services:
     container_name: apidrift-web
     build: .
     command: ["apidrift", "serve", "--host", "0.0.0.0", "--port", "8000"]
+    mem_limit: 512m
     pids_limit: 128
     expose:
       - "8000"

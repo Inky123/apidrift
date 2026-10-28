@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>{{ title }}</title>
+{%- set page_description = description or "Stripe changed its API. apidrift opens one GitHub issue that links to the line in your code that breaks." %}
+<meta name="description" content="{{ page_description }}">
+<meta property="og:title" content="{{ title }}">
+<meta property="og:description" content="{{ page_description }}">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23a83a2a'/%3E%3Cpath d='M3 5.5h7M6 10.5h7' fill='none' stroke='%23faf9f6' stroke-width='2'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -13,7 +19,8 @@
 {% endblock %}{% block content required %}{% endblock %}
 </main>
 <footer>
-<p>Built by Zach Zapata · <a href="https://github.com/Inky123/apidrift">Source</a> · <a href="/privacy">Privacy</a> · Not affiliated with Stripe.</p>
+{#- The "Source" link is left out while github.com/Inky123/apidrift is private; restore it when the repository is public. #}
+<p>Built by Zach Zapata · <a href="/privacy">Privacy</a> · Not affiliated with Stripe.</p>
 </footer>
 </body>
 </html>

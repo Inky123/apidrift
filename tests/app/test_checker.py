@@ -1,3 +1,5 @@
+import json
+import logging
 import re
 import shutil
 import subprocess
@@ -5,11 +7,12 @@ from datetime import datetime, timezone
 
 import httpx
 import pytest
-from conftest import NEW_VERSION, OLD_VERSION, REPO, SHA, THIRD_VERSION, save_snapshot, third_doc
+from conftest import NEW_VERSION, OLD_VERSION, REPO, SHA, THIRD_VERSION, TOKEN, new_doc, push_payload, save_snapshot, third_doc
 
 from apidrift.app import checker, db, issue
 from apidrift.app.checker import CheckError, decide, run_job, run_local, scan_subprocess
 from apidrift.app.poller import snapshots
+from apidrift.app.webhooks import handle_event
 from apidrift.app.worker import run_one
 
 TABLE = [
@@ -84,7 +87,7 @@ def test_first_run_creates_an_issue_with_permalinks(installed, conn, gh, setting
     body = installed.issues[1]["body"]
     for name in ("server.py", "server.js", "server.rb"):
         assert f"blob/{SHA}/{name}#L" in body
-    assert installed.issues[1]["title"] == f"Stripe {NEW_VERSION} breaks 3 Stripe call sites"
+    assert installed.issues[1]["title"] == f"Upgrading to Stripe {NEW_VERSION} breaks 3 call sites"
     assert issue.marker_in(body) is not None
     repo = db.get_repo(conn, 501)
     assert (repo["issue_number"], repo["issue_state"], repo["last_result"], repo["last_sha"]) == (1, "open", "findings", SHA)
@@ -107,7 +110,7 @@ def test_fixed_fixture_closes_the_issue_and_advances_the_baseline(installed, con
     db.enqueue(conn, "check", 501, "push")
     outcome = run_job(claim(conn), conn, gh, settings)
     assert outcome.startswith("clean: closed #1; baseline advanced to 2026-02-01T")
-    assert installed.issues[1]["state"] == "closed" and installed.comments == [(1, f"Clean at {SHA}")]
+    assert installed.issues[1]["state"] == "closed" and installed.comments == [(1, f"No call sites are affected at {SHA}; closing. Baseline is now {NEW_VERSION}.")]
     repo = db.get_repo(conn, 501)
     assert repo["baseline"] == snapshots(settings.data)[-1].name
     assert (repo["issue_state"], repo["last_result"]) == ("closed_by_us", "clean")
@@ -125,7 +128,7 @@ def test_reopens_after_our_own_close(installed, conn, gh, settings, tmp_path):
     db.enqueue(conn, "check", 501, "release")
     assert run_job(claim(conn), conn, gh, settings) == "findings: reopened #1"
     assert installed.issues[1]["state"] == "open" and len(installed.issues) == 1
-    assert installed.issues[1]["title"] == f"Stripe {THIRD_VERSION} breaks 3 Stripe call sites"
+    assert installed.issues[1]["title"] == f"Upgrading to Stripe {THIRD_VERSION} breaks 3 call sites"
     assert db.get_repo(conn, 501)["issue_state"] == "open"
 
 
@@ -146,7 +149,7 @@ def test_fresh_issue_when_a_later_release_adds_findings(installed, conn, gh, set
     db.enqueue(conn, "check", 501, "release")
     assert run_job(claim(conn), conn, gh, settings) == "findings: opened #2 superseding #1"
     assert installed.issues[2]["body"].startswith("Supersedes #1,")
-    assert installed.issues[2]["title"] == f"Stripe {THIRD_VERSION} breaks 6 Stripe call sites"
+    assert installed.issues[2]["title"] == f"Upgrading to Stripe {THIRD_VERSION} breaks 3 call sites"  # sites, not findings
     repo = db.get_repo(conn, 501)
     assert (repo["issue_number"], repo["issue_state"], repo["issue_version"]) == (2, "open", THIRD_VERSION)
 
@@ -189,6 +192,39 @@ def test_missing_baseline_falls_back_to_the_previous_snapshot(installed, conn, g
     assert run_job(claim(conn), conn, gh, settings) == "findings: opened #1"
 
 
+def test_missing_baseline_skips_same_version_snapshots(installed, conn, gh, settings):
+    """Reviewer scenario 6: a docs-only commit at the current version must not become the baseline."""
+    doc = new_doc()
+    doc["info"]["description"] = "docs-only"
+    save_snapshot(doc, datetime(2026, 2, 2, tzinfo=timezone.utc))
+    db.update_repo(conn, 501, baseline="2000-01-01T000000Z_gone_000000000000.json.gz")
+    assert run_job(claim(conn), conn, gh, settings) == "findings: opened #1"
+    assert f"against Stripe {OLD_VERSION} -> {NEW_VERSION}" in installed.issues[1]["body"]
+
+
+def test_release_that_adds_findings_updates_the_issue_and_comments(installed, conn, gh, settings):
+    """Reviewer scenario 1: a body edit notifies nobody; the new findings need a comment."""
+    assert run_job(claim(conn), conn, gh, settings) == "findings: opened #1"
+    save_snapshot(third_doc(), datetime(2026, 3, 1, tzinfo=timezone.utc))
+    db.enqueue(conn, "check", 501, "release")
+    assert run_job(claim(conn), conn, gh, settings) == "findings: updated #1"
+    assert installed.issues[1]["title"] == f"Upgrading to Stripe {THIRD_VERSION} breaks 3 call sites"
+    assert installed.comments == [(1, f"Stripe {THIRD_VERSION} adds 1 new finding(s); the issue body is updated.")]
+    assert [r.method for r in installed.writes] == ["POST", "PATCH", "POST"]
+    # the same findings again at the same version: keep, and nothing is posted
+    db.enqueue(conn, "check", 501, "push")
+    assert run_job(claim(conn), conn, gh, settings) == "findings: #1 unchanged"
+    assert len(installed.comments) == 1 and len(installed.writes) == 3
+
+
+def test_body_change_without_new_findings_or_version_updates_silently(installed, conn, gh, settings):
+    run_job(claim(conn), conn, gh, settings)
+    installed.sha = "f" * 40  # a push moves the permalinks: the body changes, the findings do not
+    db.enqueue(conn, "check", 501, "push")
+    assert run_job(claim(conn), conn, gh, settings) == "findings: updated #1"
+    assert installed.comments == []
+
+
 def test_suspended_installation_is_skipped_without_a_token(installed, conn, gh, settings):
     db.set_suspended(conn, 77, True)
     assert run_job(claim(conn), conn, gh, settings) == "skipped: installation suspended"
@@ -198,15 +234,19 @@ def test_suspended_installation_is_skipped_without_a_token(installed, conn, gh, 
 # --- failure handling through the worker -----------------------------------------------
 
 
-def test_tarball_over_the_cap_fails_the_job_and_leaves_no_work_dir(installed, conn, gh, settings, monkeypatch):
+def test_tarball_over_the_cap_is_terminal_and_recorded_on_the_repo(installed, conn, gh, settings, monkeypatch):
+    """Reviewer scenario 9: an oversize tarball used to be downloaded five times per release."""
     monkeypatch.setattr(checker, "MAX_TARBALL_BYTES", 64)
     job = claim(conn)
     outcome = run_one(job, conn, gh, settings)
     assert outcome.startswith("failed:") and "cap" in outcome
     row = db.get_job(conn, job["id"])
-    assert (row["status"], row["attempts"]) == ("queued", 1) and row["not_before"] > db.now()
+    assert (row["status"], row["attempts"]) == ("failed", 0)
     assert "cap" in row["error"] and not (settings.work_dir / str(job["id"])).exists()
-    assert installed.issues == {}
+    assert sum(1 for r in installed.requests if r.url.host == "codeload.github.com") == 1
+    repo = db.get_repo(conn, 501)
+    assert repo["last_result"] == "too_large" and repo["last_checked_at"] is not None
+    assert installed.issues == {} and installed.comments == []
 
 
 def test_error_text_is_scrubbed_before_it_is_stored(installed, conn, gh, settings):
@@ -225,13 +265,85 @@ def test_rate_limit_requeues_at_the_reset_without_counting_an_attempt(installed,
     assert (row["status"], row["attempts"]) == ("queued", 0) and row["not_before"] >= db.later(100)
 
 
-@pytest.mark.parametrize("status", [401, 404, 410, 422])
+@pytest.mark.parametrize("status", [403, 404, 410, 422])
 def test_terminal_github_errors_fail_the_job_at_once(installed, conn, gh, settings, status):
     installed.responses[("POST", "/app/installations/77/access_tokens")] = httpx.Response(status, json={"message": "no"})
     job = claim(conn)
     assert run_one(job, conn, gh, settings).startswith("failed: GitHub returned")
     row = db.get_job(conn, job["id"])
     assert row["status"] == "failed" and row["attempts"] == 0 and f"returned {status}" in row["error"]
+
+
+def test_401_from_the_token_endpoint_gets_one_retry_for_clock_skew(installed, conn, gh, settings):
+    """Reviewer scenario 7: a skewed clock used to fail every job for good with nothing retrying it."""
+    skew = {"message": "'Expiration time' claim ('exp') is too far in the future"}
+    installed.responses[("POST", "/app/installations/77/access_tokens")] = httpx.Response(401, json=skew)
+    job = claim(conn)
+    assert run_one(job, conn, gh, settings).startswith("failed: GitHub returned 401")
+    row = db.get_job(conn, job["id"])
+    assert (row["status"], row["attempts"]) == ("queued", 1) and row["not_before"] > db.now()
+    installed.responses[("POST", "/app/installations/77/access_tokens")] = httpx.Response(401, json=skew)
+    run_one(db.claim_job(conn, job_id=job["id"]), conn, gh, settings)
+    assert db.get_job(conn, job["id"])["status"] == "failed"
+    assert db.get_repo(conn, 501)["gone"] == 0  # a 401 says nothing about the repository
+
+
+@pytest.mark.parametrize("status", [404, 422])
+def test_token_refused_for_the_repo_marks_it_gone_until_github_mentions_it_again(installed, conn, gh, settings, status, caplog):
+    installed.responses[("POST", "/app/installations/77/access_tokens")] = httpx.Response(status, json={"message": "no"})
+    job = claim(conn)
+    with caplog.at_level(logging.WARNING, logger="apidrift.checker"):
+        run_one(job, conn, gh, settings)
+    assert db.get_repo(conn, 501)["gone"] == 1 and db.active_repos(conn) == []
+    assert sum("marking it gone" in r.message for r in caplog.records) == 1
+    # a release poll skips it: nothing queued
+    save_snapshot(third_doc(), datetime(2026, 3, 1, tzinfo=timezone.utc))
+    from apidrift.app.poller import poll_stripe
+    body = json.dumps(third_doc()).encode()
+    poll_stripe(settings, conn, httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, content=body))))
+    assert db.queued_jobs(conn) == []
+    # a push or an installation event clears the flag
+    handle_event(conn, "push", "p-back", push_payload(installed), settings.data)
+    assert db.get_repo(conn, 501)["gone"] == 0 and len(db.queued_jobs(conn)) == 1
+
+
+def test_403_without_rate_limit_headers_is_terminal(installed, conn, gh, settings):
+    """Reviewer scenario 7: 'Resource not accessible by integration' is a permission problem, not transient."""
+    installed.responses[("GET", "/repos/octo/shop")] = httpx.Response(403, json={"message": "Resource not accessible by integration"})
+    job = claim(conn)
+    assert run_one(job, conn, gh, settings).startswith("failed: GitHub returned 403")
+    row = db.get_job(conn, job["id"])
+    assert (row["status"], row["attempts"]) == ("failed", 0)
+
+
+def test_scan_timeout_is_terminal_and_recorded(installed, conn, gh, settings, monkeypatch):
+    def slow(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 0))
+
+    monkeypatch.setattr(checker.subprocess, "run", slow)
+    job = claim(conn)
+    assert run_one(job, conn, gh, settings).startswith("failed: scan exceeded")
+    assert db.get_job(conn, job["id"])["status"] == "failed"
+    repo = db.get_repo(conn, 501)
+    assert repo["last_result"] == "timeout" and repo["last_checked_at"] is not None and installed.issues == {}
+
+
+def test_unreadable_archive_is_terminal_and_recorded(installed, conn, gh, settings):
+    installed.tarball = b"not a tarball"
+    job = claim(conn)
+    assert run_one(job, conn, gh, settings).startswith("failed: archive could not be read")
+    assert db.get_job(conn, job["id"])["status"] == "failed"
+    assert db.get_repo(conn, 501)["last_result"] == "bad_archive"
+
+
+def test_installation_token_is_revoked_after_every_job(installed, conn, gh, settings):
+    run_job(claim(conn), conn, gh, settings)
+    revokes = [r for r in installed.requests if r.method == "DELETE" and r.url.path == "/installation/token"]
+    assert len(revokes) == 1 and revokes[0].headers["authorization"] == f"Bearer {TOKEN}"
+    installed.responses[("GET", "/repos/octo/shop")] = httpx.Response(502, json={})
+    db.enqueue(conn, "check", 501, "push")
+    run_one(claim(conn), conn, gh, settings)  # revoked on the failure path too, and a failed revoke is ignored
+    assert sum(1 for r in installed.requests if r.method == "DELETE" and r.url.path == "/installation/token") == 2
 
 
 def test_server_errors_still_back_off(installed, conn, gh, settings):
@@ -256,11 +368,15 @@ def test_scan_child_gets_a_minimal_environment(data_dir, monkeypatch):
     assert not any(key.startswith("APIDRIFT_GITHUB_") for key in seen)
 
 
-def test_jobs_fail_for_good_after_five_attempts(installed, conn, gh, settings, monkeypatch):
-    monkeypatch.setattr(checker, "MAX_TARBALL_BYTES", 64)
+def test_jobs_fail_for_good_after_eight_attempts(installed, conn, gh, settings):
+    """Reviewer scenario 5: five attempts totalled ~30 minutes; now eight, 2 min .. 6 h apart."""
+    assert db.MAX_ATTEMPTS == 8
     job_id = db.queued_jobs(conn)[0]["id"]
-    for attempt in range(1, 6):
+    for attempt in range(1, 9):
+        installed.responses[("GET", "/repos/octo/shop")] = httpx.Response(502, json={})
         run_one(db.claim_job(conn, job_id=job_id), conn, gh, settings)
         row = db.get_job(conn, job_id)
-        assert row["attempts"] == attempt and row["status"] == ("failed" if attempt == 5 else "queued")
+        assert row["attempts"] == attempt and row["status"] == ("failed" if attempt == 8 else "queued")
     assert db.claim_job(conn, job_id=job_id) is None
+    waits = [db.backoff(n) for n in range(1, db.MAX_ATTEMPTS)]
+    assert waits == [120, 240, 480, 960, 1920, 3840, 7680] and db.backoff(12) == 6 * 3600

@@ -9,3 +9,5 @@ __pycache__/
 .claude/launch.json
 build/
 dist/
+secrets/
+*.pem

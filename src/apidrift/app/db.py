@@ -17,14 +17,16 @@ from typing import Iterator
 
 Row = sqlite3.Row
 TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-MAX_ATTEMPTS = 5
+MAX_ATTEMPTS = 8
+MAX_BACKOFF_SECONDS = 6 * 3600
 JOB_KINDS = ("check", "poll")
 JOB_REASONS = ("install", "push", "release", "manual")
 ISSUE_STATES = ("open", "closed_by_us", "closed_by_user")
 REPO_FIELDS = frozenset({
     "installation_id", "full_name", "baseline", "last_sha", "last_result", "last_checked_at",
-    "issue_number", "issue_state", "issue_fingerprint", "issue_items", "issue_body_sha", "issue_version",
+    "issue_number", "issue_state", "issue_fingerprint", "issue_items", "issue_body_sha", "issue_version", "gone",
 })
+META_KEYS = ("last_poll_at", "last_poll_status", "latest_snapshot")
 
 MIGRATIONS: list[str] = [
     """
@@ -74,6 +76,13 @@ MIGRATIONS: list[str] = [
         received_at TEXT NOT NULL
     );
     """,
+    """
+    CREATE TABLE meta (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    );
+    ALTER TABLE repos ADD COLUMN gone INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 
@@ -85,6 +94,11 @@ def later(seconds: float, base: str | None = None) -> str:
     """``base`` (default now) plus ``seconds``, as a timestamp string."""
     start = datetime.strptime(base, TS_FORMAT).replace(tzinfo=timezone.utc) if base else datetime.now(timezone.utc)
     return (start + timedelta(seconds=seconds)).strftime(TS_FORMAT)
+
+
+def backoff(attempts: int) -> float:
+    """Seconds to wait before retry number ``attempts``: 60 * 2**n, capped at six hours."""
+    return float(min(60 * 2**attempts, MAX_BACKOFF_SECONDS))
 
 
 def from_epoch(seconds: float) -> str:
@@ -196,14 +210,17 @@ def delete_installation(conn: sqlite3.Connection, installation_id: int) -> list[
 def upsert_repo(
     conn: sqlite3.Connection, repo_id: int, installation_id: int, full_name: str, baseline: str | None
 ) -> None:
-    """Insert a repo; an existing row keeps its baseline and issue state but follows the installation and name."""
+    """Insert a repo; an existing row keeps its baseline and issue state but follows the installation and name.
+
+    GitHub mentioning the repo again (install, push) also clears ``gone``, set when its token was refused.
+    """
     ts = now()
     with write(conn):
         conn.execute(
             "INSERT INTO repos (id, installation_id, full_name, baseline, created_at, updated_at)"
             " VALUES (?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(id) DO UPDATE SET installation_id = excluded.installation_id,"
-            " full_name = excluded.full_name, updated_at = excluded.updated_at",
+            " full_name = excluded.full_name, gone = 0, updated_at = excluded.updated_at",
             (repo_id, installation_id, full_name, baseline, ts, ts),
         )
 
@@ -232,10 +249,21 @@ def find_repo(conn: sqlite3.Connection, full_name: str) -> Row | None:
 
 
 def active_repos(conn: sqlite3.Connection) -> list[Row]:
-    """Repos whose installation is not suspended, oldest first."""
+    """Repos whose installation is not suspended and that GitHub has not refused a token for, oldest first."""
     return conn.execute(
         "SELECT r.* FROM repos r JOIN installations i ON i.id = r.installation_id"
-        " WHERE i.suspended = 0 ORDER BY r.id"
+        " WHERE i.suspended = 0 AND r.gone = 0 ORDER BY r.id"
+    ).fetchall()
+
+
+def stale_repos(conn: sqlite3.Connection, stamp: str) -> list[Row]:
+    """Active repos not checked since ``stamp`` (a timestamp string) that have no queued or running check."""
+    return conn.execute(
+        "SELECT r.* FROM repos r JOIN installations i ON i.id = r.installation_id"
+        " WHERE i.suspended = 0 AND r.gone = 0 AND (r.last_checked_at IS NULL OR r.last_checked_at < ?)"
+        " AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.repo_id = r.id AND j.kind = 'check'"
+        " AND j.status IN ('queued', 'running')) ORDER BY r.id",
+        (stamp,),
     ).fetchall()
 
 
@@ -336,10 +364,13 @@ def requeue_job(conn: sqlite3.Connection, job_id: int, not_before: str, error: s
 
 
 def requeue_running(conn: sqlite3.Connection) -> int:
-    """Re-queue jobs a previous worker left running (it died mid-check). Returns how many."""
+    """Re-queue jobs a previous worker left running (it died mid-check). Returns how many.
+
+    Each restart counts as an attempt, so a repo that keeps killing the worker ends up ``failed``.
+    """
     rows = conn.execute("SELECT id FROM jobs WHERE status = 'running' ORDER BY id").fetchall()
     for row in rows:
-        requeue_job(conn, row["id"], now(), "worker restarted", count_attempt=False)
+        requeue_job(conn, row["id"], now(), "worker restarted", count_attempt=True)
     return len(rows)
 
 
@@ -349,6 +380,23 @@ def get_job(conn: sqlite3.Connection, job_id: int) -> Row | None:
 
 def queued_jobs(conn: sqlite3.Connection) -> list[Row]:
     return conn.execute("SELECT * FROM jobs WHERE status = 'queued' ORDER BY id").fetchall()
+
+
+def recent_jobs(conn: sqlite3.Connection, hours: int = 24) -> list[Row]:
+    """Jobs created in the last ``hours`` plus anything still queued or running, oldest first."""
+    return conn.execute(
+        "SELECT * FROM jobs WHERE created_at >= ? OR status IN ('queued', 'running') ORDER BY id",
+        (later(-hours * 3600),),
+    ).fetchall()
+
+
+def prune_jobs(conn: sqlite3.Connection, keep_days: int = 30) -> int:
+    """Delete done and failed jobs older than ``keep_days``; returns how many went."""
+    with write(conn):
+        cursor = conn.execute(
+            "DELETE FROM jobs WHERE status IN ('done', 'failed') AND finished_at < ?", (later(-keep_days * 86400),)
+        )
+    return cursor.rowcount
 
 
 # --- deliveries ---------------------------------------------------------------
@@ -363,3 +411,48 @@ def record_delivery(conn: sqlite3.Connection, delivery_id: str, event: str, keep
             (delivery_id, event, now()),
         ).fetchone()
     return row is not None
+
+
+# --- meta and status ----------------------------------------------------------
+
+
+def set_meta(conn: sqlite3.Connection, **values: str | None) -> None:
+    """Upsert operator-facing key/value pairs (poll outcome, latest snapshot)."""
+    with write(conn):
+        for key, value in values.items():
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
+
+def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def all_meta(conn: sqlite3.Connection) -> dict[str, str | None]:
+    return {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM meta ORDER BY key")}
+
+
+def status_summary(conn: sqlite3.Connection, hours: int = 24) -> dict:
+    """Counts an operator wants at a glance; plain types only, so it can be printed or served as JSON."""
+    installations = conn.execute("SELECT count(*) AS n FROM installations WHERE suspended = 0").fetchone()["n"]
+    suspended = conn.execute("SELECT count(*) AS n FROM installations WHERE suspended = 1").fetchone()["n"]
+    repos: dict[str, int] = {}
+    for row in conn.execute(
+        "SELECT CASE WHEN gone = 1 THEN 'gone' ELSE coalesce(last_result, 'unchecked') END AS state, count(*) AS n"
+        " FROM repos GROUP BY state ORDER BY state"
+    ):
+        repos[row["state"]] = row["n"]
+    open_issues = conn.execute("SELECT count(*) AS n FROM repos WHERE issue_state = 'open'").fetchone()["n"]
+    jobs = {"queued": 0, "running": 0, "done": 0, "failed": 0}
+    errors: list[dict] = []
+    for job in recent_jobs(conn, hours):
+        jobs[job["status"]] = jobs.get(job["status"], 0) + 1
+        if job["status"] == "failed" or job["error"]:
+            errors.append({"id": job["id"], "repo_id": job["repo_id"], "status": job["status"], "error": job["error"]})
+    return {
+        "installations": installations, "suspended_installations": suspended, "repos": repos,
+        "open_issues": open_issues, "jobs": jobs, "job_errors": errors, **all_meta(conn),
+    }

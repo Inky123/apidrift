@@ -47,6 +47,23 @@ def list_snapshots(provider_name: str) -> list[Path]:
     return sorted(folder.glob(f"*{SUFFIX}")) if folder.exists() else []
 
 
+def between(provider_name: str | None, old_path: Path, new_path: Path) -> list[Path]:
+    """The stored snapshots strictly between two snapshots of ``provider_name``, oldest first.
+
+    Empty when either path is not one of the provider's snapshots (a plain spec file) or they are not in
+    chronological order; the caller then falls back to a single diff.
+    """
+    if not provider_name:
+        return []
+    snaps = list_snapshots(provider_name)
+    resolved = [p.resolve() for p in snaps]
+    try:
+        i, j = resolved.index(old_path.resolve()), resolved.index(new_path.resolve())
+    except ValueError:
+        return []
+    return snaps[i + 1:j] if i < j else []
+
+
 def save(provider: Provider, raw: bytes, now: datetime | None = None) -> Path | None:
     """Store ``raw`` as a new snapshot. Returns None when the content is already stored."""
     doc = json.loads(raw)

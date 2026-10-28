@@ -69,3 +69,55 @@ def test_scan_lists_endpoints_and_fields(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "pay.py:2  POST /v1/charges  via stripe.Charge.create" in out
     assert "fields: amount, description" in out
+
+
+def test_json_outputs_carry_versions_and_introduced_for_plain_files(tmp_path, capsys):
+    old, new = base_doc(), base_doc()
+    new["paths"].pop("/v1/charges/{charge}")
+    new["info"]["version"] = "2026-02-01.test"
+    main(["diff", "--old", write(tmp_path, "a.json", old), "--new", write(tmp_path, "b.json", new), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["versions"] == ["2026-01-01.test", "2026-02-01.test"]
+    assert payload["changes"][0]["introduced"] == "2026-02-01.test"
+    assert set(payload) == {"old", "new", "summary", "changes", "versions"}
+
+
+def test_snapshot_pairs_are_attributed_through_the_snapshots_between_them(tmp_path, monkeypatch, capsys):
+    from datetime import datetime, timezone
+
+    from specs import sdk_doc
+
+    from apidrift import snapshot as snap
+    from apidrift.providers import PROVIDERS
+
+    monkeypatch.setenv("APIDRIFT_DATA", str(tmp_path / "data"))
+    body = lambda d: d["paths"]["/v1/charges"]["post"]["requestBody"]["content"]["application/x-www-form-urlencoded"]["schema"]  # noqa: E731
+    docs = [sdk_doc(), sdk_doc(), sdk_doc()]
+    docs[0]["info"]["version"] = "2026-01-01.a"
+    docs[1]["info"]["version"] = "2026-02-01.b"
+    body(docs[1])["properties"].pop("description")
+    docs[2]["info"]["version"] = "2026-03-01.c"
+    body(docs[2])["properties"].pop("description")
+    docs[2]["paths"].pop("/v1/charges/{charge}")
+    for month, doc in enumerate(docs, start=1):
+        snap.save(PROVIDERS["stripe"], json.dumps(doc).encode(), now=datetime(2026, month, 1, tzinfo=timezone.utc))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pay.py").write_text("import stripe\nstripe.Charge.create(amount=1, description='x')\nstripe.Charge.retrieve('ch_1')\n")
+
+    assert main(["diff", "stripe", "--old", "2026-01", "--new", "latest", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["versions"] == ["2026-01-01.a", "2026-02-01.b", "2026-03-01.c"]
+    assert {c["kind"]: c["introduced"] for c in payload["changes"]} == {
+        "body_removed": "2026-02-01.b", "endpoint_removed": "2026-03-01.c",
+    }
+    assert main(["impact", str(repo), "--old", "2026-01", "--new", "latest", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["versions"] == ["2026-01-01.a", "2026-02-01.b", "2026-03-01.c"]
+    assert [(i["usage"]["line"], i["change"]["kind"], i["change"]["introduced"]) for i in payload["impacts"]] == [
+        (2, "body_removed", "2026-02-01.b"), (3, "endpoint_removed", "2026-03-01.c"),
+    ]
+    assert main(["diff", "stripe", "--old", "2026-02", "--new", "latest", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["versions"] == ["2026-02-01.b", "2026-03-01.c"]
+    assert [c["introduced"] for c in payload["changes"]] == ["2026-03-01.c"]

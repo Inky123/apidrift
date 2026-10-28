@@ -36,19 +36,39 @@ def test_good_archive_returns_the_top_directory(tmp_path):
         ("../x", "file", "evil"),
         ("/etc/x", "file", "evil"),
         ("top/../../x", "file", "evil"),
-        ("top/link", "sym", "../../etc/passwd"),
-        ("top/link", "sym", "/etc/passwd"),
-        ("top/hard", "lnk", "../../outside"),
-        ("top/hard", "lnk", "/etc/passwd"),
         ("top/fifo", "fifo", None),
     ],
 )
-def test_escaping_and_special_entries_are_rejected(tmp_path, entry):
+def test_escaping_files_and_special_entries_are_rejected(tmp_path, entry):
     src = make_tar(tmp_path / "src.tgz", GOOD + [entry])
     with pytest.raises(ExtractError) as caught:
         extract_tarball(src, tmp_path / "tree")
     assert not (tmp_path / "x").exists() and not (tmp_path / "outside").exists()
     assert "etc" not in str(caught.value) and "outside" not in str(caught.value)  # no entry names in the error
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        ("top/link", "sym", "../../etc/passwd"),
+        ("top/link", "sym", "/etc/passwd"),
+        ("top/hard", "lnk", "../../outside"),
+        ("top/hard", "lnk", "/etc/passwd"),
+    ],
+)
+def test_a_link_pointing_outside_is_skipped_and_the_rest_extracted(tmp_path, entry):
+    """Repos do ship stray symlinks; one must not fail the whole check. The link itself is never created."""
+    src = make_tar(tmp_path / "src.tgz", GOOD + [entry])
+    top = extract_tarball(src, tmp_path / "tree")
+    assert (top / "a.py").read_text() == "import stripe\n" and (top / "sub" / "b.js").exists()
+    assert not (top / entry[0].split("/", 1)[1]).exists() and not (top / entry[0].split("/", 1)[1]).is_symlink()
+    assert not (tmp_path / "outside").exists()
+
+
+def test_a_link_pointing_inside_is_kept(tmp_path):
+    src = make_tar(tmp_path / "src.tgz", GOOD + [("top/alias.py", "sym", "a.py")])
+    top = extract_tarball(src, tmp_path / "tree")
+    assert (top / "alias.py").is_symlink() and (top / "alias.py").read_text() == "import stripe\n"
 
 
 def test_entry_cap(tmp_path):

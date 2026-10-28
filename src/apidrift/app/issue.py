@@ -1,4 +1,10 @@
-"""Turn a check payload into the one issue apidrift opens: findings, fingerprint, title and body."""
+"""Turn a check payload into the one issue apidrift opens: findings, fingerprint, title and body.
+
+The body groups call sites by the Stripe change that hits them, names the release that introduced
+each change, and says in one line what the change does to a request. Everything that comes from the
+scanned repository (file paths, call text) is rendered inside code spans, so a hostile file name can
+not mention a user, reference an issue or autolink.
+"""
 
 from __future__ import annotations
 
@@ -11,14 +17,17 @@ from ..impact import AFFECTED, POSSIBLE
 
 MARKER_RE = re.compile(r"<!-- apidrift:fp=([0-9a-f]{64}) -->")
 MAX_FINDINGS = 50
+MAX_INLINE_LINKS = 10  # a group with more call sites than this is folded into <details>
 MAX_BODY_CHARS = 60_000  # GitHub rejects issue bodies over 65,536 characters
+CHANGELOG = "https://docs.stripe.com/changelog"
 FINDING_KEYS = (
     "file", "line", "url", "method", "path", "label", "call", "language",
-    "change_kind", "change_message", "reason", "certainty",
+    "change_kind", "change_message", "change_target", "introduced", "consequence", "reason", "certainty",
 )
 # Markdown punctuation that could open a link, code span, table cell, emphasis or URL; backslash-escaped.
 _ESCAPES = {ch: "\\" + ch for ch in "\\<`|[]():*"}
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_TICKS_RE = re.compile(r"`+")
 
 
 def marker(fingerprint: str) -> str:
@@ -32,10 +41,15 @@ def marker_in(body: str | None) -> str | None:
 
 
 def breaking(payload: dict) -> list[dict]:
-    """The impacts that go in an issue: breaking changes, affected or possibly affected."""
+    """The impacts that go in an issue: breaking changes, affected or possibly affected, in real code.
+
+    Usages tagged ``language == "doc"`` (URL matches in READMEs and fixtures) are not call sites.
+    """
     return [
         impact for impact in payload.get("impacts", [])
-        if impact.get("change", {}).get("severity") == BREAKING and impact.get("certainty") in (AFFECTED, POSSIBLE)
+        if impact.get("change", {}).get("severity") == BREAKING
+        and impact.get("certainty") in (AFFECTED, POSSIBLE)
+        and impact.get("usage", {}).get("language") != "doc"
     ]
 
 
@@ -45,8 +59,11 @@ def _key(impact: dict) -> tuple[str, str, str, str, str]:
 
 
 def finding_hashes(impacts: list[dict]) -> list[str]:
-    """One short hash per distinct finding (no line numbers), sorted; stored so a later gain can be detected."""
-    return sorted({hashlib.sha256(repr(_key(i)).encode()).hexdigest()[:16] for i in impacts})
+    """One short hash per distinct (method, path, change kind, target), sorted: what a later release can add to.
+
+    The file is left out on purpose: a renamed file is not a new finding.
+    """
+    return sorted({hashlib.sha256(repr(_key(i)[1:]).encode()).hexdigest()[:16] for i in impacts})
 
 
 def fingerprint(impacts: list[dict]) -> str:
@@ -74,9 +91,96 @@ def escape(text: str) -> str:
     return "".join(_ESCAPES.get(ch, ch) for ch in text)
 
 
+def code(text: str) -> str:
+    """``text`` as a Markdown code span whose fence is longer than any backtick run inside it.
+
+    Inside a code span nothing renders: no @mention, no #123 reference, no www. autolink, no emphasis.
+    """
+    text = _CONTROL_RE.sub(lambda m: f"\\x{ord(m.group(0)):02x}", text)
+    longest = max((len(run) for run in _TICKS_RE.findall(text)), default=0)
+    fence = "`" * (longest + 1)
+    if not text or text[0] == "`" or text[-1] == "`" or text != text.strip():
+        text = f" {text} "  # the renderer strips one leading and one trailing space
+    return f"{fence}{text}{fence}"
+
+
+def changelog_url(version: str) -> str:
+    """Stripe's per-codename changelog page: ``2026-09-30.endive`` -> ``.../changelog/endive``."""
+    codename = version.rsplit(".", 1)[-1] if "." in version else ""
+    return f"{CHANGELOG}/{quote(codename, safe='')}" if re.fullmatch(r"[A-Za-z0-9-]+", codename) else CHANGELOG
+
+
+def _display_target(kind: str, target: str) -> str:
+    if kind.startswith("param_") and ":" in target:
+        return target.split(":", 1)[1]  # "query:limit" -> "limit"
+    return target
+
+
+def heading(kind: str, target: str | None, label: str) -> str:
+    """One phrase naming the change, e.g. ``payment_method_types removed from POST /v1/payment_intents``."""
+    target = escape(_display_target(kind, target or ""))
+    label = escape(label)
+    if kind == "endpoint_removed":
+        return f"{label} removed"
+    if kind == "endpoint_deprecated":
+        return f"{label} deprecated"
+    if kind.endswith("enum_removed") and kind.startswith(("param_", "body_")):
+        return f"{target} values removed on {label}"
+    if kind in ("param_removed", "body_removed"):
+        return f"{target} removed from {label}"
+    if kind.endswith(("added_required", "now_required")):
+        return f"{target} now required on {label}"
+    if kind.endswith(("type_changed", "type_narrowed")) and kind.startswith(("param_", "body_")):
+        return f"{target} type changed on {label}"
+    if kind.endswith("enum_restricted"):
+        return f"{target} restricted on {label}"
+    if kind == "response_field_removed":
+        return f"{target} removed from the {label} response"
+    if kind.startswith("response_") and target:
+        return f"{target} changed in the {label} response"
+    if kind in ("schema_removed", "response_schema_changed"):
+        return f"{label} response changed shape"
+    return f"{kind} on {label}" + (f": {target}" if target else "")
+
+
+def _values(value: object) -> str:
+    items = value if isinstance(value, (list, tuple)) else []
+    return ", ".join(escape(str(v)) for v in items)
+
+
+def consequence(change: dict) -> str:
+    """One sentence saying what the change does to a call, derived from its kind."""
+    kind = str(change.get("kind") or "")
+    old, new = change.get("old"), change.get("new")
+    if kind in ("param_removed", "body_removed"):
+        return "Requests that still send it are rejected."
+    if kind.endswith(("added_required", "now_required")):
+        return "Requests without it are rejected."
+    if kind.endswith(("type_changed", "type_narrowed")):
+        if isinstance(old, str) and isinstance(new, str):
+            return f"The value shape changed from {escape(old)} to {escape(new)}."
+        return "The value shape changed."
+    if kind.endswith("enum_removed") and kind.startswith(("param_", "body_")):
+        return f"These values are no longer accepted: {_values(old)}."
+    if kind.endswith("enum_restricted"):
+        return f"Only these values are accepted now: {_values(new)}."
+    if kind == "endpoint_removed":
+        return "The endpoint no longer exists."
+    if kind == "endpoint_deprecated":
+        return "The endpoint is deprecated and will be removed."
+    if kind == "response_field_removed":
+        return "Responses no longer include it."
+    if kind in ("schema_removed", "response_schema_changed"):
+        return "The response changed shape."
+    if kind.startswith("response_"):
+        return "Responses may carry values this code does not expect."
+    return escape(str(change.get("message") or ""))
+
+
 def findings(payload: dict, full_name: str, sha: str) -> list[dict]:
     """Flat finding dicts with exactly FINDING_KEYS, the shape ``demo.json`` and the issue body share."""
     out: list[dict] = []
+    fallback = str(payload.get("new_version") or "")
     for impact in breaking(payload):
         usage, change = impact["usage"], impact["change"]
         method = str(usage["method"]).upper()
@@ -91,6 +195,9 @@ def findings(payload: dict, full_name: str, sha: str) -> list[dict]:
             "language": usage["language"],
             "change_kind": change["kind"],
             "change_message": change["message"],
+            "change_target": change.get("target") or "",
+            "introduced": str(change.get("introduced") or fallback),
+            "consequence": consequence(change),
             "reason": impact["reason"],
             "certainty": impact["certainty"],
         })
@@ -98,9 +205,45 @@ def findings(payload: dict, full_name: str, sha: str) -> list[dict]:
     return out
 
 
-def title_for(new_version: str, count: int) -> str:
+def distinct_sites(items: list[dict]) -> int:
+    """Distinct (file, line, path) call sites among the findings; the number the title reports."""
+    return len({(f["file"], f["line"], f["path"]) for f in items})
+
+
+def versions_of(items: list[dict], fallback: str) -> list[str]:
+    """The Stripe versions the findings were introduced in, oldest first (date-prefixed, so sorted as text)."""
+    found = sorted({str(f.get("introduced") or fallback) for f in items})
+    return found or [fallback]
+
+
+def title_for(version: str, count: int) -> str:
     noun = "call site" if count == 1 else "call sites"
-    return f"Stripe {new_version} breaks {count} Stripe {noun}"
+    return f"Upgrading to Stripe {version} breaks {count} {noun}"
+
+
+def group_findings(items: list[dict], fallback: str) -> list[dict]:
+    """Findings grouped by the change that hits them: ``{heading, introduced, changelog, consequence, items}``."""
+    groups: dict[tuple, dict] = {}
+    for f in items:
+        introduced = str(f.get("introduced") or fallback)
+        key = (f["path"], f["change_kind"], f.get("change_target") or "", introduced)
+        group = groups.setdefault(key, {
+            "heading": heading(f["change_kind"], f.get("change_target"), f["label"]),
+            "introduced": introduced,
+            "changelog": changelog_url(introduced),
+            "consequence": f.get("consequence") or "",
+            "items": [],
+        })
+        group["items"].append(f)
+    return [groups[key] for key in sorted(groups)]
+
+
+def _site_line(f: dict) -> str:
+    where = f["url"] or f"{code(f['file'])}:{f['line']}"
+    line = f"- {where} via {code(f['call'])}"
+    if f["certainty"] == POSSIBLE:
+        line += f" (possibly affected: {escape(str(f['reason']))})"
+    return line
 
 
 def render_issue(
@@ -115,14 +258,19 @@ def render_issue(
     supersedes: int | None = None,
 ) -> tuple[str, str]:
     """(title, body) for an issue listing ``items`` (as produced by :func:`findings`)."""
-    count = len(items)
-    possible = sum(1 for f in items if f["certainty"] == POSSIBLE)
+    sites = distinct_sites(items)
+    versions = versions_of(items, new_version)
+    newest = versions[-1]
+    possible = len({(f["file"], f["line"], f["path"]) for f in items if f["certainty"] == POSSIBLE})
+    noun = "call site" if sites == 1 else "call sites"
     lines: list[str] = []
     if supersedes is not None:
-        lines.append(f"Supersedes #{supersedes}, which was closed before Stripe {new_version} added new findings.")
-        lines.append("")
-    verdict = f"Stripe {new_version} affects {count} Stripe {'call site' if count == 1 else 'call sites'} in {full_name} at {sha[:7]}"
-    lines.append(verdict + (f"; {possible} of them possibly." if possible else "."))
+        lines += [f"Supersedes #{supersedes}, which was closed before Stripe {new_version} added new findings.", ""]
+    verdict = f"Upgrading to Stripe {newest} breaks {sites} {noun} in {full_name} at {sha[:7]}"
+    verdict += f"; {possible} of them possibly." if possible else "."
+    if len(versions) > 1:
+        verdict += f" The changes arrived between Stripe {versions[0]} and {newest}."
+    lines.append(verdict)
     footer = [
         "",
         "---",
@@ -131,23 +279,37 @@ def render_issue(
         marker(fingerprint),
     ]
     budget = MAX_BODY_CHARS - sum(len(ln) + 1 for ln in lines + footer) - 64  # room for the "and N more." line
+    shown = _render_groups(lines, group_findings(items, new_version), budget)
+    if len(items) > shown:
+        lines += ["", f"and {len(items) - shown} more."]
+    return title_for(newest, sites), "\n".join(lines + footer) + "\n"
+
+
+def _render_groups(lines: list[str], groups: list[dict], budget: int) -> int:
+    """Append the group blocks to ``lines`` within the character budget and MAX_FINDINGS; returns links shown."""
     used = shown = 0
-    current_file: str | None = None
-    for f in items[:MAX_FINDINGS]:
-        chunk: list[str] = []
-        if f["file"] != current_file:
-            chunk += ["", f"**{escape(f['file'])}**"]
-        link = f["url"] or f"{escape(f['file'])}:{f['line']}"
-        prefix = "possibly affected: " if f["certainty"] == POSSIBLE else ""
-        chunk.append(f"- {link}")
-        chunk.append(f"  {prefix}`{f['label']}` via {escape(f['call'])}: {f['change_message']} ({f['reason']})")
-        size = sum(len(ln) + 1 for ln in chunk)
-        if used + size > budget:
+    for group in groups:
+        head = [
+            "",
+            f"**{group['heading']}** (introduced in Stripe {escape(group['introduced'])}, [changelog]({group['changelog']}))",
+            group["consequence"],
+        ]
+        folded = len(group["items"]) > MAX_INLINE_LINKS
+        if folded:
+            head += [f"<details><summary>{len(group['items'])} call sites</summary>", ""]
+        tail = ["", "</details>"] if folded else []
+        reserve = sum(len(ln) + 1 for ln in head + tail)
+        first = _site_line(group["items"][0])
+        if shown >= MAX_FINDINGS or used + reserve + len(first) + 1 > budget:
             break
-        lines += chunk
-        used += size
-        shown += 1
-        current_file = f["file"]
-    if count > shown:
-        lines += ["", f"and {count - shown} more."]
-    return title_for(new_version, count), "\n".join(lines + footer) + "\n"
+        lines += head
+        used += reserve
+        for f in group["items"]:
+            site = _site_line(f)
+            if shown >= MAX_FINDINGS or used + len(site) + 1 > budget:
+                break
+            lines.append(site)
+            used += len(site) + 1
+            shown += 1
+        lines += tail
+    return shown

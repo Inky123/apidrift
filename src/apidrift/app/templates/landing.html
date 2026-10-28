@@ -3,30 +3,36 @@
 {% block content %}
 <h1>apidrift</h1>
 <p class="lede">Stripe changed its API. This is the line in your code that breaks.</p>
+<p class="aside"><a href="{{ install_url }}">Install on GitHub</a></p>
+
+<p>apidrift watches Stripe's published OpenAPI spec. When a release removes a field, retires an endpoint, or makes a new parameter required, it finds the call sites in your repository that send exactly that, and opens one issue with a link to each line. Nothing else: no digest of every change, no issue when you are unaffected.</p>
 
 <h2>A real example</h2>
 
-<p>Stripe's <code>{{ demo.new_version }}</code> release removed <code>payment_method_types</code> from <a href="https://docs.stripe.com/api/payment_intents/create"><code>POST /v1/payment_intents</code></a> (<a href="https://docs.stripe.com/changelog">Stripe's changelog</a>). Run against Stripe's own sample repository, <a href="{{ demo.repo_url }}/tree/{{ demo.sha }}">{{ demo.repo }} at {{ demo.sha_short }}</a>, apidrift flags the {{ demo.findings|length }} servers that still send it, with a link to each line.</p>
+<p>Stripe's <code>{{ demo.introduced }}</code> release removed <code>payment_method_types</code> from <a href="https://docs.stripe.com/api/payment_intents/create"><code>POST /v1/payment_intents</code></a> (<a href="{{ demo.groups[0].changelog }}">Stripe's changelog</a>). Run against Stripe's own sample repository, <a href="{{ demo.repo_url }}/tree/{{ demo.sha }}">{{ demo.repo }} at {{ demo.sha_short }}</a>, apidrift flags the {{ demo.findings|length }} servers that still send it, with a link to each line. The issue it opens reads:</p>
 
 {% set possible = demo.findings | selectattr("certainty", "equalto", "possible") | list -%}
-<pre class="findings">Stripe {{ demo.new_version }} breaks {{ demo.findings|length }} Stripe call sites
+<pre class="findings">{{ demo.title }}
 
-{% for f in demo.findings -%}
+{% for g in demo.groups -%}
+<span class="group"><b>{{ g.heading }}</b> (introduced in Stripe {{ g.introduced }}, <a href="{{ g.changelog }}">changelog</a>)
+{{ g.consequence }}
+</span>
+{%- for f in g.findings -%}
 <span class="finding"><b class="mark{{ ' possible' if f.certainty == 'possible' }}">{{ '?' if f.certainty == 'possible' else '!' }}</b> <a href="{{ f.url }}">{{ f.file }}:{{ f.line }}</a>
-<span class="detail"><span class="nowrap">{{ f.label }}</span>  via {{ f.call }}
-</span><span class="detail">[{{ f.change_kind }}] {{ f.change_message }}
+<span class="detail">via {{ f.call }}
 </span><span class="detail">why: {{ f.reason }}
 </span></span>
+{%- endfor %}
 {%- endfor %}
 {%- if possible %}
 <span class="legend"><b class="mark">!</b> affected   <b class="mark possible">?</b> possibly affected (arguments not visible to the scanner)</span>
 {%- endif %}</pre>
 
-<p>{{ demo.call_sites }} Stripe call sites were scanned; the {{ demo.unaffected }} that are unaffected are not reported.</p>
-
-<p>apidrift watches Stripe's published OpenAPI spec. When a release removes a field, retires an endpoint, or makes a new parameter required, it finds the call sites in your repository that send exactly that, and opens one issue with a link to each line. Nothing else: no digest of every change, no issue when you are unaffected.</p>
+<p>{{ demo.call_sites }} Stripe call sites were scanned; the {{ demo.unaffected }} that are unaffected are not reported. The release after it, <code>{{ demo.new_version }}</code>, adds nothing that breaks this repository, so the issue names the release that did.</p>
 
 <p><a class="button" href="{{ install_url }}">Install on GitHub</a></p>
+<p class="pricing">Free while it is Stripe-only.</p>
 
 <p>Read access to code and permission to open issues; nothing else. apidrift downloads a snapshot of your default branch, reads it, and deletes it when the check ends. It never runs your code. It checks after each push to your default branch and whenever Stripe publishes a new spec.</p>
 
@@ -34,7 +40,7 @@
 
 <ol>
 <li>Stripe publishes <a href="https://github.com/stripe/openapi"><code>spec3.sdk.json</code></a>; apidrift keeps every version{% if stripe_latest %} (the latest it holds is <code>{{ stripe_latest }}</code>){% endif %}.</li>
-<li>Each release is diffed against the one your code last passed.</li>
+<li>Each release is diffed against the one your code last passed, release by release, so every finding names the release that introduced it.</li>
 <li>Your Python, JavaScript, TypeScript and Ruby are parsed for Stripe calls and the fields they send. Only the calls the diff touches are reported.</li>
 </ol>
 

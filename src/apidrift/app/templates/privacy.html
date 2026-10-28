@@ -6,9 +6,15 @@
 
 <p>When a check runs, apidrift downloads a snapshot of the repository's default branch through the GitHub API and reads it. It also reads repository metadata (name, default branch, whether Issues are enabled) and creates, updates or closes one issue. apidrift asks GitHub for three permissions, as its consent screen labels them: Metadata: read (GitHub requires it of every App), Contents: read, and Issues: read and write. Nothing else.</p>
 
+<p>The code is never executed. It is parsed for Stripe calls in a separate process that holds no credentials, then deleted.</p>
+
 <h2>What is stored</h2>
 
-<p>The repository's id and name, the number of Stripe call sites scanned, the number affected, a hash of the finding set, and the issue number. Never file paths, never source code, never tokens: an installation token is held in memory for one check and is not logged.</p>
+<p>The repository's id and name, the number of Stripe call sites scanned, the number affected, a hash of the finding set, and the issue number. Never file paths, never source code, never tokens: an installation token is held in memory for one check, is never written to disk, and is not logged. Logs contain repository ids only, not names, paths or code.</p>
+
+<h2>Where it runs</h2>
+
+<p>The server at {{ host }} is a single DigitalOcean droplet. Snapshots of repositories live on its disk only for the duration of a check.</p>
 
 <h2>When it is deleted</h2>
 

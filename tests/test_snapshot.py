@@ -81,3 +81,16 @@ def test_resolve_rejects_unknown_and_ambiguous_refs():
         snap.resolve("stripe", "nope")
     with pytest.raises(SystemExit):
         snap.resolve("stripe", "2026-01")
+
+
+def test_between_lists_the_snapshots_strictly_inside_a_pair(tmp_path):
+    first = snap.save(STRIPE, raw(), now=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    second = snap.save(STRIPE, raw(extra={"get": {}}), now=datetime(2026, 1, 2, tzinfo=timezone.utc))
+    third = snap.save(STRIPE, raw(extra={"post": {}}), now=datetime(2026, 1, 3, tzinfo=timezone.utc))
+    assert snap.between("stripe", first, third) == [second]
+    assert snap.between("stripe", first, second) == []
+    assert snap.between("stripe", third, first) == []  # not chronological: single diff
+    plain = tmp_path / "spec.json"
+    plain.write_bytes(raw())
+    assert snap.between("stripe", plain, third) == []  # a plain file is not in the chain
+    assert snap.between(None, first, third) == []

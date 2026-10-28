@@ -301,7 +301,8 @@ def test_work_dir_is_gone_after_every_failure_path(installed, conn, gh, settings
     failures = {
         "garbage": lambda: setattr(installed, "tarball", b"not a tarball"),
         "two tops": lambda: setattr(installed, "tarball", tar_bytes([("a", "dir", None), ("b", "dir", None)])),
-        "escape": lambda: setattr(installed, "tarball", tar_bytes([("top", "dir", None), ("top/l", "sym", "/etc"), ("top/l/x", "file", "x")])),
+        "escape": lambda: setattr(installed, "tarball", tar_bytes([("top", "dir", None), ("top/../../x", "file", "x")])),
+        "device": lambda: setattr(installed, "tarball", tar_bytes([("top", "dir", None), ("top/dev", "chr", None)])),
         "scan error": lambda: monkeypatch.setattr(checker, "scan_subprocess", lambda *a, **k: (_ for _ in ()).throw(CheckError("boom"))),
         "rate limited": lambda: installed.responses.__setitem__(
             ("GET", "/repos/octo/shop/branches/main"), httpx.Response(403, headers={"x-ratelimit-remaining": "0"}, json={})

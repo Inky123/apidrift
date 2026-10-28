@@ -140,3 +140,205 @@ def test_literal_urls_identify_the_endpoint_and_method(result):
 
 def test_skips_dependency_directories(result):
     assert not any(u.file.startswith("node_modules") for u in result.usages)
+
+
+# --- receivers, scoping, Ruby clients, documentation, v2, skips ------------------
+
+LAZY_TS = '''import Stripe from 'stripe';
+let _stripe: Stripe | null = null;
+export function getClient(): Stripe {
+  if (!_stripe) _stripe = new Stripe(process.env.KEY!);
+  return _stripe;
+}
+export async function a() { return getClient().charges.create({ amount: 1, currency: 'usd' }); }
+export async function b() { return (await getClient()).charges.create({ amount: 2 }); }
+export async function c() { return new Stripe('sk').charges.create({ amount: 3 }); }
+export async function d() { const { charges } = getClient(); return charges.create({ amount: 4 }); }
+export async function e() { const s = getClient(); return s.charges.create({ amount: 5 }); }
+export async function f() { return _stripe!.charges.create({ amount: 6 }); }
+export async function g() { return getClient().charges.create().then((c) => c.id); }
+'''
+
+SCOPE_JS = '''const stripe = require('stripe')('sk');
+function one() {
+  const params = { amount: 1, description: 'x' };
+  return stripe.charges.create(params);
+}
+function two() {
+  const params = { amount: 2 };
+  return stripe.charges.create(params);
+}
+function three() {
+  const params = build();
+  return stripe.charges.create(params);
+}
+function four() {
+  const params = { amount: 4 };
+  if (flag) params.description = 'late';
+  return stripe.charges.create(params);
+}
+function five() {
+  const params = {};
+  Object.assign(params, { currency: 'usd' });
+  return stripe.charges.create(params);
+}
+const shared = { amount: 6 };
+function six(id) {
+  return stripe.charges.capture(id, shared);
+}
+'''
+
+SCOPE_PY = '''import stripe
+SHARED = {"amount": 0}
+def one():
+    params = {"amount": 1, "description": "x"}
+    return stripe.Charge.create(**params)
+def two():
+    params = {"amount": 2}
+    return stripe.Charge.create(**params)
+def three():
+    params = build()
+    return stripe.Charge.create(**params)
+def four():
+    params = {"amount": 4}
+    if flag:
+        params["description"] = "late"
+    return stripe.Charge.create(**params)
+def five():
+    params = {"amount": 5}
+    params.update(currency="usd")
+    return stripe.Charge.create(**params)
+def six():
+    return stripe.Charge.create(**SHARED)
+def seven():
+    return client.v2.charges.create(amount=1)
+'''
+
+CLIENT_RB = '''require 'stripe'
+client = Stripe::StripeClient.new(ENV['KEY'])
+client.v1.charges.create({ amount: 1, currency: 'usd' })
+Stripe::Charge.create amount: 2, currency: 'usd',
+  description: 'two lines'
+Stripe::Charge.create({ amount: 3 }.merge(extra))
+Stripe::Charge.create(amount: 4)
+'''
+
+V2_JS = '''const stripe = require('stripe')('sk');
+stripe.v2.charges.create({ amount: 1 });
+stripe.charges.create({ amount: 2 });
+'''
+
+README = "Try it:\n\n    curl https://api.stripe.com/v1/charges -d amount=1\n"
+CASSETTE = "- request:\n    method: post\n    uri: https://api.stripe.com/v1/charges\n"
+
+
+@pytest.fixture(scope="module")
+def repo2(tmp_path_factory):
+    repo = tmp_path_factory.mktemp("repo2")
+    for name, text in {
+        "lazy.ts": LAZY_TS, "scope.js": SCOPE_JS, "scope.py": SCOPE_PY, "client.rb": CLIENT_RB, "v2.js": V2_JS,
+        "README.md": README, "docs/api.txt": README, "spec/cassettes/charge.yml": CASSETTE, "notes/stripe.sh": README,
+        "build/pay.js": V2_JS, "src/build/pay.js": V2_JS, "app/package.json": "{}", "app/dist/pay.js": V2_JS,
+    }.items():
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    (repo / "huge.js").write_text("stripe" + "x" * 1_600_000)
+    return repo
+
+
+@pytest.fixture(scope="module")
+def result2(repo2):
+    return scan_repo(repo2, SdkIndex.build(load_spec(sdk_doc())))
+
+
+def test_call_expression_receivers_and_client_aliases_in_typescript(result2):
+    sites = {u.line: u for u in result2.usages if u.file == "lazy.ts"}
+    assert sorted(sites) == [7, 8, 9, 10, 11, 12, 13]
+    assert all(u.label == "POST /v1/charges" and u.complete for u in sites.values())
+    assert sites[7].call == "getClient().charges.create" and sites[7].fields == {"amount", "currency"}
+    assert sites[8].call == "(await getClient()).charges.create" and sites[8].fields == {"amount"}
+    assert sites[9].call == "new Stripe().charges.create"
+    assert sites[10].call == "charges.create" and sites[11].call == "s.charges.create"
+    assert sites[12].call == "_stripe.charges.create"
+    assert sites[13].fields == frozenset()
+
+
+def test_javascript_variables_resolve_to_the_nearest_literal_in_scope(result2):
+    assert by(result2, "scope.js", 4).fields == {"amount", "description"} and by(result2, "scope.js", 4).complete
+    assert by(result2, "scope.js", 8).fields == {"amount"} and by(result2, "scope.js", 8).complete
+    three = by(result2, "scope.js", 12)
+    assert three.fields == frozenset() and not three.complete  # bound to a call, not a borrowed literal
+    four = by(result2, "scope.js", 17)
+    assert four.fields == {"amount", "description"} and not four.complete  # mutated after the literal
+    five = by(result2, "scope.js", 22)
+    assert five.fields == {"currency"} and not five.complete
+    six = by(result2, "scope.js", 26)
+    assert six.label == "POST /v1/charges/{charge}/capture" and six.fields == {"amount"} and six.complete
+
+
+def test_python_variables_resolve_per_function(result2):
+    assert by(result2, "scope.py", 5).fields == {"amount", "description"} and by(result2, "scope.py", 5).complete
+    assert by(result2, "scope.py", 8).fields == {"amount"} and by(result2, "scope.py", 8).complete
+    assert not by(result2, "scope.py", 11).complete and by(result2, "scope.py", 11).fields == frozenset()
+    four = by(result2, "scope.py", 16)
+    assert four.fields == {"amount", "description"} and not four.complete
+    five = by(result2, "scope.py", 20)
+    assert five.fields == {"amount", "currency"} and not five.complete
+    assert by(result2, "scope.py", 22).fields == {"amount"} and by(result2, "scope.py", 22).complete
+
+
+def test_ruby_stripe_client_roots_paren_less_calls_and_merge(result2):
+    one = by(result2, "client.rb", 3)
+    assert one.call == "client.v1.charges.create" and one.fields == {"amount", "currency"} and one.complete
+    two = by(result2, "client.rb", 4)
+    assert two.fields == {"amount", "currency", "description"} and two.complete
+    three = by(result2, "client.rb", 6)
+    assert three.fields == {"amount"} and not three.complete
+    assert by(result2, "client.rb", 7).fields == {"amount"}
+
+
+def test_v2_chains_never_resolve_to_v1_paths(result2):
+    assert not any(u.file == "v2.js" and u.line == 2 for u in result2.usages)
+    assert ("v2.js", 2, "stripe.v2.charges.create") in result2.unresolved
+    assert by(result2, "v2.js", 3).label == "POST /v1/charges"
+    assert ("scope.py", 24, "client.v2.charges.create") in result2.unresolved
+
+
+def test_documentation_urls_are_tagged_doc_and_not_counted(result2):
+    from apidrift.scanner import render_scan_text
+
+    docs = {u.file: u.language for u in result2.docs}
+    assert docs == {"README.md": "doc", "docs/api.txt": "doc", "spec/cassettes/charge.yml": "doc"}
+    assert by(result2, "notes/stripe.sh", 3).language == "http"
+    assert all(u.language != "doc" for u in result2.counted) and len(result2.counted) == len(result2.usages) - 3
+    text = render_scan_text(result2)
+    assert f"{len(result2.counted)} Stripe call sites" in text and "3 URLs in documentation / fixtures (not counted)" in text
+    assert "documentation / fixtures (not counted):\n  README.md:3" in text
+
+
+def test_build_directories_are_skipped_only_at_project_roots(result2):
+    files = {u.file for u in result2.usages}
+    assert "src/build/pay.js" in files
+    assert not any(f.startswith(("build/", "app/dist/")) for f in files)
+    assert result2.skipped_dirs == 2 and result2.skipped_files == 1
+    from apidrift.scanner import render_scan_text
+
+    assert "skipped: 1 oversize or binary files, 2 dependency or build directories" in render_scan_text(result2)
+
+
+def test_scan_repo_rejects_missing_paths(tmp_path):
+    with pytest.raises(SystemExit, match="does not exist"):
+        scan_repo(tmp_path / "nope", SdkIndex.build(load_spec(sdk_doc())))
+
+
+def test_reads_skip_generic_receivers_and_client_members():
+    from apidrift.scanner import _reads
+
+    reads = _reads(
+        "const charge = await stripe.charges.retrieve(id);\n"
+        "switch (event.type) {}\n"
+        "const total = req.body.amount + (await other()).status;\n"
+        "return [charge.receipt_url, data['object'], Stripe.PaymentIntent];\n"
+    )
+    assert reads == {"receipt_url", "status", "object"}

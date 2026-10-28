@@ -75,11 +75,12 @@ def test_hostile_file_names_are_neutralised_in_body_and_permalink(path):
     item = finding(file=path, call="stripe.`x`|<b>.create")
     title, body = render([item])
     assert body.count("<!-- apidrift:fp=") == 1
-    unescaped = [m.start() for m in re.finditer(r"(?<!\\)<", body)]
-    assert unescaped == [body.index("<!-- apidrift:fp=")], "a '<' outside the marker survived unescaped"
+    prose = re.sub(r"(`+)(?:(?!\1).)*\1", "", body)  # inside a code span nothing renders, so '<' is inert there
+    unescaped = [m.start() for m in re.finditer(r"(?<!\\)<", prose)]
+    assert unescaped == [prose.index("<!-- apidrift:fp=")], "a '<' outside the marker survived unescaped"
     assert not re.search(r"(?<!\\)`rm", body) and not re.search(r"(?<!\\)\|b", body)
     assert "\n- https://github.com/evil" not in body, "a newline in a file name injected a fake finding line"
-    urls = re.findall(r"https://github\.com/\S+", body)
+    urls = re.findall(r"https://github\.com/\S+", prose)  # a URL inside a code span is text, never a link
     for url in urls:
         assert url.startswith(f"https://github.com/octo/shop/blob/{SHA}/"), url
         tail = url[len(f"https://github.com/octo/shop/blob/{SHA}/"):]
@@ -87,8 +88,8 @@ def test_hostile_file_names_are_neutralised_in_body_and_permalink(path):
         assert "/../" not in tail and not tail.startswith("/")
     if item["url"] is None:
         assert issue.valid_path(path) is False
-    assert "https://evil" not in body and "https://github.com/evil" not in body
-    assert title == f"Stripe {NEW_VERSION} breaks 1 Stripe call site"
+    assert "https://evil" not in prose and "https://github.com/evil" not in prose
+    assert title == f"Upgrading to Stripe {NEW_VERSION} breaks 1 call site"
 
 
 def test_call_names_cannot_break_out_of_the_finding_line():
@@ -96,14 +97,14 @@ def test_call_names_cannot_break_out_of_the_finding_line():
     _, body = render([item])
     line = next(ln for ln in body.splitlines() if " via " in ln)
     after = line.split(" via ", 1)[1]
-    assert after.startswith("stripe.\\`Charge\\`\\|\\<b>.create\\\\x:"), after
+    assert after.startswith("``stripe.`Charge`|<b>.create\\x``"), after  # a code span whose fence outruns any backtick run
 
 
 def test_fifty_one_findings_show_fifty_and_the_overflow_line():
     items = [finding(file=f"f{i:03}.py", line=i) for i in range(51)]
     title, body = render(items)
     assert body.count("https://github.com/") == 50 and "and 1 more." in body
-    assert title.endswith("breaks 51 Stripe call sites")
+    assert title.endswith("breaks 51 call sites")
     assert body.rstrip().endswith("-->") and "f050.py" not in body and "f049.py" in body
 
 
@@ -122,7 +123,9 @@ def test_fingerprint_ignores_lines_and_order_but_not_added_findings():
     assert issue.fingerprint(base) != issue.fingerprint(base + [impact(file="a.py", target="currency")])
     assert issue.fingerprint(base) != issue.fingerprint(base + [impact(file="a.py", method="get")])
     assert issue.fingerprint(base) != issue.fingerprint([impact(file="a.py", target="description\n('b.py'")])
-    assert set(issue.finding_hashes(base)) < set(issue.finding_hashes(base + [impact(file="c.py")]))
+    # finding hashes drive 'gained': the same change in a renamed or extra file is not a new finding
+    assert set(issue.finding_hashes(base)) == set(issue.finding_hashes(base + [impact(file="c.py")]))
+    assert set(issue.finding_hashes(base)) < set(issue.finding_hashes(base + [impact(file="a.py", target="currency")]))
 
 
 def test_marker_is_not_fooled_by_near_misses():
@@ -245,10 +248,10 @@ def test_not_before_is_honoured_by_the_claim_query(installed, conn):
     assert db.claim_job(conn, at=db.later(3601)) is not None
 
 
-def test_backoff_schedule_doubles_each_attempt(installed, conn, gh, settings, monkeypatch):
-    monkeypatch.setattr(checker, "MAX_TARBALL_BYTES", 64)
+def test_backoff_schedule_doubles_each_attempt(installed, conn, gh, settings):
     job_id = db.queued_jobs(conn)[0]["id"]
     for attempt in range(1, 5):
+        installed.responses[("GET", "/repos/octo/shop")] = httpx.Response(502, json={})
         before = db.now()
         run_one(db.claim_job(conn, job_id=job_id), conn, gh, settings)
         row = db.get_job(conn, job_id)

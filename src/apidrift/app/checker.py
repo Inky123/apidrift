@@ -16,26 +16,30 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import snapshot as snap
-from ..diff import BREAKING, diff_specs
+from ..diff import BREAKING, diff_chain
 from ..impact import Impact, assess, render_impact_json
 from ..openapi import Spec, load_spec
 from ..report import filter_changes
 from ..scanner import ScanResult, scan_repo
 from ..sdkmap import SdkIndex
 from . import db, issue
-from .checkout import extract_tarball
+from .checkout import ExtractError, extract_tarball
 from .config import Settings
-from .github import GitHubClient, GitHubError, RateLimited, scrub
-from .poller import snapshots, version_of
+from .github import GitHubClient, GitHubError, RateLimited, TarballTooLarge, scrub
+from .poller import baseline_for, snapshots, version_of
 
 MAX_TARBALL_BYTES = 200 * 1024 * 1024
 SCAN_TIMEOUT = 600
 DEFAULT_MAX_MEM_MB = 1024
-TERMINAL_STATUSES = frozenset({401, 404, 410, 422})  # retrying cannot help: revoked, gone, not in the installation
+# Retrying cannot help: revoked, forbidden (a 403 with rate-limit headers is RateLimited instead), gone, not in
+# the installation. A 401 from the token endpoint gets one retry first (clock skew), see run_job.
+TERMINAL_STATUSES = frozenset({401, 403, 404, 410, 422})
+GONE_STATUSES = frozenset({404, 422})  # the installation no longer covers this repository
 CHILD_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR")
 _PATH_RE = re.compile(r"\S*/\S*")
 logger = logging.getLogger("apidrift.checker")
@@ -45,11 +49,14 @@ class CheckError(Exception):
     """A check failed; the message is already scrubbed and free of customer paths.
 
     ``terminal`` marks failures a retry cannot fix (the job is failed at once instead of backed off).
+    ``result`` names a terminal failure the customer can act on (``too_large``, ``timeout``, ``bad_archive``);
+    run_job stores it as the repo's ``last_result`` so a page can surface it.
     """
 
-    def __init__(self, message: str, terminal: bool = False) -> None:
+    def __init__(self, message: str, terminal: bool = False, result: str | None = None) -> None:
         super().__init__(message)
         self.terminal = terminal
+        self.result = result
 
 
 # --- the pipeline (also the subprocess entry) ------------------------------------
@@ -79,6 +86,7 @@ class LocalCheck:
     new_path: Path
     old_spec: Spec
     new_spec: Spec
+    versions: list[str] = field(default_factory=list)
 
     @property
     def old_label(self) -> str:
@@ -95,6 +103,7 @@ class LocalCheck:
     def payload(self) -> dict:
         data = json.loads(render_impact_json(self.result, self.impacts, self.old_label, self.new_label))
         data["old_version"], data["new_version"] = self.old_spec.version, self.new_spec.version
+        data["versions"] = self.versions
         return data
 
 
@@ -105,9 +114,11 @@ def run_local(repo_dir: Path, old: str, new: str) -> LocalCheck:
     index = SdkIndex.build(old_spec, new_spec)
     if index.empty:
         raise CheckError("the stored Stripe spec has no SDK method metadata")
-    changes = filter_changes(diff_specs(old_spec, new_spec), min_severity=BREAKING)
+    middle = [load_spec(snap.load(p)) for p in snap.between("stripe", old_path, new_path)]
+    changes, versions = diff_chain([old_spec, *middle, new_spec])
+    changes = filter_changes(changes, min_severity=BREAKING)
     result = scan_repo(Path(repo_dir), index)
-    return LocalCheck(result, assess(result.usages, changes), old_path, new_path, old_spec, new_spec)
+    return LocalCheck(result, assess(result.usages, changes), old_path, new_path, old_spec, new_spec, versions)
 
 
 def _last_line(stderr: bytes) -> str:
@@ -129,7 +140,7 @@ def scan_subprocess(
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=timeout, env=env, cwd=str(data_dir))
     except subprocess.TimeoutExpired:
-        raise CheckError(f"scan exceeded {timeout} s") from None
+        raise CheckError(f"scan exceeded {timeout} s", terminal=True, result="timeout") from None
     if proc.returncode not in (0, 1) or not proc.stdout.strip():
         raise CheckError(f"scan failed (exit {proc.returncode}): {_last_line(proc.stderr)}")
     try:
@@ -168,22 +179,51 @@ def run_job(job: sqlite3.Row, conn: sqlite3.Connection, gh: GitHubClient, settin
     installation = db.get_installation(conn, repo["installation_id"])
     if installation is None or installation["suspended"]:
         return "skipped: installation suspended"
-    try:
-        token = gh.installation_token(installation["id"], repo["id"])
-    except RateLimited:
-        raise
-    except GitHubError as exc:
-        raise CheckError(scrub(str(exc)), terminal=exc.status in TERMINAL_STATUSES) from None
-    except Exception as exc:
-        raise CheckError(scrub(str(exc) or type(exc).__name__)) from None
+    token = _token(job, conn, gh, installation["id"], repo)
     try:
         return _check(job, conn, gh, settings, repo, token)
     except RateLimited:
         raise
+    except CheckError as exc:
+        raise _noted(conn, repo, exc)
+    except TarballTooLarge as exc:
+        raise _noted(conn, repo, CheckError(scrub(str(exc), (token,)), terminal=True, result="too_large")) from None
+    except ExtractError as exc:
+        raise _noted(conn, repo, CheckError(str(exc), terminal=True, result="bad_archive")) from None
     except GitHubError as exc:
         raise CheckError(scrub(str(exc), (token,)), terminal=exc.status in TERMINAL_STATUSES) from None
     except Exception as exc:
         raise CheckError(scrub(str(exc) or type(exc).__name__, (token,))) from None
+    finally:
+        try:
+            gh.revoke_token(token)
+        except Exception as exc:  # noqa: BLE001 - best effort; the token expires within the hour anyway
+            logger.debug("could not revoke the installation token: %s", scrub(str(exc), (token,)))
+
+
+def _token(job: sqlite3.Row, conn: sqlite3.Connection, gh: GitHubClient, installation_id: int, repo: sqlite3.Row) -> str:
+    """Mint the job's token, mapping token-endpoint failures: 404/422 mark the repo gone, 401 retries once."""
+    try:
+        return gh.installation_token(installation_id, repo["id"])
+    except RateLimited:
+        raise
+    except GitHubError as exc:
+        if exc.status in GONE_STATUSES:
+            if not repo["gone"]:
+                logger.warning("repo %s (%s): GitHub refuses a token (%s); marking it gone until GitHub mentions it again",
+                               repo["id"], repo["full_name"], exc.status)
+            db.update_repo(conn, repo["id"], gone=1)
+        skew_retry = exc.status == 401 and job["attempts"] == 0
+        raise CheckError(scrub(str(exc)), terminal=exc.status in TERMINAL_STATUSES and not skew_retry) from None
+    except Exception as exc:
+        raise CheckError(scrub(str(exc) or type(exc).__name__)) from None
+
+
+def _noted(conn: sqlite3.Connection, repo: sqlite3.Row, exc: CheckError) -> CheckError:
+    """Store a customer-actionable terminal failure on the repo row; the check counts as done for this release."""
+    if exc.terminal and exc.result:
+        db.update_repo(conn, repo["id"], last_result=exc.result, last_checked_at=db.now())
+    return exc
 
 
 def _check(job: sqlite3.Row, conn: sqlite3.Connection, gh: GitHubClient, settings: Settings, repo: sqlite3.Row, token: str) -> str:
@@ -201,23 +241,28 @@ def _check(job: sqlite3.Row, conn: sqlite3.Connection, gh: GitHubClient, setting
     latest = snaps[-1]
     baseline = _baseline(repo["baseline"], snaps)
     work = settings.work_dir / str(job["id"])
+    started = time.monotonic()
     try:
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir(parents=True)
-        gh.download_tarball(token, full_name, sha, work / "src.tgz", MAX_TARBALL_BYTES)
+        size = gh.download_tarball(token, full_name, sha, work / "src.tgz", MAX_TARBALL_BYTES)
         tree = extract_tarball(work / "src.tgz", work / "tree")
         payload = scan_subprocess(tree, baseline.name, latest.name, settings.data)
     finally:
         shutil.rmtree(work, ignore_errors=True)
+    logger.info("job %s (repo %s): tarball %d bytes, %s -> %s scanned in %.1f s",
+                job["id"], repo["id"], size, baseline.name, latest.name, time.monotonic() - started)
     return _reconcile(conn, gh, settings, token, repo, full_name, sha, payload, latest)
 
 
 def _baseline(name: str | None, snaps: list[Path]) -> Path:
-    """The stored baseline when it still exists, else the previous snapshot (or the only one)."""
+    """The stored baseline when it still exists, else the newest snapshot of a different version than the latest."""
     for path in snaps:
         if path.name == name:
             return path
-    return snaps[-2] if len(snaps) >= 2 else snaps[-1]
+    fallback = baseline_for(snaps)
+    assert fallback is not None  # snaps is non-empty here
+    return fallback
 
 
 def _settle_issue(
@@ -266,11 +311,10 @@ def _reconcile(
     render = dict(full_name=full_name, sha=sha, old_version=old_version, new_version=new_version,
                   call_sites=int(payload.get("call_sites", 0)), fingerprint=fp)
     title, body = issue.render_issue(items, **render)
+    gained = set(hashes) - set(previous) if previous is not None else set()
+    version_changed = repo["issue_version"] is not None and repo["issue_version"] != new_version
     action = decide(
-        state, bool(items),
-        body_changed=_sha(body) != repo["issue_body_sha"],
-        version_changed=repo["issue_version"] is not None and repo["issue_version"] != new_version,
-        gained=previous is not None and bool(set(hashes) - set(previous)),
+        state, bool(items), body_changed=_sha(body) != repo["issue_body_sha"], version_changed=version_changed, gained=bool(gained)
     )
     record = dict(issue_fingerprint=fp, issue_items=json.dumps(hashes), issue_body_sha=_sha(body), issue_version=new_version)
     stamp = dict(last_sha=sha, last_checked_at=db.now())
@@ -286,6 +330,8 @@ def _reconcile(
         return f"findings: opened #{created['number']} superseding #{number}"
     if action == "update":
         gh.update_issue(token, full_name, number, title=title, body=body)
+        if gained or version_changed:  # editing a body notifies nobody; a comment does
+            gh.comment(token, full_name, number, f"Stripe {new_version} adds {len(gained)} new finding(s); the issue body is updated.")
         db.update_repo(conn, repo["id"], last_result="findings", **record, **stamp)
         return f"findings: updated #{number}"
     if action == "reopen":
@@ -301,7 +347,7 @@ def _reconcile(
         db.update_repo(conn, repo["id"], last_result="findings", **stamp)
         return f"findings: #{number} was closed by a person; staying silent"
     if action == "close":
-        gh.comment(token, full_name, number, f"Clean at {sha}")
+        gh.comment(token, full_name, number, f"No call sites are affected at {sha}; closing. Baseline is now {new_version}.")
         gh.update_issue(token, full_name, number, state="closed")
         db.update_repo(conn, repo["id"], issue_state="closed_by_us", last_result="clean", baseline=latest.name, **stamp)
         return f"clean: closed #{number}; baseline advanced to {latest.name}"

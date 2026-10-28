@@ -75,7 +75,7 @@ class GitHubClient:
         self.settings = settings
         self._key = settings.private_key()
         self._clock = clock
-        self._http = http or httpx.Client(timeout=30.0, headers={"User-Agent": USER_AGENT})
+        self._http = http or httpx.Client(timeout=30.0, headers={"User-Agent": USER_AGENT}, follow_redirects=True)
 
     # --- auth -----------------------------------------------------------------
 
@@ -95,9 +95,15 @@ class GitHubClient:
             raise GitHubError("installation token response had no token")
         return token
 
+    def revoke_token(self, token: str) -> None:
+        """Invalidate an installation token once a job is done with it (``DELETE /installation/token``)."""
+        self._request("DELETE", "/installation/token", bearer=token)
+
     # --- repositories -----------------------------------------------------------
 
     def get_repo(self, token: str, full_name: str) -> dict:
+        """Repository metadata; a renamed or transferred repo answers 301, which is followed, and the
+        returned ``full_name`` is the current one (the caller stores it)."""
         return self._request("GET", f"/repos/{full_name}", bearer=token).json()
 
     def branch_sha(self, token: str, full_name: str, branch: str) -> str:
@@ -160,7 +166,9 @@ class GitHubClient:
     def _request(
         self, method: str, path: str, *, bearer: str, json: Any = None, params: dict[str, str] | None = None
     ) -> httpx.Response:
-        response = self._http.request(method, API + path, headers=self._headers(bearer), json=json, params=params)
+        response = self._http.request(
+            method, API + path, headers=self._headers(bearer), json=json, params=params, follow_redirects=True
+        )
         self._check(response, f"{method} {path}")
         return response
 

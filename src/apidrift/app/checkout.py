@@ -25,6 +25,17 @@ def _check_member(member: tarfile.TarInfo) -> None:
         raise ExtractError("archive contains a special file")
 
 
+def _filter(member: tarfile.TarInfo, dest: str) -> tarfile.TarInfo | None:
+    """The ``data`` filter, except that a link whose target leaves ``dest`` is dropped instead of
+    failing the whole archive (repos do ship such symlinks); escaping files still raise."""
+    try:
+        return tarfile.data_filter(member, dest)
+    except (tarfile.LinkOutsideDestinationError, tarfile.AbsoluteLinkError):
+        if member.issym() or member.islnk():
+            return None
+        raise
+
+
 def extract_tarball(
     src: Path, dest: Path, max_bytes: int = MAX_TREE_BYTES, max_entries: int = MAX_ENTRIES
 ) -> Path:
@@ -42,7 +53,7 @@ def extract_tarball(
                 total += member.size
                 if total > max_bytes:
                     raise ExtractError(f"archive expands past {max_bytes:,} bytes")
-            tar.extractall(dest, members=members, filter="data")
+            tar.extractall(dest, members=members, filter=_filter)
     except tarfile.FilterError:
         raise ExtractError("archive entry escapes the destination or is a special file") from None
     except (tarfile.TarError, EOFError, OSError) as exc:

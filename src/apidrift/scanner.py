@@ -1,24 +1,29 @@
 """Find the Stripe calls in a checkout: which endpoint, which request fields, where.
 
-Python files are read with ``ast`` (imports resolved, keyword arguments and
-dict literals flattened). JavaScript, TypeScript and Ruby go through
-:mod:`jsparse`. Every text file is also searched for literal
-``api.stripe.com/v1/...`` URLs, which identify the endpoint but not the fields.
+Python files go through :mod:`pyparse` (``ast``), JavaScript, TypeScript and
+Ruby through :mod:`jsparse`. Every text file is also
+searched for literal ``api.stripe.com/v1/...`` URLs, which identify the
+endpoint but not the fields; in documentation-like files those are tagged
+``language="doc"`` and reported separately.
 """
 
 from __future__ import annotations
 
-import ast
 import json
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import jsparse
-from .sdkmap import SdkIndex
+from . import jsparse, pyparse
+from .sdkmap import Resolved, SdkIndex
 
-SKIP_DIRS = {"node_modules", "vendor", "dist", "build", "coverage", "site-packages", "__pycache__", "target", "tmp"}
+SKIP_DIRS = {"node_modules", "vendor", "site-packages", "__pycache__"}  # skipped anywhere
+BUILD_DIRS = {"dist", "build", "coverage", "target", "tmp"}  # skipped at the repo root or next to a project file
+PROJECT_FILES = {
+    "package.json", "pyproject.toml", "setup.py", "Gemfile", "Cargo.toml", "go.mod", "pom.xml", "composer.json",
+    "tsconfig.json",
+}
 SKIP_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "Pipfile.lock", "Gemfile.lock"}
 LANGUAGES = {
     ".py": "python",
@@ -31,16 +36,32 @@ TEXT_EXT = set(LANGUAGES) | {
     ".http", ".rs", ".swift", ".dart", ".ex", ".exs", ".scala", ".vue", ".svelte", ".html", ".erb", ".md", ".txt",
     ".cfg", ".ini", ".conf", ".graphql", ".sql",
 }
+DOC_EXT = {".md", ".txt", ".yml", ".yaml", ".json", ".env"}
+DOC_DIRS = {"docs", "doc", "fixtures", "__fixtures__", "cassettes"}
 MAX_BYTES = 1_500_000
-OPTION_KWARGS = {
-    "api_key", "stripe_account", "stripe_version", "idempotency_key", "api_version", "options", "timeout",
-    "max_network_retries", "stripe_context",
-}
 STRIPE_HINT = re.compile(r"stripe", re.I)
 URL_RE = re.compile(r"api\.stripe\.com(/v\d+(?:/[^\s'\"`<>)\],;?]+)+)")
 VERB_RE = re.compile(r"\b(get|post|delete)\b", re.I)
 METHOD_RE = re.compile(r"(?:method\s*[:=]\s*['\"]?|-X\s*['\"]?|--request\s+['\"]?)(get|post|delete)", re.I)
-READ_RE = re.compile(r"\.([A-Za-z_]\w*)|\[\s*[\"']([A-Za-z_]\w*)[\"']\s*\]")
+MEMBER_RE = re.compile(r"\.\s*([A-Za-z_]\w*)|\[\s*[\"']([A-Za-z_]\w*)[\"']\s*\]")
+GENERIC_RECEIVERS = {
+    "event", "evt", "req", "request", "res", "response", "body", "params", "options", "opts", "ctx", "this", "self",
+    "args", "kwargs", "process", "env",
+}
+NOT_READS = {  # language keywords, library methods and the Stripe client surface: never a response field
+    "then", "catch", "finally", "map", "filter", "reduce", "find", "some", "every", "push", "pop", "slice", "splice",
+    "concat", "join", "split", "length", "json", "text", "send", "end", "redirect", "render", "prototype",
+    "constructor", "bind", "call", "apply", "log", "error", "warn", "info", "stringify", "parse", "assign", "keys",
+    "values", "entries", "freeze", "from", "of", "get", "set", "has", "add", "delete", "append", "format", "strip",
+    "lower", "upper", "encode", "decode", "read", "write", "close", "open", "exit", "cwd", "argv", "env", "each",
+    "to_s", "to_json", "to_h", "nil", "new", "require", "exports", "module", "default", "items", "exists", "path",
+    "resolve", "reject", "listen", "use", "route", "post", "put", "patch", "all", "static", "raw", "headers",
+    "header", "query", "cookies", "include", "includes", "index", "replace", "trim", "match", "test", "exec", "now",
+    "create", "retrieve", "update", "modify", "list", "del", "search", "confirm", "capture", "cancel", "attach",
+    "detach", "construct_event", "api_key", "api_version", "v1", "v2", "checkout", "sessions", "customers",
+    "subscriptions", "invoices", "prices", "products", "charges", "refunds", "accounts", "events", "webhooks",
+    "payment_intents", "setup_intents", "payment_methods", "billing_portal", "financial_connections",
+}
 
 
 @dataclass(frozen=True)
@@ -52,8 +73,8 @@ class Usage:
     call: str
     fields: frozenset[str]
     complete: bool  # False when spreads, **kwargs or variables hide some fields
-    language: str
-    reads: frozenset[str] = frozenset()  # member names read anywhere in the same file
+    language: str  # python / javascript / typescript / ruby / http, or "doc" for URLs in documentation
+    reads: frozenset[str] = frozenset()  # member names read in the same file off a plausible response object
 
     @property
     def label(self) -> str:
@@ -76,30 +97,52 @@ class ScanResult:
     usages: list[Usage]
     files_scanned: int
     unresolved: list[tuple[str, int, str]]  # stripe-looking calls that matched no endpoint
+    skipped_files: int = 0  # oversize or binary files left unread
+    skipped_dirs: int = 0  # dependency and build directories left unread
+
+    @property
+    def counted(self) -> list[Usage]:
+        """Call sites in code; URL matches in documentation and fixtures are reported but not counted."""
+        return [u for u in self.usages if u.language != "doc"]
+
+    @property
+    def docs(self) -> list[Usage]:
+        return [u for u in self.usages if u.language == "doc"]
 
     def files_with_usages(self) -> int:
-        return len({u.file for u in self.usages})
+        return len({u.file for u in self.counted})
 
     def by_language(self) -> dict[str, int]:
         counts: dict[str, int] = {}
-        for u in self.usages:
+        for u in self.counted:
             counts[u.language] = counts.get(u.language, 0) + 1
         return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
 def scan_repo(root: Path, index: SdkIndex) -> ScanResult:
     root = Path(root).resolve()
-    files, base = ([root], root.parent) if root.is_file() else (list(_iter_files(root)), root)
+    if not root.exists():
+        raise SystemExit(f"apidrift: {root} does not exist")
+    if not (root.is_file() or root.is_dir()):
+        raise SystemExit(f"apidrift: {root} is not a file or directory")
+    if root.is_file():
+        files, base, skipped_files, skipped_dirs = [root], root.parent, 0, 0
+    else:
+        files, skipped_files, skipped_dirs = _iter_files(root)
+        base = root
     usages: list[Usage] = []
     unresolved: list[tuple[str, int, str]] = []
     scanned = 0
     for path in files:
         text = _read(path)
-        if text is None or not STRIPE_HINT.search(text):
+        if text is None:
+            skipped_files += 1
+            continue
+        if not STRIPE_HINT.search(text):
             continue
         scanned += 1
         rel = path.relative_to(base).as_posix()
-        reads = frozenset(a or b for a, b in READ_RE.findall(text))
+        reads = _reads(text)
         language = LANGUAGES.get(path.suffix.lower())
         found: list[Usage] = []
         if language == "python":
@@ -109,22 +152,38 @@ def scan_repo(root: Path, index: SdkIndex) -> ScanResult:
         else:
             missing = []
         unresolved += missing
-        found += _scan_urls(text, rel, index, reads, {u.line for u in found})
+        url_language = "doc" if _doc_like(rel, path.suffix.lower()) else "http"
+        found += _scan_urls(text, rel, index, reads, {u.line for u in found}, url_language)
         usages += found
     usages.sort(key=lambda u: (u.file, u.line, u.path))
-    return ScanResult(str(root), usages, scanned, unresolved)
+    return ScanResult(str(root), usages, scanned, unresolved, skipped_files, skipped_dirs)
 
 
-def _iter_files(root: Path):
+def _iter_files(root: Path) -> tuple[list[Path], int, int]:
+    files: list[Path] = []
+    skipped_files = skipped_dirs = 0
     for dirpath, dirs, names in os.walk(root):
-        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith("."))
+        here, present = Path(dirpath), set(names)
+        keep = []
+        for d in sorted(dirs):
+            if d.startswith("."):
+                continue
+            if d in SKIP_DIRS or (d in BUILD_DIRS and (here == root or present & PROJECT_FILES)):
+                skipped_dirs += 1
+                continue
+            keep.append(d)
+        dirs[:] = keep
         for name in sorted(names):
-            path = Path(dirpath) / name
+            path = here / name
             if name in SKIP_NAMES or name.endswith((".min.js", ".map")) or path.suffix.lower() not in TEXT_EXT:
                 continue
-            if path.is_symlink() or path.stat().st_size > MAX_BYTES:
+            if path.is_symlink():
                 continue
-            yield path
+            if path.stat().st_size > MAX_BYTES:
+                skipped_files += 1
+                continue
+            files.append(path)
+    return files, skipped_files, skipped_dirs
 
 
 def _read(path: Path) -> str | None:
@@ -137,159 +196,61 @@ def _read(path: Path) -> str | None:
     return raw.decode("utf-8", errors="replace")
 
 
+def _doc_like(rel: str, suffix: str) -> bool:
+    return suffix in DOC_EXT or any(part in DOC_DIRS for part in rel.split("/")[:-1])
+
+
+def _reads(text: str) -> frozenset[str]:
+    """Member names read off something that could be an API response (not ``req.body.x`` or ``event.type``)."""
+    out: set[str] = set()
+    for m in MEMBER_RE.finditer(text):
+        name = m.group(1) or m.group(2)
+        if name in NOT_READS or name[0].isupper() or "stripe" in name.lower() or re.search(r"[a-z][A-Z]", name):
+            continue
+        if _receiver(text, m.start()) in GENERIC_RECEIVERS:
+            continue
+        out.add(name)
+    return frozenset(out)
+
+
+def _receiver(text: str, i: int) -> str:
+    """Identifier immediately before a member access at ``i`` ("" after ``)`` or ``]``)."""
+    j = i
+    while j > 0 and text[j - 1] in " \t?!":
+        j -= 1
+    k = j
+    while k > 0 and (text[k - 1].isalnum() or text[k - 1] in "_$"):
+        k -= 1
+    return text[k:j]
+
+
+def _resolve(index: SdkIndex, chain: list[str]) -> Resolved | None:
+    """``index.resolve`` with one guard: a chain through ``v2`` must land on a ``/v2/`` path."""
+    resolved = index.resolve(chain)
+    if resolved is not None and "v2" in chain[:-1] and not resolved.path.startswith("/v2/"):
+        return None
+    return resolved
+
+
 # --- Python -----------------------------------------------------------------
 
 
 def _scan_python(text: str, rel: str, index: SdkIndex, reads: frozenset[str]):
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError, ValueError):
-        return [], []
-    aliases = _import_aliases(tree)
-    assigned = _assigned_dicts(tree)
-    usages: list[Usage] = []
-    unresolved: list[tuple[str, int, str]] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        chain = _chain(node.func)
-        if not chain:
-            continue
-        if chain[0] in aliases:
-            chain = aliases[chain[0]].split(".") + chain[1:]
-        if not _stripe_like(chain):
-            continue
-        call = ".".join(chain)
-        resolved = index.resolve(chain)
-        if resolved is None:
-            unresolved.append((rel, node.lineno, call))
-            continue
-        fields, complete = _py_fields(node, assigned)
-        usages.append(
-            Usage(rel, node.lineno, resolved.method, resolved.path, call, frozenset(fields), complete, "python", reads)
-        )
-    return usages, unresolved
-
-
-def _stripe_like(chain: list[str]) -> bool:
-    return any("stripe" in part.lower() for part in chain) or any(part in ("v1", "v2") for part in chain[1:-1])
-
-
-def _import_aliases(tree: ast.AST) -> dict[str, str]:
-    aliases: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "stripe" or alias.name.startswith("stripe."):
-                    aliases[alias.asname or alias.name.split(".")[0]] = alias.name if alias.asname else "stripe"
-        elif isinstance(node, ast.ImportFrom) and node.module and node.module.split(".")[0] == "stripe":
-            for alias in node.names:
-                if alias.name != "*":
-                    aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
-    return aliases
-
-
-def _assigned_dicts(tree: ast.AST) -> dict[str, ast.expr]:
-    """Variable name -> the last dict literal (or ``dict(...)`` call) assigned to it."""
-    out: dict[str, ast.expr] = {}
-    for node in ast.walk(tree):
-        targets = []
-        if isinstance(node, ast.Assign):
-            targets = node.targets
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            targets = [node.target]
-        else:
-            continue
-        value = node.value
-        if _as_dict(value, {}) is None:
-            continue
-        for target in targets:
-            if isinstance(target, ast.Name):
-                out[target.id] = value
-    return out
-
-
-def _chain(node: ast.expr) -> list[str] | None:
-    parts: list[str] = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-    if isinstance(node, ast.Name):
-        return [node.id] + parts[::-1]
-    if isinstance(node, ast.Call):
-        inner = _chain(node.func)
-        return inner + parts[::-1] if inner else None
-    return None
-
-
-def _as_dict(node: ast.expr | None, assigned: dict[str, ast.expr]):
-    """Return a node whose keys we can read: a dict literal, ``dict(k=v)`` call, or a variable bound to one."""
-    if isinstance(node, ast.Dict):
-        return node
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "dict" and not node.args:
-        return node
-    if isinstance(node, ast.Name) and node.id in assigned:
-        return assigned[node.id]
-    return None
-
-
-def _py_fields(call: ast.Call, assigned: dict[str, ast.expr]) -> tuple[set[str], bool]:
-    fields: set[str] = set()
-    complete = True
-    for kw in call.keywords:
-        if kw.arg is None or kw.arg == "params":
-            node = _as_dict(kw.value, assigned)
-            complete = _dict_fields(node, "", fields, assigned) if node is not None else False
-            continue
-        if kw.arg in OPTION_KWARGS:
-            continue
-        fields.add(kw.arg)
-        complete &= _nested(kw.value, kw.arg, fields, assigned)
-    for arg in call.args:
-        if isinstance(arg, ast.Starred):
-            complete = False
-        elif isinstance(arg, ast.Dict):
-            complete &= _dict_fields(arg, "", fields, assigned)
-    return fields, complete
-
-
-def _dict_fields(node: ast.expr, prefix: str, fields: set[str], assigned: dict[str, ast.expr]) -> bool:
-    complete = True
-    if isinstance(node, ast.Call):  # dict(amount=1, currency="usd")
-        pairs = [(kw.arg, kw.value) for kw in node.keywords]
-    else:
-        pairs = [(k.value if isinstance(k, ast.Constant) else None, v) for k, v in zip(node.keys, node.values)]
-    for key, value in pairs:
-        if not isinstance(key, str):
-            complete = False
-            continue
-        path = prefix + key
-        fields.add(path)
-        complete &= _nested(value, path, fields, assigned)
-    return complete
-
-
-def _nested(value: ast.expr, path: str, fields: set[str], assigned: dict[str, ast.expr]) -> bool:
-    node = _as_dict(value, assigned)
-    if node is not None:
-        return _dict_fields(node, path + ".", fields, assigned)
-    if isinstance(value, (ast.List, ast.Tuple)):
-        complete = True
-        for item in value.elts:
-            inner = _as_dict(item, assigned)
-            if inner is not None:
-                complete &= _dict_fields(inner, path + "[].", fields, assigned)
-            elif isinstance(item, ast.Starred):
-                complete = False
-        return complete
-    return True
+    found, missing = pyparse.extract(text, lambda chain: _resolve(index, chain))
+    usages = [
+        Usage(rel, f.line, f.resolved.method, f.resolved.path, f.call, frozenset(f.fields), f.complete, "python", reads)
+        for f in found
+    ]
+    return usages, [(rel, line, call) for line, call in missing]
 
 
 # --- JavaScript / TypeScript / Ruby -------------------------------------------
 
 
 def _scan_dynamic(text: str, rel: str, index: SdkIndex, reads: frozenset[str], language: str):
-    found, missing = jsparse.extract(text, index, ruby=language == "ruby")
+    found, missing = jsparse.extract(
+        text, index, ruby=language == "ruby", resolve=lambda chain: _resolve(index, chain)
+    )
     usages = [
         Usage(rel, f.line, f.resolved.method, f.resolved.path, f.call, frozenset(f.fields.paths), f.fields.complete,
               language, reads)
@@ -301,7 +262,9 @@ def _scan_dynamic(text: str, rel: str, index: SdkIndex, reads: frozenset[str], l
 # --- Literal URLs -------------------------------------------------------------
 
 
-def _scan_urls(text: str, rel: str, index: SdkIndex, reads: frozenset[str], taken: set[int]) -> list[Usage]:
+def _scan_urls(
+    text: str, rel: str, index: SdkIndex, reads: frozenset[str], taken: set[int], language: str = "http"
+) -> list[Usage]:
     usages: list[Usage] = []
     for m in URL_RE.finditer(text):
         spec_path = index.match_path(m.group(1))
@@ -311,7 +274,9 @@ def _scan_urls(text: str, rel: str, index: SdkIndex, reads: frozenset[str], take
         if line in taken:
             continue
         method = _method_hint(text, m.start(), m.end(), spec_path, index)
-        usages.append(Usage(rel, line, method, spec_path, "api.stripe.com" + m.group(1), frozenset(), False, "http", reads))
+        usages.append(
+            Usage(rel, line, method, spec_path, "api.stripe.com" + m.group(1), frozenset(), False, language, reads)
+        )
     return usages
 
 
@@ -334,13 +299,21 @@ def _method_hint(text: str, start: int, end: int, spec_path: str, index: SdkInde
 
 
 def render_scan_text(result: ScanResult) -> str:
+    counted, docs = result.counted, result.docs
     langs = ", ".join(f"{lang} {n}" for lang, n in result.by_language().items()) or "none"
-    lines = [
-        f"apidrift scan: {result.root}",
-        f"{len(result.usages)} Stripe call sites in {result.files_with_usages()} files ({langs}); "
-        f"{result.files_scanned} files mention stripe; {len(result.unresolved)} other stripe calls (not API endpoints)",
-    ]
-    for u in result.usages:
+    summary = (
+        f"{len(counted)} Stripe call sites in {result.files_with_usages()} files ({langs}); "
+        f"{result.files_scanned} files mention stripe; {len(result.unresolved)} other stripe calls (not API endpoints)"
+    )
+    if docs:
+        summary += f"; {len(docs)} URLs in documentation / fixtures (not counted)"
+    lines = [f"apidrift scan: {result.root}", summary]
+    if result.skipped_files or result.skipped_dirs:
+        lines.append(
+            f"skipped: {result.skipped_files} oversize or binary files, "
+            f"{result.skipped_dirs} dependency or build directories"
+        )
+    for u in counted:
         lines.append(f"{u.where}  {u.label}  via {u.call}")
         shown = ", ".join(sorted(u.fields)[:8])
         if len(u.fields) > 8:
@@ -349,6 +322,9 @@ def render_scan_text(result: ScanResult) -> str:
             shown += (" " if shown else "") + "(+ fields not visible)"
         if shown:
             lines.append(f"    fields: {shown}")
+    if docs:
+        lines += ["", "documentation / fixtures (not counted):"]
+        lines += [f"  {u.where}  {u.label}  via {u.call}" for u in docs]
     if result.unresolved:
         lines += ["", "other stripe calls (Stripe.js, webhooks, SDK helpers), not API endpoints:"]
         lines += [f"  {f}:{line}  {call}" for f, line, call in result.unresolved[:15]]
@@ -361,6 +337,8 @@ def render_scan_json(result: ScanResult) -> str:
     payload = {
         "root": result.root,
         "files_scanned": result.files_scanned,
+        "skipped_files": result.skipped_files,
+        "skipped_dirs": result.skipped_dirs,
         "usages": [u.to_dict() for u in result.usages],
         "unresolved": [{"file": f, "line": line, "call": call} for f, line, call in result.unresolved],
     }

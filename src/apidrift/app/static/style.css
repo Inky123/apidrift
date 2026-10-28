@@ -63,6 +63,17 @@ pre {
   font-size: 1.15rem;
 }
 
+.aside {
+  margin-top: -0.5em;
+  font-size: 0.9375rem;
+}
+
+.pricing {
+  margin-top: -0.5em;
+  color: var(--muted);
+  font-size: 0.9375rem;
+}
+
 .site {
   margin-bottom: 2.5rem;
   font-weight: 600;
@@ -101,6 +112,15 @@ code {
 
 .finding + .finding {
   margin-top: 0.6em;
+}
+
+.group {
+  display: block;
+  margin-bottom: 0.6em;
+}
+
+.finding + .group {
+  margin-top: 1em;
 }
 
 .legend {

@@ -2,9 +2,9 @@
 {% block content %}
 <h1>Installed</h1>
 
-<p>apidrift checks each selected repository within a few minutes and opens an issue only if a Stripe release affects it. Repositories that are clean get nothing.</p>
+<p>apidrift checks each selected repository within a few minutes. If a Stripe release affects a repository, <code>apidrift-check[bot]</code> opens one issue in that repository's Issues tab, naming the release and linking to each affected line. Repositories that are clean get nothing.</p>
 
 <p>A repository with Issues disabled is skipped; enable Issues to receive findings.</p>
 
-<p>There is nothing to configure. The <a href="/">front page</a> shows what a finding looks like.</p>
+<p>There is nothing to configure. The <a href="/">front page</a> shows what a finding looks like. To uninstall, open <a href="https://github.com/settings/installations">github.com/settings/installations</a> (or the organization's equivalent), choose apidrift, and uninstall.</p>
 {% endblock %}

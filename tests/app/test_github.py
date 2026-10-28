@@ -92,3 +92,28 @@ def test_issue_writes_go_to_the_expected_endpoints(gh, fake):
     assert [(r.method, r.url.path) for r in fake.writes] == [
         ("POST", "/repos/octo/shop/issues"), ("PATCH", "/repos/octo/shop/issues/1"), ("POST", "/repos/octo/shop/issues/1/comments"),
     ]
+
+
+def test_api_client_follows_a_301_for_a_renamed_repo(gh, fake):
+    """Reviewer scenario 4: GitHub answers 301 for the old name; every check used to fail until a push."""
+    moved = httpx.Response(301, headers={"location": "https://api.github.com/repos/octo/store"}, json={"message": "Moved Permanently"})
+    fake.responses[("GET", "/repos/octo/shop")] = moved
+    fake.full_name, fake.repo["full_name"] = "octo/store", "octo/store"
+    assert gh.get_repo(TOKEN, "octo/shop")["full_name"] == "octo/store"
+    followed = [r for r in fake.requests if r.url.path == "/repos/octo/store"]
+    assert len(followed) == 1 and followed[0].headers["authorization"] == f"Bearer {TOKEN}"
+
+
+def test_default_client_follows_redirects(settings):
+    from apidrift.app.github import GitHubClient
+
+    assert GitHubClient(settings)._http.follow_redirects is True
+
+
+def test_revoke_token_deletes_the_installation_token(gh, fake):
+    fake.responses[("DELETE", "/installation/token")] = httpx.Response(204)
+    gh.revoke_token(TOKEN)
+    request = fake.requests[-1]
+    assert (request.method, request.url.path, request.headers["authorization"]) == ("DELETE", "/installation/token", f"Bearer {TOKEN}")
+    with pytest.raises(GitHubError):  # the fake knows no such route without a canned answer: callers ignore this
+        gh.revoke_token(TOKEN)

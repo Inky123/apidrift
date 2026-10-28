@@ -21,7 +21,12 @@ SENT, OPAQUE, ABSENT = "sent", "opaque", "absent"
 PARENT_RE = re.compile(r"^(.*?)(?:\[\])?\.[^.\[\]]+$")
 RELAXATIONS = {"added", "now_optional", "enum_added", "enum_relaxed", "type_widened"}
 IGNORED = {"endpoint_added", "schema_added", "schema_renamed", "response_schema_narrowed", "response_field_added"}
+GENERIC_LEAVES = {  # member names so common that a read in the file need not be of this response
+    "type", "id", "status", "object", "data", "amount", "currency", "created", "livemode", "metadata", "url", "name",
+    "description",
+}
 MARK = {AFFECTED: "!", POSSIBLE: "?"}
+DOC = "doc"
 
 
 @dataclass(frozen=True)
@@ -159,6 +164,8 @@ def _response_impact(change: Change, usage: Usage) -> Impact | None:
         return Impact(usage, change, POSSIBLE, "the response of this endpoint may change")
     name = _leaf(change.target)
     if name and name in usage.reads:
+        if name in GENERIC_LEAVES:
+            return Impact(usage, change, POSSIBLE, f"a field named {name} is read in this file (common name; may be another object)")
         return Impact(usage, change, AFFECTED, f"response field {name} is read in this file")
     if name and change.severity != BREAKING:
         return None  # a warning about a response field this file never reads is noise
@@ -188,48 +195,61 @@ def summary(impacts: list[Impact]) -> dict[str, int]:
 def render_impact_text(
     result: ScanResult, impacts: list[Impact], old_label: str, new_label: str, show_all: bool = False
 ) -> str:
-    counts = summary(impacts)
-    hit = {(i.usage.file, i.usage.line, i.usage.path) for i in impacts}
+    counted = [i for i in impacts if i.usage.language != DOC]
+    in_docs = [i for i in impacts if i.usage.language == DOC]
+    counts = summary(counted)
+    hit = {(i.usage.file, i.usage.line, i.usage.path) for i in counted}
     langs = ", ".join(f"{lang} {n}" for lang, n in result.by_language().items()) or "none"
     lines = [
         f"apidrift impact: {result.root}",
         f"{old_label} -> {new_label}",
-        f"{len(result.usages)} Stripe call sites in {result.files_with_usages()} files ({langs}); "
+        f"{len(result.counted)} Stripe call sites in {result.files_with_usages()} files ({langs}); "
         f"{len(hit)} hit by this upgrade: {counts[BREAKING]} breaking, {counts[WARNING]} warnings, "
         f"{counts[INFO]} informational",
     ]
     for sev in (BREAKING, WARNING, INFO):
-        group = [i for i in impacts if i.severity == sev]
+        group = [i for i in counted if i.severity == sev]
         if not group:
             continue
         lines += ["", f"== {sev.upper()} ({len(group)}) =="]
-        last: Usage | None = None
-        for impact in group:
-            u = impact.usage
-            if u is not last:
-                lines.append(f"{MARK[impact.certainty]} {u.where}  {u.label}  via {u.call}")
-                last = u
-            lines.append(f"    [{impact.change.kind}] {impact.change.message}")
-            lines.append(f"    why: {impact.reason}")
-    if impacts:
+        lines += _impact_lines(group)
+    if counted:
         lines += ["", "! affected   ? possibly affected (arguments or response reads not visible)"]
-    untouched = [u for u in result.usages if (u.file, u.line, u.path) not in hit]
+    untouched = [u for u in result.counted if (u.file, u.line, u.path) not in hit]
     if untouched:
         lines.append(f"not hit: {len(untouched)} call sites" + ("" if show_all else " (--all lists them)"))
         if show_all:
             lines += [f"  {u.where}  {u.label}  via {u.call}" for u in untouched]
+    if in_docs:
+        lines += ["", f"in documentation / fixtures (not counted): {len(in_docs)}"]
+        lines += _impact_lines(in_docs)
     if result.unresolved:
         lines.append(f"other stripe calls (Stripe.js, webhooks, SDK helpers): {len(result.unresolved)} (apidrift scan lists them)")
     return "\n".join(lines)
 
 
+def _impact_lines(group: list[Impact]) -> list[str]:
+    lines: list[str] = []
+    last: Usage | None = None
+    for impact in group:
+        u = impact.usage
+        if u is not last:
+            lines.append(f"{MARK[impact.certainty]} {u.where}  {u.label}  via {u.call}")
+            last = u
+        lines.append(f"    [{impact.change.kind}] {impact.change.message}")
+        lines.append(f"    why: {impact.reason}")
+    return lines
+
+
 def render_impact_json(result: ScanResult, impacts: list[Impact], old_label: str, new_label: str) -> str:
+    counted = [i for i in impacts if i.usage.language != DOC]
     payload = {
         "root": result.root,
         "old": old_label,
         "new": new_label,
-        "call_sites": len(result.usages),
-        "summary": summary(impacts),
-        "impacts": [i.to_dict() for i in impacts],
+        "call_sites": len(result.counted),
+        "documentation_matches": len(result.docs),
+        "summary": summary(counted),
+        "impacts": [i.to_dict() for i in impacts],  # documentation hits included, tagged language "doc"
     }
     return json.dumps(payload, indent=2)

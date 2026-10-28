@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
 
 from . import snapshot as snap
 from .app.commands import add_parsers as add_app_parsers
-from .diff import BREAKING, diff_specs
+from .diff import BREAKING, Change, diff_chain
 from .impact import assess, render_impact_json, render_impact_text
 from .openapi import Spec, load_spec
 from .providers import PROVIDERS, get_provider
@@ -40,21 +41,39 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 
 def cmd_diff(args: argparse.Namespace) -> int:
-    old_path = snap.resolve(args.provider, args.old)
-    new_path = snap.resolve(args.provider, args.new)
-    old_spec = load_spec(snap.load(old_path))
-    new_spec = load_spec(snap.load(new_path))
-    changes = filter_changes(diff_specs(old_spec, new_spec), min_severity=args.severity, path_prefix=args.path)
-    old_label = f"{old_path.name} (version {old_spec.version})"
-    new_label = f"{new_path.name} (version {new_spec.version})"
-    render = render_json if args.json else render_text
-    print(render(changes, old_label, new_label))
+    old_path, old_spec = _spec(args.provider, args.old)
+    new_path, new_spec = _spec(args.provider, args.new)
+    changes, versions = _changes(args.provider, old_path, old_spec, new_path, new_spec, collapse=True)
+    changes = filter_changes(changes, min_severity=args.severity, path_prefix=args.path)
+    old_label, new_label = _label(old_path, old_spec), _label(new_path, new_spec)
+    if args.json:
+        print(_with_versions(render_json(changes, old_label, new_label), versions))
+    else:
+        print(render_text(changes, old_label, new_label))
     return 1 if any(c.severity == BREAKING for c in changes) else 0
 
 
 def _spec(provider: str | None, ref: str) -> tuple[Path, Spec]:
     path = snap.resolve(provider, ref)
     return path, load_spec(snap.load(path))
+
+
+def _changes(
+    provider: str | None, old_path: Path, old_spec: Spec, new_path: Path, new_spec: Spec, *, collapse: bool = False
+) -> tuple[list[Change], list[str]]:
+    """The old->new diff with each change stamped with the snapshot version that introduced it.
+
+    Snapshots stored between the two are loaded and diffed pairwise; plain spec files, or a pair with
+    nothing in between, take the single-diff fast path.
+    """
+    middle = [load_spec(snap.load(path)) for path in snap.between(provider, old_path, new_path)]
+    return diff_chain([old_spec, *middle, new_spec], collapse=collapse)
+
+
+def _with_versions(rendered: str, versions: list[str]) -> str:
+    payload = json.loads(rendered)
+    payload["versions"] = versions
+    return json.dumps(payload, indent=2)
 
 
 def _label(path: Path, spec: Spec) -> str:
@@ -85,15 +104,16 @@ def cmd_impact(args: argparse.Namespace) -> int:
     new_path, new_spec = _spec(args.provider, args.new)
     index = SdkIndex.build(old_spec, new_spec)
     _require_sdk(index, args.provider)
-    changes = filter_changes(diff_specs(old_spec, new_spec), min_severity=args.severity)
+    changes, versions = _changes(args.provider, old_path, old_spec, new_path, new_spec)
+    changes = filter_changes(changes, min_severity=args.severity)
     result = scan_repo(Path(args.repo), index)
     impacts = assess(result.usages, changes)
     old_label, new_label = _label(old_path, old_spec), _label(new_path, new_spec)
     if args.json:
-        print(render_impact_json(result, impacts, old_label, new_label))
+        print(_with_versions(render_impact_json(result, impacts, old_label, new_label), versions))
     else:
         print(render_impact_text(result, impacts, old_label, new_label, show_all=args.all))
-    return 1 if any(i.severity == BREAKING for i in impacts) else 0
+    return 1 if any(i.severity == BREAKING and i.usage.language != "doc" for i in impacts) else 0
 
 
 def build_parser() -> argparse.ArgumentParser:

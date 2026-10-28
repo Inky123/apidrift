@@ -11,23 +11,26 @@ import bisect
 import re
 from dataclasses import dataclass, field
 
+from . import jsroots
+from .jsroots import CALL_ARGS, NAME
 from .sdkmap import Resolved, SdkIndex
 
 IDENT = re.compile(r"[A-Za-z_$][\w$]*")
-JS_CALL = re.compile(r"(?<![\w$.])((?:[A-Za-z_$][\w$]*\s*\.\s*){1,5}[A-Za-z_$][\w$]*)\s*\(")
-RUBY_CALL = re.compile(r"(?<![\w:.])((?:[A-Za-z_]\w*\s*(?:\.|::)\s*){1,5}[A-Za-z_]\w*)\s*\(")
+SEGMENT = rf"{NAME}(?:\s*{CALL_ARGS})*"  # identifier, or a call whose result is the receiver
+NOT_A_RECEIVER = r"(?!(?:return|yield|throw|typeof|void|delete|case|else|do|in|of|instanceof|await)\b)"
+JS_CALL = re.compile(
+    rf"(?<![\w$.])((?:(?:new\s+)?{NOT_A_RECEIVER}{SEGMENT}|\(\s*await\s+(?:this\s*\.\s*)?{SEGMENT}\s*\))"
+    rf"\s*\.\s*(?:{NAME}\s*\.\s*){{0,4}}{NAME})\s*\("
+)
+RUBY_CALL = re.compile(
+    r"(?<![\w:.])((?:[A-Za-z_]\w*\s*(?:\.|::)\s*){1,5}[A-Za-z_]\w*)"
+    r"(?:\s*(\()|[ \t]+(?=[A-Za-z_]\w*\s*:(?!:)|:[A-Za-z_]\w*\s*=>|[\"'][^\"'\n]*[\"']\s*=>))"
+)
 RUBY_KEYWORD = re.compile(r"(?:[A-Za-z_]\w*\s*:(?!:)|:[A-Za-z_]\w*\s*=>|[\"'][^\"']*[\"']\s*=>)")
-STRIPE_ROOTS = [
-    re.compile(
-        r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+?)?=\s*(?:await\s+)?(?:new\s+)?"
-        r"(?:require\(\s*['\"]stripe['\"]\s*\)|Stripe)\s*\("
-    ),
-    re.compile(r"this\.([A-Za-z_$][\w$]*)\s*=\s*(?:new\s+)?Stripe\s*\("),
-    re.compile(r"\b([A-Za-z_$][\w$]*)\s*:\s*Stripe\b"),
-]
-ASSIGNED_OBJECT = re.compile(r"\b([A-Za-z_$][\w$]*)(?:\s*:\s*[\w.<>\[\]|, ]+?)?\s*=\s*(\{)")
 JS_MASK = re.compile(r"'(?:\\.|[^'\\\n])*'|\"(?:\\.|[^\"\\\n])*\"|`(?:\\.|[^`\\])*`|//[^\n]*|/\*.*?\*/", re.S)
 RUBY_MASK = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|#[^\n]*")
+NON_NULL = re.compile(r"(?<=[\w$)\]])!\.")
+MERGERS = (".merge", ".update", ".deep_merge")
 OPTION_KEYS = {
     "idempotencyKey", "stripeAccount", "apiKey", "apiVersion", "maxNetworkRetries", "timeout", "host",
     "stripeContext", "idempotency_key", "stripe_account", "api_key", "stripe_version", "api_version",
@@ -55,7 +58,7 @@ class Source:
     """Cursor over source text that knows how to step over strings, comments and brackets."""
 
     def __init__(self, text: str, *, ruby: bool = False) -> None:
-        self.text = text if ruby else text.replace("?.", " .")  # same length, keeps offsets
+        self.text = text if ruby else NON_NULL.sub(" .", text.replace("?.", " ."))  # same length, keeps offsets
         self.n = len(self.text)
         self.ruby = ruby
 
@@ -157,6 +160,28 @@ class Source:
                 i += 1
         return spans
 
+    def line_end(self, i: int) -> int:
+        """End of the logical line starting at ``i``: lines ending in a comma continue (paren-less Ruby calls)."""
+        text, last = self.text, ""
+        while i < self.n:
+            c = text[i]
+            if c == "\n":
+                if last != ",":
+                    return i
+                i += 1
+            elif c == "#":
+                end = text.find("\n", i)
+                i = self.n if end < 0 else end
+            elif c in QUOTES:
+                i, last = self.skip_string(i), c
+            elif c in OPENERS:
+                i, last = self.skip_balanced(i), c
+            else:
+                if not c.isspace():
+                    last = c
+                i += 1
+        return i
+
     def object_fields(self, i: int, prefix: str, out: Fields, *, closer: str = "}") -> int:
         """Parse an object or hash body from just inside its opener; return the index past the closer."""
         text = self.text
@@ -257,11 +282,6 @@ class Source:
         return i
 
 
-def stripe_roots(text: str) -> set[str]:
-    """Variable names that hold a Stripe client (``const client = new Stripe(...)``)."""
-    return {m.group(1) for pattern in STRIPE_ROOTS for m in pattern.finditer(text)}
-
-
 class Mask:
     """Spans of string literals and comments, so matches inside them can be ignored."""
 
@@ -274,47 +294,58 @@ class Mask:
         return k >= 0 and self.spans[k][0] <= pos < self.spans[k][1]
 
 
-def assigned_objects(text: str, mask: Mask) -> dict[str, int]:
-    """Variable name -> index of the ``{`` of the last object literal assigned to it."""
-    return {m.group(1): m.start(2) for m in ASSIGNED_OBJECT.finditer(text) if not mask.covers(m.start(2))}
-
-
 def eligible(chain: list[str], roots: set[str]) -> bool:
     if any("stripe" in part.lower() for part in chain):
         return True
     if chain[0] in roots:
         return True
-    return chain[0] in ("this", "self") and len(chain) > 2 and chain[1] in roots
+    if chain[0] in ("this", "self") and len(chain) > 2 and chain[1] in roots:
+        return True
+    return any(part in ("v1", "v2") for part in chain[1:-1])  # client.v1.payment_intents.create
 
 
-def extract(text: str, index: SdkIndex, *, ruby: bool = False) -> tuple[list[Found], list[tuple[int, str]]]:
-    """Stripe SDK calls in a JS/TS/Ruby source, plus (line, call) pairs that matched no endpoint."""
+def extract(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> tuple[list[Found], list[tuple[int, str]]]:
+    """Stripe SDK calls in a JS/TS/Ruby source, plus (line, call) pairs that matched no endpoint.
+
+    ``resolve`` maps a call chain to a :class:`Resolved` operation (defaults to ``index.resolve``).
+    """
     src = Source(text, ruby=ruby)
     mask = Mask(src.text, ruby=ruby)
-    roots = set() if ruby else stripe_roots(src.text)
-    objects = assigned_objects(src.text, mask)
+    scopes = jsroots.Scopes(src, mask)
+    roots = jsroots.stripe_roots(src, mask, scopes)
+    bindings = jsroots.Bindings(src, mask, scopes)
+    resolve = resolve or index.resolve
     found: list[Found] = []
     unresolved: list[tuple[int, str]] = []
     for m in (RUBY_CALL if ruby else JS_CALL).finditer(src.text):
         if mask.covers(m.start()):
             continue
-        chain = [p for p in re.split(r"\s*(?:\.|::)\s*", m.group(1).strip()) if p]
-        if not eligible(chain, roots):
+        if ruby:
+            chain, hint = [p for p in re.split(r"\s*(?:\.|::)\s*", m.group(1).strip()) if p], False
+        else:
+            chain, hint = jsroots.chain_parts(src, m.start(1), m.end(1))
+        if len(chain) < 2 or not (hint or eligible(chain, roots)):
             continue
-        call = re.sub(r"\s+", "", m.group(1))
+        call = jsroots.display(m.group(1))
         line = src.text.count("\n", 0, m.start()) + 1
-        resolved = index.resolve(chain)
+        resolved = resolve(chain)
         if resolved is None:
             unresolved.append((line, call))
             continue
         fields = Fields()
-        collect(src, src.args(m.end() - 1), "{" in resolved.path, objects, fields, ruby=ruby)
+        if ruby and m.group(2) is None:  # Stripe::PaymentIntent.create amount: 1, currency: 'usd'
+            end = src.line_end(m.end())
+            args_src = Source(src.text[:end] + ")", ruby=True)
+            spans = args_src.args(m.end() - 1)
+        else:
+            args_src, spans = src, src.args(m.end() - 1)
+        collect(args_src, spans, "{" in resolved.path, bindings, fields, ruby=ruby)
         found.append(Found(line, call, resolved, fields))
     return found, unresolved
 
 
 def collect(
-    src: Source, spans: list[tuple[int, int]], has_id: bool, objects: dict[str, int], out: Fields, *, ruby: bool
+    src: Source, spans: list[tuple[int, int]], has_id: bool, bindings: jsroots.Bindings, out: Fields, *, ruby: bool
 ) -> None:
     """Merge the request fields of each argument into ``out``."""
     text = src.text
@@ -325,6 +356,9 @@ def collect(
         c = text[i]
         if c == "{":
             merge(out, parse_object(src, i + 1))
+            after = src.skip_space(src.skip_balanced(i))
+            if text.startswith(MERGERS, after):  # { amount: 1 }.merge(extra)
+                out.complete = False
         elif text.startswith("...", i) or (ruby and text.startswith("**", i)):
             out.complete = False
         elif ruby and RUBY_KEYWORD.match(text, i):
@@ -337,12 +371,27 @@ def collect(
         else:
             m = IDENT.match(text, i)
             name = m.group(0) if m else ""
-            if name and text[i:b].strip() == name and name in objects:
-                merge(out, parse_object(src, objects[name] + 1))
-            elif k == 0 and has_id:
+            binding = bindings.at(name, i) if name and text[i:b].strip() == name else None
+            if binding is not None and binding.literal is not None:
+                merge(out, variable_fields(src, bindings, binding, i))
+            elif k == 0 and has_id and (binding is None or binding.literal is None):
                 continue
             else:
                 out.complete = False
+
+
+def variable_fields(src: Source, bindings: jsroots.Bindings, binding: jsroots.Binding, at: int) -> Fields:
+    """Fields of the object literal a variable was bound to, plus keys written into it before the call."""
+    sub = parse_object(src, binding.literal + 1)
+    if not sub.paths:  # ``const params = {}`` is filled in elsewhere
+        sub.complete = False
+    for mutation in bindings.mutations(binding.name, binding.literal, at):
+        sub.complete = False
+        if mutation.key:
+            sub.paths.add(mutation.key)
+        if mutation.literal is not None:
+            sub.paths |= parse_object(src, mutation.literal + 1).paths
+    return sub
 
 
 def parse_object(src: Source, i: int) -> Fields:

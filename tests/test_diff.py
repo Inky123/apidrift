@@ -1,3 +1,5 @@
+import pytest
+
 from apidrift.diff import BREAKING, INFO, WARNING, diff_specs
 from apidrift.openapi import load_spec
 from specs import base_doc
@@ -245,3 +247,141 @@ def test_response_schema_renamed_is_silent():
 
     changes = run(mutate)
     assert all(c.severity == INFO for c in changes), [(c.kind, c.severity) for c in changes]
+
+
+# --- release attribution, collapsed removals, open enums ----------------------------------------
+
+from apidrift.diff import collapse_removals, diff_chain  # noqa: E402
+
+
+def versioned(version, *mutations):
+    doc = base_doc()
+    doc["info"]["version"] = version
+    for mutate in mutations:
+        mutate(doc)
+    return load_spec(doc)
+
+
+def drop_description(d):
+    post_body(d)["properties"].pop("description")
+
+
+def drop_receipt(d):
+    charge(d)["properties"].pop("receipt_url")
+
+
+def test_diff_chain_stamps_each_change_with_the_version_that_introduced_it():
+    specs = [
+        versioned("2026-01-01.a"),
+        versioned("2026-02-01.b", drop_description),
+        versioned("2026-02-01.b", drop_description),  # same version string: a re-published spec
+        versioned("2026-03-01.c", drop_description, drop_receipt),
+    ]
+    changes, versions = diff_chain(specs)
+    assert versions == ["2026-01-01.a", "2026-02-01.b", "2026-03-01.c"]
+    by_kind = {c.kind: c.introduced for c in changes}
+    assert by_kind == {"body_removed": "2026-02-01.b", "response_field_removed": "2026-03-01.c"}
+    assert changes[0].to_dict()["introduced"] in ("2026-02-01.b", "2026-03-01.c")
+    assert changes[0].key() == (changes[0].kind, changes[0].method, changes[0].path, changes[0].schema, changes[0].target)
+
+
+def test_diff_chain_with_two_specs_is_a_single_diff_stamped_with_the_new_version():
+    changes, versions = diff_chain([versioned("2026-01-01.a"), versioned("2026-02-01.b", drop_description)])
+    assert versions == ["2026-01-01.a", "2026-02-01.b"]
+    assert [(c.kind, c.introduced) for c in changes] == [("body_removed", "2026-02-01.b")]
+    with pytest.raises(ValueError):
+        diff_chain([versioned("2026-01-01.a")])
+
+
+def test_change_seen_only_in_the_full_diff_counts_as_introduced_by_the_new_version():
+    # Removed in b, re-added in c, removed again in d: the pairwise diffs attribute it to b (the first time).
+    # A change that no pairwise step reports at all (here: injected by hand) falls back to the last version.
+    specs = [versioned("1.a"), versioned("2.b", drop_description), versioned("3.c"), versioned("4.d", drop_description)]
+    changes, _ = diff_chain(specs)
+    assert [(c.kind, c.introduced) for c in changes] == [("body_removed", "2.b")]
+    changes, _ = diff_chain([versioned("1.a"), versioned("2.b"), versioned("3.c", drop_description)])
+    assert [(c.kind, c.introduced) for c in changes] == [("body_removed", "3.c")]
+
+
+def add_country_options(d, codes=("at", "be", "de")):
+    options = {}
+    for code in codes:
+        options[code] = {"type": "object", "properties": {"igic": {"type": "object", "properties": {"rate": {"type": "integer"}}}, "standard": {"type": "string"}}}
+    post_body(d)["properties"]["country_options"] = {"type": "object", "properties": options}
+
+
+def drop_igic(d, codes=("at", "be", "de")):
+    for code in codes:
+        post_body(d)["properties"]["country_options"]["properties"][code]["properties"].pop("igic")
+
+
+def test_sibling_leaf_removals_collapse_into_one_wildcard_change_when_asked():
+    old, new = base_doc(), base_doc()
+    add_country_options(old)
+    add_country_options(new)
+    drop_igic(new)
+    exact = diff_specs(load_spec(old), load_spec(new))
+    assert [c.target for c in exact] == ["country_options.at.igic", "country_options.be.igic", "country_options.de.igic"]
+    collapsed = diff_specs(load_spec(old), load_spec(new), collapse=True)
+    assert len(collapsed) == 1
+    change = collapsed[0]
+    assert (change.kind, change.severity, change.target) == ("body_removed", BREAKING, "country_options.*.igic")
+    assert change.message == "body field country_options.*.igic was removed (3 keys: at, be, de)"
+    assert change.old == {"type": "object", "required": False, "enum": None}
+    assert change.key() == ("body_removed", "post", "/v1/charges", None, "country_options.*.igic")
+
+
+def test_fewer_than_three_siblings_or_different_shapes_do_not_collapse():
+    old, new = base_doc(), base_doc()
+    add_country_options(old, ("at", "be"))
+    add_country_options(new, ("at", "be"))
+    drop_igic(new, ("at", "be"))
+    assert len(diff_specs(load_spec(old), load_spec(new), collapse=True)) == 2
+    old, new = base_doc(), base_doc()
+    add_country_options(old)
+    post_body(old)["properties"]["country_options"]["properties"]["de"]["properties"]["igic"] = {"type": "string"}
+    add_country_options(new)
+    drop_igic(new)
+    targets = sorted(c.target for c in diff_specs(load_spec(old), load_spec(new), collapse=True))
+    assert targets == ["country_options.at.igic", "country_options.be.igic", "country_options.de.igic"]
+
+
+def test_collapse_applies_to_response_fields_and_leaves_other_kinds_alone():
+    old, new = base_doc(), base_doc()
+    for d in (old, new):
+        charge(d)["properties"]["options"] = {
+            "type": "object",
+            "properties": {cc: {"type": "object", "properties": {"igic": {"type": "integer"}}} for cc in ("at", "be", "de")},
+        }
+    for cc in ("at", "be", "de"):
+        charge(new)["properties"]["options"]["properties"][cc]["properties"].pop("igic")
+    new["paths"].pop("/v1/charges/{charge}")
+    changes = diff_specs(load_spec(old), load_spec(new), collapse=True)
+    assert sorted(c.kind for c in changes) == ["endpoint_removed", "response_field_removed"]
+    field = only(changes, "response_field_removed")
+    assert field.target == "options.*.igic" and field.schema == "charge"
+    assert field.message == "field options.*.igic was removed from charge (3 keys: at, be, de)"
+    assert field.affects == ("GET /v1/charges", "POST /v1/charges")
+    assert collapse_removals([]) == []
+
+
+def restrict_description(d, **marks):
+    post_body(d)["properties"]["description"] = {"type": "string", "enum": ["a", "b"], **marks}
+
+
+def test_restricting_a_string_to_an_open_or_unvalidated_enum_is_a_warning():
+    for marks in ({"x-stripeEnum": {"kind": "open"}}, {"x-stripeBypassValidation": True}):
+        change = only(run(lambda d, m=marks: restrict_description(d, **m)), "body_enum_restricted")
+        assert change.severity == WARNING, marks
+        assert change.new == ["a", "b"] and "other values are still accepted" in change.message
+    for marks in ({}, {"x-stripeEnum": {"kind": "closed"}}, {"x-stripeBypassValidation": False}):
+        change = only(run(lambda d, m=marks: restrict_description(d, **m)), "body_enum_restricted")
+        assert change.severity == BREAKING, marks
+
+
+def test_open_enum_does_not_soften_other_enum_changes():
+    def mutate(d):
+        d["paths"]["/v1/charges"]["get"]["parameters"][1]["schema"]["enum"] = ["pending"]
+        d["paths"]["/v1/charges"]["get"]["parameters"][1]["schema"]["x-stripeEnum"] = {"kind": "open"}
+
+    assert only(run(mutate), "param_enum_removed").severity == BREAKING

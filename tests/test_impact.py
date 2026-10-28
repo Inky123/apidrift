@@ -91,3 +91,28 @@ def test_impacts_sort_by_severity_then_certainty():
     assert [(i.severity, i.certainty, i.usage.line) for i in impacts] == [
         (BREAKING, AFFECTED, 1), (BREAKING, POSSIBLE, 2), (WARNING, AFFECTED, 1), (WARNING, POSSIBLE, 2),
     ]
+
+
+def test_common_member_names_only_make_response_changes_possible():
+    added = change("response_enum_added", "type", severity=WARNING, method=None, path=None, affects=("POST /v1/charges",))
+    assert one([usage(reads={"type"})], [added]).certainty == POSSIBLE
+    assert assess([usage(reads={"amount"})], [added]) == []
+
+
+def test_documentation_hits_are_listed_separately_and_not_counted():
+    import json
+
+    from apidrift.impact import render_impact_json, render_impact_text
+    from apidrift.scanner import ScanResult
+
+    code = usage({"amount"})
+    doc = Usage("README.md", 3, "?", "/v1/charges", "api.stripe.com/v1/charges", frozenset(), False, "doc")
+    result = ScanResult("repo", [code, doc], 2, [])
+    impacts = assess([code, doc], [change("endpoint_removed")])
+    assert len(impacts) == 2
+    text = render_impact_text(result, impacts, "old", "new")
+    assert "1 Stripe call sites in 1 files (python 1); 1 hit by this upgrade: 1 breaking" in text
+    assert "in documentation / fixtures (not counted): 1\n! README.md:3" in text
+    payload = json.loads(render_impact_json(result, impacts, "old", "new"))
+    assert payload["call_sites"] == 1 and payload["documentation_matches"] == 1
+    assert payload["summary"]["breaking"] == 1 and len(payload["impacts"]) == 2

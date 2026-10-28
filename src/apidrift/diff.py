@@ -19,6 +19,8 @@ from .openapi import Operation, Spec
 BREAKING, WARNING, INFO = "breaking", "warning", "info"
 SEVERITY_RANK = {BREAKING: 0, WARNING: 1, INFO: 2}
 MAX_NESTED = 3
+MIN_COLLAPSE = 3  # sibling removals that share a leaf and a shape fold into one ``parent.*.leaf`` change
+COLLAPSIBLE = {"body_removed": "body field", "param_removed": "parameter", "response_field_removed": "field"}
 SINGLE_REF_RE = re.compile(r"^(array<)?ref:([^|<>]+)(>)?$")
 
 
@@ -34,12 +36,17 @@ class Change:
     old: Any = None
     new: Any = None
     affects: tuple[str, ...] = ()
+    introduced: str | None = None  # the first spec version the change appears in (see ``diff_chain``)
 
     @property
     def where(self) -> str:
         if self.method and self.path:
             return f"{self.method.upper()} {self.path}"
         return f"schema {self.schema}" if self.schema else "spec"
+
+    def key(self) -> tuple[str, str | None, str | None, str | None, str | None]:
+        """What identifies a change across diffs of different spec pairs (not its severity or message)."""
+        return (self.kind, self.method, self.path, self.schema, self.target)
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -51,12 +58,82 @@ class Change:
 Maker = Callable[..., Change]
 
 
-def diff_specs(old: Spec, new: Spec) -> list[Change]:
+def _sort_key(c: Change) -> tuple:
+    return (SEVERITY_RANK[c.severity], c.path or "", c.method or "", c.schema or "", c.target or "")
+
+
+def diff_specs(old: Spec, new: Spec, *, collapse: bool = False) -> list[Change]:
+    """Changes between two specs. ``collapse`` folds identical sibling removals into one ``a.*.leaf`` change
+    (for reports; impact matching needs the exact targets)."""
     changes = _diff_operations(old, new) + _diff_schemas(old, new)
-    changes.sort(
-        key=lambda c: (SEVERITY_RANK[c.severity], c.path or "", c.method or "", c.schema or "", c.target or "")
-    )
+    if collapse:
+        changes = collapse_removals(changes)
+    changes.sort(key=_sort_key)
     return changes
+
+
+def diff_chain(specs: list[Spec], *, collapse: bool = False) -> tuple[list[Change], list[str]]:
+    """Diff the first spec against the last and stamp each change with the version that introduced it.
+
+    Returns ``(changes, versions)``: the full old->new diff with ``introduced`` set, and the ordered
+    version strings spanned (consecutive snapshots of the same version collapse into one). With no
+    intermediate specs this is a single diff; otherwise consecutive pairs are diffed and matched by
+    :meth:`Change.key`. A change seen only in the full diff (possible with renames) counts as new.
+    """
+    if len(specs) < 2:
+        raise ValueError("diff_chain needs at least two specs")
+    changes = diff_specs(specs[0], specs[-1], collapse=collapse)
+    versions = [specs[0].version]
+    for spec in specs[1:]:
+        if spec.version != versions[-1]:
+            versions.append(spec.version)
+    first: dict[tuple, str] = {}
+    if len(specs) > 2:
+        for a, b in zip(specs, specs[1:]):
+            for change in diff_specs(a, b, collapse=collapse):
+                first.setdefault(change.key(), b.version)
+    for change in changes:
+        change.introduced = first.get(change.key(), specs[-1].version)
+    return changes, versions
+
+
+def collapse_removals(changes: list[Change]) -> list[Change]:
+    """Fold removals that differ in exactly one path segment and share a shape into one change.
+
+    27 ``country_options.<cc>.igic`` removals become one ``country_options.*.igic`` change whose message
+    lists the keys. The wildcard is tried at the deepest segment first, never at the leaf.
+    """
+    pool = [c for c in changes if c.kind in COLLAPSIBLE and c.target]
+    out = [c for c in changes if not (c.kind in COLLAPSIBLE and c.target)]
+    deepest = max((c.target.count(".") for c in pool), default=0)
+    for pos in range(deepest - 1, -1, -1):
+        buckets: dict[tuple, list[Change]] = {}
+        for change in pool:
+            parts = change.target.split(".")
+            if len(parts) <= pos + 1:
+                continue
+            pattern = ".".join(parts[:pos] + ["*"] + parts[pos + 1:])
+            bucket_key = (change.kind, change.method, change.path, change.schema, pattern, repr(change.old))
+            buckets.setdefault(bucket_key, []).append(change)
+        for bucket_key, members in buckets.items():
+            if len(members) < MIN_COLLAPSE:
+                continue
+            out.append(_merged(members, bucket_key[4], pos))
+            taken = {id(m) for m in members}
+            pool = [c for c in pool if id(c) not in taken]
+    return out + pool
+
+
+def _merged(members: list[Change], pattern: str, pos: int) -> Change:
+    first = members[0]
+    keys = ", ".join(m.target.split(".")[pos] for m in members)
+    noun = COLLAPSIBLE[first.kind]
+    where = f" from {first.schema}" if first.kind == "response_field_removed" else ""
+    message = f"{noun} {pattern} was removed{where} ({len(members)} keys: {keys})"
+    return Change(
+        first.severity, first.kind, message, first.method, first.path, first.schema, pattern,
+        old=first.old, affects=first.affects,
+    )
 
 
 def _summary(item: Any) -> dict:
@@ -155,15 +232,19 @@ def _diff_request_fields(
                 sev, kind, verb = verdict
                 msg = f"{noun} {key} type {verb} from {a.type} to {b.type}"
                 out.append(make(sev, kind, key, msg, old=a.type, new=b.type))
-        out += _enum_changes(make, key, noun, a.enum, b.enum, request=True)
+        open_enum = a.enum is None and a.type == "string" and b.open_enum
+        out += _enum_changes(make, key, noun, a.enum, b.enum, request=True, open_enum=open_enum)
         if not a.deprecated and b.deprecated:
             out.append(make(WARNING, "deprecated", key, f"{noun} {key} is now deprecated"))
     return out
 
 
 def _enum_changes(
-    make: Maker, key: str, noun: str, old: tuple[str, ...] | None, new: tuple[str, ...] | None, *, request: bool
+    make: Maker, key: str, noun: str, old: tuple[str, ...] | None, new: tuple[str, ...] | None, *,
+    request: bool, open_enum: bool = False,
 ) -> list[Change]:
+    """``open_enum``: the new enum is one Stripe marks open or does not validate, so documenting a value
+    list for what was a free string is a warning, not a break."""
     if old is None and new is None:
         return []
     if old is not None and new is not None:
@@ -181,6 +262,9 @@ def _enum_changes(
                 out.append(make(INFO, "enum_removed", key, f"{noun} {key} will no longer return {removed}", old=removed))
         return out
     if old is None:
+        if request and open_enum:
+            msg = f"{noun} {key} now documents the values {list(new)} (open enum: other values are still accepted)"
+            return [make(WARNING, "enum_restricted", key, msg, new=list(new))]
         if request:
             return [make(BREAKING, "enum_restricted", key, f"{noun} {key} is now restricted to {list(new)}", new=list(new))]
         return [make(INFO, "enum_introduced", key, f"{noun} {key} is now limited to {list(new)}", new=list(new))]
