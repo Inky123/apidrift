@@ -35,3 +35,8 @@ def test_dict_and_method_case_variants():
     assert migrations.replacement_for("POST", "/v1/setup_intents", "payment_method_types") == "allowed_payment_method_types"
     assert migrations.replacement_for("post", "/v1/setup_intents", "other") is None
     assert migrations.MIGRATIONS[0].to_dict()["replacement"] == "allowed_payment_method_types"
+
+
+def test_introduced_for_reads_only_the_table():
+    assert migrations.introduced_for("/v1/checkout/sessions", "payment_method_types") == "2026-09-30.endive"
+    assert migrations.introduced_for("/v1/charges", "description") is None

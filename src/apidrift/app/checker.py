@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import snapshot as snap
+from .. import migrations
 from ..diff import BREAKING, diff_chain
 from ..impact import Impact, assess, render_impact_json
 from ..openapi import Spec, load_spec
@@ -283,10 +284,25 @@ def _fix_step(
         return ""
     elif not payload.get("fixes"):  # findings remain but none the fixer can rename: an open PR has nothing left to do
         note = fixpr.run_clean(conn, gh, repo, full_name, fixpr.gone_comment(sha))
-    else:  # the version names our snapshot, never the child's text: it steers the branch name and the title
-        version = version_of(latest)
+    else:  # the version comes from our migration table or snapshot, never the child's text: it names the branch
+        version = fix_version(payload, latest)
         note = fixpr.run_fix(conn, gh, settings, repo, full_name, default_branch, sha, payload, int(repo["issue_number"]), version, token)
     return f"; pr: {note}" if note else ""
+
+
+def fix_version(payload: dict, latest: Path) -> str:
+    """The release a fix pull request is named after: the newest release that introduced one of the renamed
+    changes, looked up in the trusted migration table by (path, target); the latest snapshot when none match.
+    This matches the issue, whose title names the release that introduced the change."""
+    found: set[str] = set()
+    for fix in payload.get("fixes") or []:
+        sites = fix.get("sites") if isinstance(fix, dict) else None
+        for site in sites if isinstance(sites, list) else []:
+            if isinstance(site, dict):
+                release = migrations.introduced_for(str(site.get("path")), str(site.get("target")))
+                if release:
+                    found.add(release)
+    return max(found) if found else version_of(latest)
 
 
 def _baseline(name: str | None, snaps: list[Path]) -> Path:

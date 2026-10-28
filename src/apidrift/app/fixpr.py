@@ -214,6 +214,13 @@ def _push(
             return f"#{number} was {state} and no new call site appeared; staying silent"
         number = None  # new sites: a new pull request on the same branch
     branch = branch_name(version)
+    superseded = None
+    if number is not None and state == "open" and repo["pr_branch"] and repo["pr_branch"] != branch:
+        # GitHub cannot move an open pull request to another branch: close it before opening the new one, so a
+        # crash in between never leaves two open fix pull requests; the "superseded by" comment follows.
+        superseded = _retire(conn, gh, token, repo, full_name)
+        repo = db.get_repo(conn, repo["id"]) or repo
+        number = None
     ref, head = f"heads/{branch}", f"{full_name.split('/', 1)[0]}:{branch}"
     existing = gh.get_ref(token, full_name, ref)
     existing_sha = str(((existing or {}).get("object") or {}).get("sha") or "")
@@ -244,7 +251,25 @@ def _push(
         gh.update_pull(token, full_name, int(number), title=title, body=body)
         what = "updated"
     db.update_repo(conn, repo["id"], pr_number=int(number), fix_state="open")
+    if superseded is not None:
+        try:
+            gh.comment(token, full_name, superseded, f"Superseded by #{number}, which names Stripe {version}, the release "
+                       "that introduced this change.")
+        except GitHubError as exc:  # the old pull request is already closed; the note is a courtesy
+            logger.info("repo %s: could not comment on superseded #%s: %s", repo["id"], superseded, scrub(str(exc), (token,)))
+        return f"{what} #{number}, superseding #{superseded}"
     return f"{what} #{number}"
+
+
+def _retire(conn: sqlite3.Connection, gh: GitHubClient, token: str, repo: sqlite3.Row, full_name: str) -> int:
+    """Close the open fix pull request and delete its branch when the tip is still apidrift's own commit."""
+    number, branch, head = int(repo["pr_number"]), str(repo["pr_branch"]), repo["pr_head_sha"]
+    gh.update_pull(token, full_name, number, state="closed")
+    existing = gh.get_ref(token, full_name, f"heads/{branch}")
+    if existing is not None and head and str((existing.get("object") or {}).get("sha") or "") == head:
+        gh.delete_ref(token, full_name, f"heads/{branch}")
+    db.update_repo(conn, repo["id"], pr_number=None, fix_state=None, pr_branch=None, pr_head_sha=None, pr_pending_sha=None)
+    return number
 
 
 def _close(conn: sqlite3.Connection, gh: GitHubClient, token: str, repo: sqlite3.Row, full_name: str, comment: str) -> str:

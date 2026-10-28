@@ -81,3 +81,11 @@ def lookup_dict(change: dict) -> Migration | None:
 def replacement_for(method: str, path: str, target: str) -> str | None:
     found = _BY_KEY.get((method.lower(), path, target))
     return found.replacement if found else None
+
+
+def introduced_for(path: str, target: str) -> str | None:
+    """The release that introduced the documented migration for (path, target), from this table only."""
+    for found in MIGRATIONS:
+        if found.path == path and found.target == target:
+            return found.introduced
+    return None

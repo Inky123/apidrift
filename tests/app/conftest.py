@@ -183,7 +183,7 @@ class FakeGitHub:
 
     @property
     def writes(self) -> list[httpx.Request]:
-        return [r for r in self.requests if r.method in ("POST", "PATCH", "PUT") and r.url.path.startswith("/repos/")]
+        return [r for r in self.requests if r.method in ("POST", "PATCH", "PUT", "DELETE") and r.url.path.startswith("/repos/")]
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -355,6 +355,10 @@ class FakeGitHub:
                 return httpx.Response(422, json={"message": "Reference already exists"})
             self.refs[ref] = body["sha"]
             return httpx.Response(201, json={"ref": body["ref"], "object": {"sha": body["sha"]}})
+        if (match := re.fullmatch(r"/git/refs/(heads/.+)", rel)) and method == "DELETE":
+            if self.refs.pop(match.group(1), None) is None:
+                return httpx.Response(422, json={"message": "Reference does not exist"})
+            return httpx.Response(204)
         if (match := re.fullmatch(r"/git/refs/(heads/.+)", rel)) and method == "PATCH":
             ref = match.group(1)
             if ref not in self.refs:

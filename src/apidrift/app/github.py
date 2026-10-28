@@ -228,6 +228,10 @@ class GitHubClient:
         """``ref`` is fully qualified here: ``refs/heads/...``."""
         return self._request("POST", f"/repos/{full_name}/git/refs", bearer=token, json={"ref": ref, "sha": sha}).json()
 
+    def delete_ref(self, token: str, full_name: str, ref: str) -> None:
+        """``ref`` as ``heads/<branch>``."""
+        self._request("DELETE", f"/repos/{full_name}/git/refs/{ref}", bearer=token)
+
     def update_ref(self, token: str, full_name: str, ref: str, sha: str, force: bool = False) -> dict:
         body = {"sha": sha, "force": bool(force)}
         return self._request("PATCH", f"/repos/{full_name}/git/refs/{ref}", bearer=token, json=body).json()
