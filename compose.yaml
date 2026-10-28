@@ -1,6 +1,8 @@
 # Runs at /opt/apidrift on the droplet, behind the pinline project's Caddy (which already owns
 # ports 80 and 443 on this host): the web service joins pinline's Docker network and pinline's
-# Caddyfile gets one extra site block that proxies https://$APIDRIFT_HOST to apidrift-web-1:8000.
+# Caddyfile gets one extra site block that proxies https://$APIDRIFT_HOST to apidrift-web:8000.
+# The web service is NOT named `web`: Compose adds the service name as a DNS alias on every network it
+# joins, and pinline's Caddy proxies to `web:8000`, so a `web` here would hijack half of pinline's traffic.
 # First boot, in this order:
 #   1. `apidrift app-setup` prints the registration values and the seven .env lines; write .env here.
 #   2. mkdir -p data/snapshots secrets; copy the App's .pem to secrets/app.pem
@@ -28,8 +30,9 @@ x-app: &app
     - no-new-privileges:true
 
 services:
-  web:
+  apidrift-web:
     <<: *app
+    container_name: apidrift-web
     build: .
     command: ["apidrift", "serve", "--host", "0.0.0.0", "--port", "8000"]
     pids_limit: 128
@@ -55,7 +58,7 @@ services:
     mem_limit: 3g
     pids_limit: 256
     depends_on:
-      - web
+      - apidrift-web
 
 networks:
   edge:
