@@ -74,5 +74,6 @@ comment in that file describes first boot and the proxy site block.
 ## What it does not do yet
 
 Open the fixing pull request. Vendors other than Stripe. Go, PHP, Java and .NET call sites
-(only literal URLs are found there). Stripe clients hidden behind a local wrapper module that
+(only literal URLs are found there; when such files mention Stripe, the issue says so instead of
+reporting the repository clean). Stripe clients hidden behind a local wrapper module that
 never mentions Stripe by name.

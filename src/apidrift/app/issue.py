@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 from ..diff import BREAKING
 from ..impact import AFFECTED, POSSIBLE
+from ..scanner import unread_sentence
 
 MARKER_RE = re.compile(r"<!-- apidrift:fp=([0-9a-f]{64}) -->")
 MAX_FINDINGS = 50
@@ -246,6 +247,36 @@ def _site_line(f: dict) -> str:
     return line
 
 
+def unread_note(payload: dict) -> str:
+    """One sentence naming the languages whose call sites were not read, or "" when every file was."""
+    unread = payload.get("unread") or {}
+    return unread_sentence({str(k): int(v) for k, v in unread.items()}) if isinstance(unread, dict) else ""
+
+
+UNREAD_MARKER = "<!-- apidrift:unread -->"
+
+
+def render_unread_issue(full_name: str, sha: str, payload: dict) -> tuple[str, str]:
+    """(title, body) for the one-time notice that part of this repository cannot be checked yet."""
+    unread = {str(k): int(v) for k, v in (payload.get("unread") or {}).items()}
+    names = list(unread)
+    joined = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " or " + names[-1]
+    title = f"apidrift cannot read {joined} call sites in this repository yet"
+    body = [
+        f"{unread_sentence(unread)} apidrift reads Python, JavaScript, TypeScript and Ruby call sites and finds literal",
+        "api.stripe.com URLs in any file; Stripe calls made through the SDK in other languages are invisible to it today.",
+        "",
+        "What this means: a Stripe release can break code in those files without apidrift opening an issue here.",
+        "The rest of the repository is still checked on every push and every Stripe release, and this notice will",
+        "be closed when apidrift learns the language.",
+        "",
+        "---",
+        f"Scanned {full_name} at {sha}: {int(payload.get('call_sites', 0))} Stripe call sites read.",
+        UNREAD_MARKER,
+    ]
+    return title, "\n".join(body) + "\n"
+
+
 def render_issue(
     items: list[dict],
     *,
@@ -256,6 +287,7 @@ def render_issue(
     call_sites: int,
     fingerprint: str,
     supersedes: int | None = None,
+    unread: str = "",
 ) -> tuple[str, str]:
     """(title, body) for an issue listing ``items`` (as produced by :func:`findings`)."""
     sites = distinct_sites(items)
@@ -276,8 +308,10 @@ def render_issue(
         "---",
         f"Scanned {full_name} at {sha} against Stripe {old_version} -> {new_version}: {call_sites} Stripe call sites; "
         "unaffected call sites are not listed.",
-        marker(fingerprint),
     ]
+    if unread:
+        footer.append(unread)
+    footer.append(marker(fingerprint))
     budget = MAX_BODY_CHARS - sum(len(ln) + 1 for ln in lines + footer) - 64  # room for the "and N more." line
     shown = _render_groups(lines, group_findings(items, new_version), budget)
     if len(items) > shown:

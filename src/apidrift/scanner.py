@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import jsparse, pyparse
@@ -35,6 +35,14 @@ TEXT_EXT = set(LANGUAGES) | {
     ".go", ".php", ".java", ".kt", ".cs", ".sh", ".bash", ".zsh", ".yaml", ".yml", ".json", ".toml", ".env",
     ".http", ".rs", ".swift", ".dart", ".ex", ".exs", ".scala", ".vue", ".svelte", ".html", ".erb", ".md", ".txt",
     ".cfg", ".ini", ".conf", ".graphql", ".sql",
+}
+# Server-side languages whose call sites are not parsed yet: files in them that mention Stripe are counted
+# so the report can say so instead of passing them off as clean. Literal api.stripe.com URLs are still
+# found. Swift, Kotlin and Dart are left out: those are Stripe's mobile SDKs, which talk to a different,
+# publishable-key surface rather than the server endpoints this diff covers.
+UNREAD_LANGUAGES = {
+    ".go": "Go", ".php": "PHP", ".java": "Java", ".cs": "C#", ".rs": "Rust", ".ex": "Elixir", ".exs": "Elixir",
+    ".scala": "Scala",
 }
 DOC_EXT = {".md", ".txt", ".yml", ".yaml", ".json", ".env"}
 DOC_DIRS = {"docs", "doc", "fixtures", "__fixtures__", "cassettes"}
@@ -99,6 +107,7 @@ class ScanResult:
     unresolved: list[tuple[str, int, str]]  # stripe-looking calls that matched no endpoint
     skipped_files: int = 0  # oversize or binary files left unread
     skipped_dirs: int = 0  # dependency and build directories left unread
+    unread: dict[str, int] = field(default_factory=dict)  # language -> files mentioning Stripe in languages not parsed
 
     @property
     def counted(self) -> list[Usage]:
@@ -132,6 +141,7 @@ def scan_repo(root: Path, index: SdkIndex) -> ScanResult:
         base = root
     usages: list[Usage] = []
     unresolved: list[tuple[str, int, str]] = []
+    unread: dict[str, int] = {}
     scanned = 0
     for path in files:
         text = _read(path)
@@ -151,12 +161,26 @@ def scan_repo(root: Path, index: SdkIndex) -> ScanResult:
             found, missing = _scan_dynamic(text, rel, index, reads, language)
         else:
             missing = []
+            name = UNREAD_LANGUAGES.get(path.suffix.lower())
+            if name:
+                unread[name] = unread.get(name, 0) + 1
         unresolved += missing
         url_language = "doc" if _doc_like(rel, path.suffix.lower()) else "http"
         found += _scan_urls(text, rel, index, reads, {u.line for u in found}, url_language)
         usages += found
     usages.sort(key=lambda u: (u.file, u.line, u.path))
-    return ScanResult(str(root), usages, scanned, unresolved, skipped_files, skipped_dirs)
+    return ScanResult(str(root), usages, scanned, unresolved, skipped_files, skipped_dirs, dict(sorted(unread.items())))
+
+
+def unread_sentence(unread: dict[str, int]) -> str:
+    """Plain-language note for languages whose call sites are not parsed, e.g. for Go and PHP files."""
+    if not unread:
+        return ""
+    parts = [f"{n} {lang} file{'s' if n != 1 else ''}" for lang, n in unread.items()]
+    listed = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+    langs = list(unread)
+    names = langs[0] if len(langs) == 1 else ", ".join(langs[:-1]) + " or " + langs[-1]
+    return f"apidrift does not read {names} call sites yet: {listed} mention Stripe and were not checked."
 
 
 def _iter_files(root: Path) -> tuple[list[Path], int, int]:
@@ -313,6 +337,8 @@ def render_scan_text(result: ScanResult) -> str:
             f"skipped: {result.skipped_files} oversize or binary files, "
             f"{result.skipped_dirs} dependency or build directories"
         )
+    if result.unread:
+        lines.append("not read: " + unread_sentence(result.unread))
     for u in counted:
         lines.append(f"{u.where}  {u.label}  via {u.call}")
         shown = ", ".join(sorted(u.fields)[:8])
@@ -339,6 +365,7 @@ def render_scan_json(result: ScanResult) -> str:
         "files_scanned": result.files_scanned,
         "skipped_files": result.skipped_files,
         "skipped_dirs": result.skipped_dirs,
+        "unread": result.unread,
         "usages": [u.to_dict() for u in result.usages],
         "unresolved": [{"file": f, "line": line, "call": call} for f, line, call in result.unresolved],
     }

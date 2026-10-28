@@ -309,7 +309,7 @@ def _reconcile(
     fp, hashes = issue.fingerprint(impacts), issue.finding_hashes(impacts)
     previous = json.loads(repo["issue_items"]) if repo["issue_items"] else None
     render = dict(full_name=full_name, sha=sha, old_version=old_version, new_version=new_version,
-                  call_sites=int(payload.get("call_sites", 0)), fingerprint=fp)
+                  call_sites=int(payload.get("call_sites", 0)), fingerprint=fp, unread=issue.unread_note(payload))
     title, body = issue.render_issue(items, **render)
     gained = set(hashes) - set(previous) if previous is not None else set()
     version_changed = repo["issue_version"] is not None and repo["issue_version"] != new_version
@@ -350,9 +350,33 @@ def _reconcile(
         gh.comment(token, full_name, number, f"No call sites are affected at {sha}; closing. Baseline is now {new_version}.")
         gh.update_issue(token, full_name, number, state="closed")
         db.update_repo(conn, repo["id"], issue_state="closed_by_us", last_result="clean", baseline=latest.name, **stamp)
+        _unread_notice(conn, gh, token, repo, full_name, sha, payload)
         return f"clean: closed #{number}; baseline advanced to {latest.name}"
     db.update_repo(conn, repo["id"], last_result="clean", baseline=latest.name, **stamp)
+    _unread_notice(conn, gh, token, repo, full_name, sha, payload)
     return f"clean; baseline advanced to {latest.name}"
+
+
+def _unread_notice(
+    conn: sqlite3.Connection, gh: GitHubClient, token: str, repo: sqlite3.Row, full_name: str, sha: str, payload: dict
+) -> None:
+    """A clean verdict is only honest if every file was read. When files in a language apidrift cannot parse yet
+    mention Stripe, open one notice issue (once per repository); close it when that is no longer the case.
+    A findings issue carries the same sentence in its footer, so no notice is opened while one is open."""
+    unread = payload.get("unread") or {}
+    existing = repo["unread_issue"]
+    if unread and existing is None:
+        title, body = issue.render_unread_issue(full_name, sha, payload)
+        created = gh.create_issue(token, full_name, title, body)
+        db.update_repo(conn, repo["id"], unread_issue=int(created["number"]))
+        logger.info("repo %s: opened unread-language notice #%s (%s)", repo["id"], created["number"], ", ".join(unread))
+    elif not unread and existing is not None:
+        try:
+            gh.comment(token, full_name, int(existing), f"Every file that mentions Stripe is now read at {sha}; closing.")
+            gh.update_issue(token, full_name, int(existing), state="closed")
+        except GitHubError as exc:  # already deleted or locked: forget it either way
+            logger.info("repo %s: could not close notice #%s: %s", repo["id"], existing, exc)
+        db.update_repo(conn, repo["id"], unread_issue=None)
 
 
 def _sha(text: str) -> str:

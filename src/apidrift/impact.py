@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 
 from .diff import BREAKING, INFO, SEVERITY_RANK, WARNING, Change
-from .scanner import ScanResult, Usage
+from .scanner import ScanResult, Usage, unread_sentence
 
 AFFECTED, POSSIBLE = "affected", "possible"
 SENT, OPAQUE, ABSENT = "sent", "opaque", "absent"
@@ -207,6 +207,8 @@ def render_impact_text(
         f"{len(hit)} hit by this upgrade: {counts[BREAKING]} breaking, {counts[WARNING]} warnings, "
         f"{counts[INFO]} informational",
     ]
+    if result.unread:
+        lines.append("not read: " + unread_sentence(result.unread))
     for sev in (BREAKING, WARNING, INFO):
         group = [i for i in counted if i.severity == sev]
         if not group:
@@ -249,6 +251,7 @@ def render_impact_json(result: ScanResult, impacts: list[Impact], old_label: str
         "new": new_label,
         "call_sites": len(result.counted),
         "documentation_matches": len(result.docs),
+        "unread": result.unread,
         "summary": summary(counted),
         "impacts": [i.to_dict() for i in impacts],  # documentation hits included, tagged language "doc"
     }

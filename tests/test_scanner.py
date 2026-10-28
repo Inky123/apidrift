@@ -1,7 +1,9 @@
 import pytest
 
 from apidrift.openapi import load_spec
-from apidrift.scanner import scan_repo
+import json
+
+from apidrift.scanner import render_scan_json, render_scan_text, scan_repo, unread_sentence
 from apidrift.sdkmap import SdkIndex
 from specs import sdk_doc
 
@@ -342,3 +344,31 @@ def test_reads_skip_generic_receivers_and_client_members():
         "return [charge.receipt_url, data['object'], Stripe.PaymentIntent];\n"
     )
     assert reads == {"receipt_url", "status", "object"}
+
+
+def test_files_in_unparsed_languages_that_mention_stripe_are_counted_not_passed_as_clean(tmp_path):
+    index = SdkIndex.build(load_spec(sdk_doc()))
+    (tmp_path / "pay.go").write_text('package main\nimport "github.com/stripe/stripe-go/v82"\nfunc f() { paymentintent.New(params) }\n')
+    (tmp_path / "other.go").write_text("package main\nfunc g() {}\n")
+    (tmp_path / "Pay.php").write_text("<?php $stripe->paymentIntents->create(['amount' => 1]);\n")
+    (tmp_path / "Pay.java").write_text("class Pay { void f() { PaymentIntent.create(params); } }\n")
+    result = scan_repo(tmp_path, index)
+    assert result.unread == {"Go": 1, "PHP": 1}
+    assert result.usages == []
+    text = render_scan_text(result)
+    assert "not read: apidrift does not read Go or PHP call sites yet: 1 Go file and 1 PHP file mention Stripe" in text
+    assert json.loads(render_scan_json(result))["unread"] == {"Go": 1, "PHP": 1}
+
+
+def test_the_module_fixture_counts_its_go_file_as_unread(result):
+    assert result.unread == {"Go": 1}
+
+
+def test_unread_sentence_wording():
+    assert unread_sentence({}) == ""
+    assert unread_sentence({"Go": 12}) == (
+        "apidrift does not read Go call sites yet: 12 Go files mention Stripe and were not checked."
+    )
+    assert unread_sentence({"C#": 2, "Go": 1, "PHP": 3}).startswith(
+        "apidrift does not read C#, Go or PHP call sites yet: 2 C# files, 1 Go file and 3 PHP files mention Stripe"
+    )

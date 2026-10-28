@@ -218,3 +218,24 @@ def test_changelog_url_uses_the_codename_and_falls_back_safely():
 def test_marker_round_trip():
     assert issue.marker_in("hello\n" + issue.marker(FP) + "\n") == FP
     assert issue.marker_in("no marker here") is None and issue.marker_in(None) is None
+
+
+def test_unread_note_and_notice_issue():
+    payload = {"unread": {"Go": 2, "PHP": 1}, "call_sites": 7}
+    assert issue.unread_note(payload) == (
+        "apidrift does not read Go or PHP call sites yet: 2 Go files and 1 PHP file mention Stripe and were not checked."
+    )
+    assert issue.unread_note({"unread": {}}) == "" and issue.unread_note({}) == ""
+    title, body = issue.render_unread_issue("octo/shop", "a" * 40, payload)
+    assert title == "apidrift cannot read Go or PHP call sites in this repository yet"
+    assert "2 Go files and 1 PHP file mention Stripe" in body and "7 Stripe call sites read" in body
+    assert body.rstrip().endswith(issue.UNREAD_MARKER)
+
+
+def test_findings_issue_footer_carries_the_unread_note():
+    _, body = issue.render_issue(
+        [], full_name="octo/shop", sha="b" * 40, old_version="2026-01-01.a", new_version="2026-02-01.b",
+        call_sites=3, fingerprint="f" * 64, unread="apidrift does not read Go call sites yet: 1 Go file mention Stripe and were not checked.",
+    )
+    assert "apidrift does not read Go call sites yet" in body
+    assert body.index("does not read Go") < body.index(issue.marker("f" * 64))

@@ -380,3 +380,41 @@ def test_jobs_fail_for_good_after_eight_attempts(installed, conn, gh, settings):
     assert db.claim_job(conn, job_id=job_id) is None
     waits = [db.backoff(n) for n in range(1, db.MAX_ATTEMPTS)]
     assert waits == [120, 240, 480, 960, 1920, 3840, 7680] and db.backoff(12) == 6 * 3600
+
+
+# --- languages apidrift cannot read yet --------------------------------------------------
+
+
+def go_tree(tmp_path, base=REPO):
+    tree = tmp_path / "with-go"
+    shutil.copytree(base, tree)
+    (tree / "pay.go").write_text('package main\nimport "github.com/stripe/stripe-go/v82"\n')
+    return tree
+
+
+def test_clean_repo_with_go_files_gets_one_notice_issue_not_silence(installed, conn, gh, settings, tmp_path):
+    installed.tree = go_tree(tmp_path, fixed_tree(tmp_path))
+    assert run_job(claim(conn), conn, gh, settings).startswith("clean; baseline advanced")
+    assert [i["title"] for i in installed.issues.values()] == ["apidrift cannot read Go call sites in this repository yet"]
+    assert "1 Go file mention Stripe and were not checked" in installed.issues[1]["body"]
+    assert db.get_repo(conn, 501)["unread_issue"] == 1
+    db.enqueue(conn, "check", 501, "push")
+    run_job(claim(conn), conn, gh, settings)
+    assert len(installed.issues) == 1  # never posted twice
+
+
+def test_findings_issue_carries_the_note_instead_of_a_second_issue(installed, conn, gh, settings, tmp_path):
+    installed.tree = go_tree(tmp_path)
+    assert run_job(claim(conn), conn, gh, settings) == "findings: opened #1"
+    assert len(installed.issues) == 1 and "does not read Go call sites yet" in installed.issues[1]["body"]
+    assert db.get_repo(conn, 501)["unread_issue"] is None
+
+
+def test_notice_is_closed_once_every_file_is_read(installed, conn, gh, settings, tmp_path):
+    installed.tree = go_tree(tmp_path, fixed_tree(tmp_path))
+    run_job(claim(conn), conn, gh, settings)
+    installed.tree = fixed_tree(tmp_path / "again")
+    db.enqueue(conn, "check", 501, "push")
+    run_job(claim(conn), conn, gh, settings)
+    assert installed.issues[1]["state"] == "closed" and installed.comments[-1][1].startswith("Every file that mentions Stripe is now read")
+    assert db.get_repo(conn, 501)["unread_issue"] is None

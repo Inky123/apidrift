@@ -25,6 +25,7 @@ ISSUE_STATES = ("open", "closed_by_us", "closed_by_user")
 REPO_FIELDS = frozenset({
     "installation_id", "full_name", "baseline", "last_sha", "last_result", "last_checked_at",
     "issue_number", "issue_state", "issue_fingerprint", "issue_items", "issue_body_sha", "issue_version", "gone",
+    "unread_issue",
 })
 META_KEYS = ("last_poll_at", "last_poll_status", "latest_snapshot")
 
@@ -82,6 +83,10 @@ MIGRATIONS: list[str] = [
         value TEXT
     );
     ALTER TABLE repos ADD COLUMN gone INTEGER NOT NULL DEFAULT 0;
+    """,
+    # the one-time "apidrift cannot read <language> here yet" issue, so it is never posted twice
+    """
+    ALTER TABLE repos ADD COLUMN unread_issue INTEGER;
     """,
 ]
 
