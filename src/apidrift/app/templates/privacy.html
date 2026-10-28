@@ -4,13 +4,13 @@
 
 <h2>What is accessed</h2>
 
-<p>When a check runs, apidrift downloads a snapshot of the repository's default branch through the GitHub API and reads it. It also reads repository metadata (name, default branch, whether Issues are enabled) and creates, updates or closes one issue. apidrift asks GitHub for three permissions, as its consent screen labels them: Metadata: read (GitHub requires it of every App), Contents: read, and Issues: read and write. Nothing else.</p>
+<p>When a check runs, apidrift downloads a snapshot of the repository's default branch through the GitHub API and reads it. It also reads repository metadata (name, default branch, whether Issues are enabled) and creates, updates or closes one issue. When Stripe documents a replacement for a removed field, it writes exactly two things more: one branch named <code>apidrift/stripe-&lt;version&gt;</code> and one pull request per repository. It never writes to the default branch and never force-pushes over a branch a person has changed. apidrift asks GitHub for four permissions, as its consent screen labels them: Metadata: read (GitHub requires it of every App), Contents: read and write, Pull requests: read and write, and Issues: read and write. Nothing else.</p>
 
-<p>The code is never executed. It is parsed for Stripe calls in a separate process that holds no credentials, then deleted.</p>
+<p>The code is never executed. It is parsed for Stripe calls, and any fix is computed, in a separate process that holds no credentials; the snapshot is then deleted.</p>
 
 <h2>What is stored</h2>
 
-<p>The repository's id and name, the number of Stripe call sites scanned, the number affected, a hash of the finding set, and the issue number. Never file paths, never source code, never tokens: an installation token is held in memory for one check, is never written to disk, and is not logged. Logs contain repository ids only, not names, paths or code.</p>
+<p>The repository's id and name, the number of Stripe call sites scanned, the number affected, a hash of the finding set, the issue number and, when a pull request was opened, its number, branch name, head commit and a hash of the fix set. Never file paths, never source code, never tokens: an installation token is held in memory for one check, is never written to disk, and is not logged. Logs contain repository ids only, not names, paths or code.</p>
 
 <h2>Where it runs</h2>
 

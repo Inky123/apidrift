@@ -167,11 +167,35 @@ def test_what_apidrift_is_comes_before_the_example(pages):
 def test_landing_states_what_it_does_and_does_not_do(pages):
     html = pages["landing.html"]
     assert "never runs your code" in html
-    assert "Read access to code and permission to open issues; nothing else." in html
+    assert "Read access to code and permission to open issues; nothing else." not in html
+    assert (
+        "Four permissions: read and write access to code and pull requests, read and write access to issues, "
+        "and the repository metadata GitHub requires of every App. What it writes is one branch and one pull "
+        "request per repository; it never pushes to your default branch." in html
+    )
     assert "marked <code>?</code> (possibly affected)" in html
     assert "What it does not do yet" in html
-    assert "No fix pull requests" in html and "Stripe only." in html
+    assert "No fix pull requests" not in html and "That is next" not in html
+    assert "Stripe only." in html
     assert "possibly affected" in html
+
+
+def test_landing_describes_the_pull_request_step_honestly(pages):
+    html = pages["landing.html"]
+    assert "When Stripe documents a replacement, it also opens one pull request with the rename applied." in html
+    assert "pushes a branch named <code>apidrift/stripe-&lt;version&gt;</code>, and opens one pull request per repository" in html
+    assert "re-scans the changed files to confirm they no longer send the old one" in html
+    assert "lists the API-version pins it found and asks you to merge it together with your API-version and SDK upgrade" in html
+    assert "Merging stays a human click." in html
+    limitation = (
+        "Pull requests only for migrations Stripe has documented a replacement for (today: "
+        "<code>payment_method_types</code> renamed to <code>allowed_payment_method_types</code>), "
+        "verified by re-scanning the changed files. Every other breaking change still arrives as an issue."
+    )
+    assert f"<li>{limitation}</li>" in html
+    assert html.index("<h2>What it does not do yet</h2>") < html.index(limitation)
+    assert html.count("<li>") == 9  # four "How it works" steps and five limitations
+    assert "merges" not in html  # it never claims to merge anything itself
 
 
 def test_every_claim_links_to_its_evidence(pages):
@@ -257,12 +281,29 @@ def test_installed_page_says_what_happens_next(pages):
     assert 'href="https://github.com/settings/installations"' in html
 
 
+def test_installed_page_says_a_pull_request_may_follow_and_is_safe_to_close(pages):
+    html = pages["installed.html"]
+    assert "may also receive a pull request from <code>apidrift-check[bot]</code>" in html
+    assert "on a branch named <code>apidrift/stripe-&lt;version&gt;</code>, with the rename applied" in html
+    assert "It is safe to close it: apidrift never merges and never pushes to your default branch." in html
+    assert "the issue gets one comment with the link to accept them instead" in html
+
+
 def test_privacy_page_covers_the_required_points(pages):
     html = pages["privacy.html"]
     for phrase in ("default branch", "Never file paths", "never tokens", "uninstall", "zachzap2@gmail.com"):
         assert phrase in html
-    assert "Metadata: read" in html and "Contents: read" in html and "Issues: read and write" in html
-    assert "number of Stripe call sites scanned, the number affected, a hash of the finding set, and the issue number" in html
+    assert "four permissions" in html and "three permissions" not in html
+    for permission in ("Metadata: read", "Contents: read and write", "Pull requests: read and write", "Issues: read and write"):
+        assert html.count(permission) == 1
+    assert "Issues: read and write. Nothing else." in html
+    assert "writes exactly two things more: one branch named <code>apidrift/stripe-&lt;version&gt;</code> and one pull request per repository" in html
+    assert "It never writes to the default branch and never force-pushes over a branch a person has changed." in html
+    assert (
+        "number of Stripe call sites scanned, the number affected, a hash of the finding set, the issue number and, "
+        "when a pull request was opened, its number, branch name, head commit and a hash of the fix set" in html
+    )
+    assert "any fix is computed, in a separate process that holds no credentials" in html
     assert 'href="https://github.com/settings/installations"' in html
     assert "DigitalOcean" in html
     assert "The code is never executed." in html

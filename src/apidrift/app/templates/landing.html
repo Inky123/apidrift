@@ -5,7 +5,7 @@
 <p class="lede">Stripe changed its API. This is the line in your code that breaks.</p>
 <p class="aside"><a href="{{ install_url }}">Install on GitHub</a></p>
 
-<p>apidrift watches Stripe's published OpenAPI spec. When a release removes a field, retires an endpoint, or makes a new parameter required, it finds the call sites in your repository that send exactly that, and opens one issue with a link to each line. Nothing else: no digest of every change, no issue when you are unaffected.</p>
+<p>apidrift watches Stripe's published OpenAPI spec. When a release removes a field, retires an endpoint, or makes a new parameter required, it finds the call sites in your repository that send exactly that, and opens one issue with a link to each line. When Stripe documents a replacement, it also opens one pull request with the rename applied. Nothing else: no digest of every change, no issue when you are unaffected.</p>
 
 <h2>A real example</h2>
 
@@ -34,7 +34,7 @@
 <p><a class="button" href="{{ install_url }}">Install on GitHub</a></p>
 <p class="pricing">Free while it is Stripe-only.</p>
 
-<p>Read access to code and permission to open issues; nothing else. apidrift downloads a snapshot of your default branch, reads it, and deletes it when the check ends. It never runs your code. It checks after each push to your default branch and whenever Stripe publishes a new spec.</p>
+<p>Four permissions: read and write access to code and pull requests, read and write access to issues, and the repository metadata GitHub requires of every App. What it writes is one branch and one pull request per repository; it never pushes to your default branch. apidrift downloads a snapshot of your default branch, reads it, and deletes it when the check ends. It never runs your code. It checks after each push to your default branch and whenever Stripe publishes a new spec.</p>
 
 <h2>How it works</h2>
 
@@ -42,12 +42,13 @@
 <li>Stripe publishes <a href="https://github.com/stripe/openapi"><code>spec3.sdk.json</code></a>; apidrift keeps every version{% if stripe_latest %} (the latest it holds is <code>{{ stripe_latest }}</code>){% endif %}.</li>
 <li>Each release is diffed against the one your code last passed, release by release, so every finding names the release that introduced it.</li>
 <li>Your Python, JavaScript, TypeScript and Ruby are parsed for Stripe calls and the fields they send. Only the calls the diff touches are reported.</li>
+<li>When Stripe's changelog names a like-for-like replacement for a removed field, apidrift renames the key at every affected call site, re-scans the changed files to confirm they no longer send the old one, pushes a branch named <code>apidrift/stripe-&lt;version&gt;</code>, and opens one pull request per repository. The pull request lists the API-version pins it found and asks you to merge it together with your API-version and SDK upgrade, because Stripe rejects the new field on older versions. Merging stays a human click.</li>
 </ol>
 
 <h2>What it does not do yet</h2>
 
 <ul>
-<li>No fix pull requests. That is next.</li>
+<li>Pull requests only for migrations Stripe has documented a replacement for (today: <code>payment_method_types</code> renamed to <code>allowed_payment_method_types</code>), verified by re-scanning the changed files. Every other breaking change still arrives as an issue.</li>
 <li>Stripe only.</li>
 <li>It does not read which API version your account is pinned to.</li>
 <li>Calls whose arguments it cannot see are marked <code>?</code> (possibly affected), not guessed.</li>

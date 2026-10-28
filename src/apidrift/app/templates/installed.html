@@ -4,6 +4,8 @@
 
 <p>apidrift checks each selected repository within a few minutes. If a Stripe release affects a repository, <code>apidrift-check[bot]</code> opens one issue in that repository's Issues tab, naming the release and linking to each affected line. Repositories that are clean get nothing.</p>
 
+<p>When Stripe documents a replacement for what broke, an affected repository may also receive a pull request from <code>apidrift-check[bot]</code>, on a branch named <code>apidrift/stripe-&lt;version&gt;</code>, with the rename applied. It is safe to close it: apidrift never merges and never pushes to your default branch. If the installation has not accepted the write permissions, the issue gets one comment with the link to accept them instead.</p>
+
 <p>A repository with Issues disabled is skipped; enable Issues to receive findings.</p>
 
 <p>There is nothing to configure. The <a href="/">front page</a> shows what a finding looks like. To uninstall, open <a href="https://github.com/settings/installations">github.com/settings/installations</a> (or the organization's equivalent), choose apidrift, and uninstall.</p>
