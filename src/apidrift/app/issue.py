@@ -12,6 +12,7 @@ import hashlib
 import re
 from urllib.parse import quote
 
+from .. import migrations
 from ..diff import BREAKING
 from ..impact import AFFECTED, POSSIBLE
 from ..scanner import unread_sentence
@@ -44,14 +45,31 @@ def marker_in(body: str | None) -> str | None:
 def breaking(payload: dict) -> list[dict]:
     """The impacts that go in an issue: breaking changes, affected or possibly affected, in real code.
 
-    Usages tagged ``language == "doc"`` (URL matches in READMEs and fixtures) are not call sites.
+    Usages tagged ``language == "doc"`` (URL matches in READMEs and fixtures) are not call sites. A possible
+    "``x.type`` now required" at a call that already has a finding on ``x`` itself says the same thing twice
+    (``billing_cycle_anchor`` became an object with a required ``type``), so it is left out.
     """
-    return [
+    found = [
         impact for impact in payload.get("impacts", [])
         if impact.get("change", {}).get("severity") == BREAKING
         and impact.get("certainty") in (AFFECTED, POSSIBLE)
         and impact.get("usage", {}).get("language") != "doc"
     ]
+    targets = {(_site(i), str(i["change"].get("target") or "")) for i in found}
+    return [i for i in found if not _restates_parent(i, targets)]
+
+
+def _site(impact: dict) -> tuple[str, int, str]:
+    usage = impact["usage"]
+    return str(usage["file"]), int(usage["line"]), str(usage["path"])
+
+
+def _restates_parent(impact: dict, targets: set[tuple]) -> bool:
+    change = impact["change"]
+    target = str(change.get("target") or "")
+    if impact.get("certainty") != POSSIBLE or not str(change.get("kind") or "").endswith("added_required") or "." not in target:
+        return False
+    return (_site(impact), target.rsplit(".", 1)[0]) in targets
 
 
 def _key(impact: dict) -> tuple[str, str, str, str, str]:
@@ -231,12 +249,19 @@ def group_findings(items: list[dict], fallback: str) -> list[dict]:
         group = groups.setdefault(key, {
             "heading": heading(f["change_kind"], f.get("change_target"), f["label"]),
             "introduced": introduced,
-            "changelog": changelog_url(introduced),
+            "changelog": _doc_for(f, introduced),
             "consequence": f.get("consequence") or "",
             "items": [],
         })
         group["items"].append(f)
     return [groups[key] for key in sorted(groups)]
+
+
+def _doc_for(f: dict, introduced: str) -> str:
+    """The changelog entry for this exact change when the migration table has one, else the release's page."""
+    change = {"kind": f["change_kind"], "method": f["method"], "path": f["path"], "target": f.get("change_target")}
+    found = migrations.lookup_dict(change)
+    return found.doc if found is not None and found.introduced == introduced else changelog_url(introduced)
 
 
 def _site_line(f: dict) -> str:
@@ -293,7 +318,8 @@ def render_issue(
     sites = distinct_sites(items)
     versions = versions_of(items, new_version)
     newest = versions[-1]
-    possible = len({(f["file"], f["line"], f["path"]) for f in items if f["certainty"] == POSSIBLE})
+    certain = {(f["file"], f["line"], f["path"]) for f in items if f["certainty"] != POSSIBLE}
+    possible = len({(f["file"], f["line"], f["path"]) for f in items} - certain)  # sites with no certain finding
     noun = "call site" if sites == 1 else "call sites"
     lines: list[str] = []
     if supersedes is not None:

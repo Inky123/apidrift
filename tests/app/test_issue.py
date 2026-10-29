@@ -239,3 +239,42 @@ def test_findings_issue_footer_carries_the_unread_note():
     )
     assert "apidrift does not read Go call sites yet" in body
     assert body.index("does not read Go") < body.index(issue.marker("f" * 64))
+
+
+def _impact(target, kind, certainty, line=13, path="/v1/subscriptions/{subscription_exposed_id}"):
+    return {
+        "usage": {"file": "server.js", "line": line, "method": "post", "path": path, "language": "javascript"},
+        "change": {"severity": "breaking", "kind": kind, "target": target},
+        "certainty": certainty,
+    }
+
+
+def test_a_possible_required_child_is_dropped_when_its_parent_is_already_a_finding_at_that_call():
+    parent = _impact("billing_cycle_anchor", "body_type_changed", "affected")
+    child = _impact("billing_cycle_anchor.type", "body_added_required", "possible")
+    elsewhere = _impact("billing_cycle_anchor.type", "body_added_required", "possible", line=99)
+    certain_child = _impact("billing_cycle_anchor.type", "body_added_required", "affected")
+    payload = {"impacts": [parent, child, elsewhere, certain_child]}
+    assert issue.breaking(payload) == [parent, elsewhere, certain_child]
+
+
+def test_possibly_counts_only_sites_without_a_certain_finding():
+    items = [
+        finding(),
+        finding(change_kind="body_added_required", change_target="description.type", certainty="possible", reason="r"),
+        finding(line=40, certainty="possible", reason="r"),
+    ]
+    _, body = render(items)
+    assert "breaks 2 call sites in octo/shop at 1a57c3b; 1 of them possibly." in body
+    _, body = render(items[:2])
+    assert "breaks 1 call site in octo/shop at 1a57c3b." in body
+
+
+def test_the_changelog_link_is_the_migration_entry_when_the_table_has_one():
+    anchor = finding(path="/v1/subscriptions/{subscription_exposed_id}", label="POST /v1/subscriptions/{subscription_exposed_id}",
+                     change_kind="body_type_changed", change_target="billing_cycle_anchor", introduced="2026-09-30.endive")
+    _, body = render([anchor, finding()])
+    assert "[changelog](https://docs.stripe.com/changelog/endive/2026-09-30/polymorphic-billing-cycle-anchor)" in body
+    assert f"[changelog]({issue.changelog_url(NEW_VERSION)})" in body  # no table entry: the release page
+    _, body = render([dict(anchor, introduced="2027-01-01.later")])  # table entry from another release: not used
+    assert "[changelog](https://docs.stripe.com/changelog/later)" in body
