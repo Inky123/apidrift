@@ -7,7 +7,7 @@ import shutil
 import httpx
 import pytest
 from conftest import SHA, install_payload
-from test_fix import REF, claim, fix_payload, fixed_tree, repo, scan  # noqa: F401  (scan is a fixture)
+from test_fix import REF, charges_migration, claim, fix_payload, fixed_tree, repo, scan  # noqa: F401  (fixtures)
 
 from apidrift.app import db, fixpr, prbody
 from apidrift.app.checker import run_job, run_local

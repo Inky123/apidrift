@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 from conftest import NEW_VERSION
-from test_fix import Scan, claim, fix_payload, repo
+from test_fix import Scan, charges_migration, claim, fix_payload, repo  # noqa: F401  (charges_migration is a fixture)
 
 from apidrift.app import checker
 from apidrift.app.checker import run_job
@@ -23,6 +23,17 @@ def test_fix_version_comes_from_the_migration_table(settings, data_dir):
     assert checker.fix_version(payload, latest) == "2026-09-30.endive"
     assert checker.fix_version({"fixes": [{"sites": [{"path": "/v1/charges", "target": "description"}]}]}, latest) == NEW_VERSION
     assert checker.fix_version({}, latest) == NEW_VERSION
+
+
+def test_fix_version_covers_deletes_and_value_rewrites(settings, data_dir):
+    latest = snapshots(data_dir)[-1]
+    payto = {"line": 4, "path": "/v1/payment_methods/{payment_method}", "target": "payto", "replacement": "", "action": "delete"}
+    anchor = {
+        "line": 9, "path": "/v1/subscriptions/{subscription_exposed_id}", "target": "billing_cycle_anchor",
+        "replacement": "billing_cycle_anchor", "action": "wrap_type",
+    }
+    assert checker.fix_version({"fixes": [{"sites": [payto]}, {"sites": [anchor]}]}, latest) == "2026-09-30.endive"
+    assert checker.fix_version({"fixes": [{"sites": [dict(anchor, path="/v1/charges")]}]}, latest) == NEW_VERSION  # not in the table
 
 
 @pytest.fixture

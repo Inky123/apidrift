@@ -52,6 +52,7 @@ class Binding:
     name: str
     pos: int  # start of the assignment
     literal: int | None  # index of the ``{`` when the value is an object literal
+    value: int = -1  # start of the assigned value (-1 for a synthetic binding: a parameter, a loop rebinding)
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,7 @@ class Mutation:
     key_end: int = 0
 
 
+KEY_AFTER = re.compile(r"[ \t]*(?::(?!:)|=>)")
 RUBY_WINDOW = re.compile(r"^[ \t]*(def|do|get|post|put|delete|patch)\b", re.M)
 
 
@@ -126,7 +128,7 @@ class Bindings:
                 continue
             value = m.end()
             literal = value if value < src.n and src.text[value] == "{" else None
-            self.by_name.setdefault(m.group(1), []).append(Binding(m.group(1), m.start(), literal))
+            self.by_name.setdefault(m.group(1), []).append(Binding(m.group(1), m.start(), literal, value))
 
     def at(self, name: str, at: int) -> Binding | None:
         """The binding of ``name`` in force at index ``at``: the nearest preceding one in an enclosing scope."""
@@ -154,6 +156,32 @@ class Bindings:
             group = next(g for g in ("attr", "key", "sym") if m.group(g))
             out.append(Mutation(m.group(group), None, m.start(), m.end(), m.start(group), m.end(group)))
         return out
+
+    def escapes(self, name: str, at: int) -> bool:
+        """``name`` is used in its scope other than by its own assignments, the writes into it, and the use
+        at ``at`` (returned, passed on, spread, read, aliased): an edit to its literal would reach that use too."""
+        text, ruby = self.src.text, self.src.ruby
+        if ruby:
+            lo = self._ruby_window(at)[0]
+            nxt = RUBY_WINDOW.search(text, at)
+            hi = nxt.start() if nxt else self.src.n
+        else:
+            real = [b.pos for b in self.reaching(name, at) if b.value >= 0]
+            fn = self.scopes.innermost(min(real) if real else at)
+            lo, hi = (fn[0], fn[1]) if fn else (0, self.src.n)
+        allowed = {b.pos for b in self.by_name.get(name, ())} | {at}
+        writes = [(m.start(), m.end()) for m in _mutation_re(name).finditer(text, lo, hi) if not self.mask.covers(m.start())]
+        for m in re.compile(rf"(?<![\w$]){re.escape(name)}(?![\w$])").finditer(text, lo, hi):
+            p = m.start()
+            if p in allowed or self.mask.covers(p) or any(a <= p < b for a, b in writes):
+                continue
+            before = text[max(lo, p - 3) : p]
+            if before.endswith(".") and not before.endswith("...") or (ruby and before.endswith(":") and not before.endswith("::")):
+                continue  # another object's member, or a Ruby symbol
+            if KEY_AFTER.match(text, m.end()) and text[lo:p].rstrip()[-1:] in ("{", ",", "("):
+                continue  # a key that happens to share the name
+            return True
+        return False
 
     def _in_function(self, pattern: re.Pattern[str], after: int, before: int):
         """Matches between ``after`` and ``before`` outside strings, in the same innermost function as ``before``

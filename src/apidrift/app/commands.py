@@ -40,7 +40,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     )
     p_check.add_argument(
         "--fix", action="store_true",
-        help="with --local: also plan the documented renames (fixes, unfixable, pins, migrations, leftovers in the JSON)",
+        help="with --local: also plan the documented migrations (fixes, unfixable, pins, migrations, leftovers in the JSON)",
     )
     p_check.set_defaults(func=cmd_check)
 

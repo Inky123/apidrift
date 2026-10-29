@@ -109,24 +109,30 @@ def _request_impact(change: Change, usage: Usage) -> Impact | None:
     parent = _parent(target)
     if action in ("added_required", "now_required"):
         return _required_impact(change, usage, target, parent, use)
+    if _migrated(change, usage, action):
+        return None
     if use == SENT:
         return Impact(usage, change, AFFECTED, f"{target} is sent here")
     if action in RELAXATIONS:
         return None
     if use == OPAQUE:
         return Impact(usage, change, POSSIBLE, f"{parent} is sent here but its contents are not visible")
-    if usage.complete or _migrated(change, usage, action):
+    if usage.complete:
         return None
     return Impact(usage, change, POSSIBLE, "arguments are not fully visible at this call")
 
 
 def _migrated(change: Change, usage: Usage, action: str) -> bool:
-    """The call does not send a removed field but does send its documented replacement: it has migrated,
-    so the fields that are not visible are not assumed to still carry the old name."""
-    if action != "removed":
+    """The call already has the shape a documented migration asks for (the replacement is sent and the old
+    key is not; the value is wrapped in an object with ``type``), so the change does not hit it and the
+    fields that are not visible are not assumed to carry the old shape. A deleted key at a call whose
+    arguments are not fully visible is not assumed gone: a spread may still send it."""
+    if action not in ("removed", "type_changed"):
         return False
     migration = migrations.lookup(change)
-    return migration is not None and migration.replacement in usage.fields
+    if migration is None or not migrations.migrated(migration, usage.fields):
+        return False
+    return migration.action != "delete" or usage.complete
 
 
 def _required_impact(change: Change, usage: Usage, target: str, parent: str, use: str) -> Impact | None:

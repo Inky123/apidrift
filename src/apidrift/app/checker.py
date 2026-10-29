@@ -282,7 +282,7 @@ def _fix_step(
         note = fixpr.run_clean(conn, gh, repo, full_name, fixpr.clean_comment(sha))
     elif repo["issue_state"] != "open" or repo["issue_number"] is None:
         return ""
-    elif not payload.get("fixes"):  # findings remain but none the fixer can rename: an open PR has nothing left to do
+    elif not payload.get("fixes"):  # findings remain but none the fixer can change: an open PR has nothing left to do
         note = fixpr.run_clean(conn, gh, repo, full_name, fixpr.gone_comment(sha))
     else:  # the version comes from our migration table or snapshot, never the child's text: it names the branch
         version = fix_version(payload, latest)
@@ -291,7 +291,7 @@ def _fix_step(
 
 
 def fix_version(payload: dict, latest: Path) -> str:
-    """The release a fix pull request is named after: the newest release that introduced one of the renamed
+    """The release a fix pull request is named after: the newest release that introduced one of the migrated
     changes, looked up in the trusted migration table by (path, target); the latest snapshot when none match.
     This matches the issue, whose title names the release that introduced the change."""
     found: set[str] = set()

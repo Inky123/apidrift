@@ -2,8 +2,10 @@
 
 Every value in a fix is child output computed from untrusted repository bytes. A fix is pushed only when its
 path is a plain relative path in a scanned language outside ``.github/``, its tokens are Stripe field/path
-names, its sites are well-formed, it fits the caps, and GitHub confirms the file at the base commit has
-exactly the ``blob_sha`` the child rewrote. File modes come from the base tree, never from a guess.
+names, every site matches a migration in the parent's own table (same action, same replacement), it fits the
+caps, and GitHub confirms the file at the base commit has exactly the ``blob_sha`` the child rewrote. File
+modes come from the base tree, never from a guess. One bad site rejects the whole file: its content carries
+that site's edit too, and content cannot be pushed in part.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ import logging
 import re
 from pathlib import PurePosixPath
 
+from .. import migrations
 from ..scanner import LANGUAGES
 from . import issue
 from .github import GitHubClient, GitHubError
@@ -48,7 +51,7 @@ def validate(gh: GitHubClient, token: str, full_name: str, base_sha: str, fixes:
         total += size
         accepted.append({
             "file": fix["file"], "blob_sha": fix["blob_sha"], "content": fix["content"],
-            "sites": [{"line": s["line"], "path": s["path"], "target": s["target"], "replacement": s["replacement"]} for s in fix["sites"]],
+            "sites": [_site(s) for s in fix["sites"]],
         })
     return accepted
 
@@ -72,6 +75,8 @@ def reject(file: object, blob_sha: object, content: object) -> str | None:
 
 
 def reject_sites(sites: object) -> str | None:
+    """Why a fix's sites cannot be pushed, or None. The child's ``action`` and ``replacement`` must be exactly
+    what the parent's own migration table says for (path, target): a child cannot invent an edit."""
     if not isinstance(sites, list) or not sites:
         return "no sites"
     for site in sites:
@@ -80,11 +85,31 @@ def reject_sites(sites: object) -> str | None:
         line = site.get("line")
         if isinstance(line, bool) or not isinstance(line, int) or line < 1:
             return "malformed site line"
-        for key, pattern in (("path", issue.PATH_RE), ("target", issue.FIELD_RE), ("replacement", issue.FIELD_RE)):
+        for key, pattern in (("path", issue.PATH_RE), ("target", issue.FIELD_PATH_RE)):
             value = site.get(key)
             if not isinstance(value, str) or not pattern.fullmatch(value):
                 return f"malformed site {key}"
+        replacement, action = site.get("replacement"), site.get("action")
+        if not isinstance(replacement, str) or (replacement and not issue.FIELD_PATH_RE.fullmatch(replacement)):
+            return "malformed site replacement"
+        if not isinstance(action, str) or action not in migrations.ACTIONS:
+            return "malformed site action"
+        migration = migrations.for_site(site["path"], site["target"])
+        if migration is None:
+            return "no documented migration for this site"
+        if action != migration.action or replacement != migration.replacement:
+            return "site does not match the documented migration"
     return None
+
+
+def _site(site: dict) -> dict:
+    """A site already checked by :func:`reject_sites`, rebuilt with exactly the keys the parent uses."""
+    migration = migrations.for_site(site["path"], site["target"])
+    assert migration is not None  # reject_sites admitted it
+    return {
+        "line": site["line"], "path": site["path"], "target": migration.target,
+        "replacement": migration.replacement, "action": migration.action,
+    }
 
 
 def _content_meta(gh: GitHubClient, token: str, full_name: str, file: str, base_sha: str) -> dict:

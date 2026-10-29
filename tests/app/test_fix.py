@@ -13,6 +13,7 @@ import httpx
 import pytest
 from conftest import NEW_VERSION, REPO, SHA, TOKEN, blob_sha, install_payload
 
+from apidrift import migrations
 from apidrift.app import checker, db, fixcheck, fixpr, issue, prbody
 from apidrift.app.checker import run_job, run_local, scan_subprocess
 from apidrift.app.commands import render_status
@@ -24,6 +25,16 @@ BRANCH = f"apidrift/stripe-{NEW_VERSION}"
 REF = f"heads/{BRANCH}"
 HEAD = f"octo:{BRANCH}"
 DOC = "https://docs.stripe.com/changelog/test/removes-description"
+CHARGES = migrations.Migration(
+    method="post", path="/v1/charges", target="description", replacement="allowed_description", introduced=NEW_VERSION,
+    doc=DOC, note="allowed_description keeps your text.",
+)
+
+
+@pytest.fixture(autouse=True)
+def charges_migration(monkeypatch):
+    """The test spec removes ``description`` from POST /v1/charges; the parent's own table documents its rename."""
+    monkeypatch.setitem(migrations._BY_SITE, (CHARGES.path, CHARGES.target), CHARGES)
 
 
 def claim(conn):
@@ -50,7 +61,10 @@ def fix_payload(tree=REPO, files=("server.py",)) -> dict:
         fixes.append({
             "file": name, "blob_sha": blob_sha((tree / name).read_bytes()),
             "content": text.replace("description", "allowed_description"),
-            "sites": [{"line": ln, "path": "/v1/charges", "target": "description", "replacement": "allowed_description"} for ln in lines],
+            "sites": [
+                {"line": ln, "path": "/v1/charges", "target": "description", "replacement": "allowed_description", "action": "rename"}
+                for ln in lines
+            ],
         })
     payload.update({
         "fixes": fixes,
@@ -142,7 +156,10 @@ def test_opens_a_pull_request_from_a_branch_on_the_base_commit(scan, installed, 
         f"Ready for Stripe {NEW_VERSION}.", "**`description` → `allowed_description` on POST `/v1/charges`**",
         f"allowed_description keeps your text. [Changelog]({DOC})", f"blob/{SHA}/server.py#L{line} via `stripe.Charge.create`",
         "**Merge together with your upgrade**", f"blob/{SHA}/server.py#L2 pins `2023-10-16`",
-        "Verified: apidrift re-scanned the changed files; 1 call sites no longer send `description`",
+        f"Verified: apidrift re-scanned the changed files; 1 call site now sends what Stripe {NEW_VERSION} expects; "
+        "every other Stripe call is unchanged.",
+        "on your current pinned version Stripe rejects the new shape.",
+        f"blob/{SHA}/server.py#L2 pins `2023-10-16`", "These files pin an API version that predates this change;",
         "**Left for you**", prbody.UNFIXABLE_WHY["incomplete_binding"], f"blob/{SHA}/server.rb#L7",
         f"Still mentions the old name at https://github.com/octo/shop/blob/{SHA}/server.js#L30", "Addresses #1",
     ):
@@ -155,7 +172,7 @@ def test_opens_a_pull_request_from_a_branch_on_the_base_commit(scan, installed, 
     commit_sha = installed.refs[REF]
     assert commit_sha == row["pr_head_sha"]
     commit = installed.commits[commit_sha]
-    assert commit["message"] == f"Stripe {NEW_VERSION}: rename description to allowed_description"
+    assert commit["message"] == f"Stripe {NEW_VERSION}: rename description"
     assert commit["parents"] == [{"sha": SHA}]
     tree = installed.trees[commit["tree"]["sha"]]
     assert tree["base_tree"] == installed.tree_sha()
@@ -398,10 +415,11 @@ def test_render_pr_keeps_repo_text_inert():
     fixes = [{"file": "pay @zach.py", "blob_sha": "0" * 40, "content": "", "sites": [{"line": 3, "path": "/v1/charges", "target": "description", "replacement": "d2"}]}]
     title, body = prbody.render_pr(payload, fixes, full_name="octo/shop", sha=SHA, version="v", issue_number=9, fingerprint="f" * 64)
     assert title == "Stripe v: rename description (1 call site)"
-    assert "javascript:" not in body and "\\[x\\]\\(http" in body and "`` @zach `#1` ``" in body
+    assert "javascript:" not in body and "evil" not in body and "`` @zach `#1` ``" in body  # the child's note is ignored
     assert "**`description` → `d2` on POST `/v1/charges`**" in body and "Ready for Stripe v." in body
     assert "pay%20%40zach.py#L3" in body and "pins `` `2023` ``" in body and "apidrift does not read Go call sites yet" in body
-    assert "mystery \\<script>" in body and "Addresses #9" in body and prbody.pr_marker_in(body) == "f" * 64
+    assert "mystery" not in body and "<script>" not in body and prbody.UNKNOWN_UNFIXABLE in body  # never the child's why
+    assert "Addresses #9" in body and prbody.pr_marker_in(body) == "f" * 64
     assert "No API-version pin" not in body
 
 
@@ -414,5 +432,5 @@ def test_not_attempted_sites_are_listed_under_left_for_you():
     fixes = [{"file": "a.py", "blob_sha": "0" * 40, "content": "", "sites": [{"line": 1, "path": "/v1/x", "target": "t", "replacement": "u"}]}]
     _, body = prbody.render_pr(payload, fixes, full_name="o/r", sha=SHA, version="v", issue_number=1, fingerprint="f" * 64)
     assert f"- Not attempted (arguments are not fully visible): https://github.com/o/r/blob/{SHA}/b.py#L2" in body
-    assert f"- Not attempted (apidrift did not try this site (odd \\<x>)): https://github.com/o/r/blob/{SHA}/c.py#L3" in body
+    assert f"- Not attempted (apidrift did not try this site): https://github.com/o/r/blob/{SHA}/c.py#L3" in body and "odd" not in body
     assert "the key is written in a form apidrift does not rewrite" in body

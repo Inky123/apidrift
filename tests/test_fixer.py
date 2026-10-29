@@ -100,9 +100,10 @@ def test_sample_plan_reports_the_pins_and_no_leftovers(sample_plan):
 
 def test_payload_shape_is_the_frozen_contract(sample_plan):
     data = sample_plan.to_dict()
-    assert set(data) == {"fixes", "unfixable", "pins", "migrations", "leftovers", "not_attempted"}
+    assert set(data) == {"fixes", "unfixable", "pins", "migrations", "leftovers", "not_attempted", "possibly_remaining"}
     assert set(data["fixes"][0]) == {"file", "blob_sha", "content", "sites"}
-    assert set(data["fixes"][0]["sites"][0]) == {"line", "path", "target", "replacement"}
+    assert set(data["fixes"][0]["sites"][0]) == {"line", "path", "target", "replacement", "action"}
+    assert data["fixes"][0]["sites"][0]["action"] == "rename" and data["possibly_remaining"] == []
     assert set(data["pins"][0]) == {"file", "line", "version"}
     assert set(data["migrations"][0]) >= {"method", "path", "target", "replacement", "doc", "note"}
     assert data["migrations"][0]["method"] == "post"
@@ -293,5 +294,5 @@ def test_fix_command_prints_diffs_pins_and_exits_zero(tmp_path, capsys):
     assert "left for you:" in out and "shared.js:3  payment_method_types  /v1/payment_intents  (oracle_changed_other_calls)" in out
     assert main(["fix", str(repo), "--old", str(tmp_path / "a.json"), "--new", str(tmp_path / "b.json"), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert set(payload) == {"fixes", "unfixable", "pins", "migrations", "leftovers", "not_attempted"}
+    assert set(payload) == {"fixes", "unfixable", "pins", "migrations", "leftovers", "not_attempted", "possibly_remaining"}
 

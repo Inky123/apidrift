@@ -57,19 +57,25 @@ def clean_comment(sha: str) -> str:
 
 
 def gone_comment(sha: str) -> str:
-    return f"The call sites this pull request renamed are gone at {sha}; closing."
+    return f"The call sites this pull request changed are gone at {sha}; closing."
 
 
 DIVERGED_NOTE = "This branch has commits apidrift did not make, so the pull request is left open for you to close."
 
 
 def fingerprint(fixes: list[dict], version: str, issue_number: int) -> str:
-    """sha256 over the sorted (file, blob_sha, target, replacement) tuples, the Stripe version and the issue."""
-    keys = {
-        (f["file"], f["blob_sha"], s["target"], s["replacement"]) for f in fixes for s in f["sites"]
-    }
+    """sha256 over the sorted (file, blob_sha, target, replacement[, action]) tuples, the Stripe version and the
+    issue. A plain rename keeps the four-element tuple it always had, so pull requests opened before actions
+    existed keep their fingerprint (and stay "unchanged"); every other action adds itself to the tuple."""
+    keys = {_fingerprint_key(f, s) for f in fixes for s in f["sites"]}
     text = "\n".join(repr(k) for k in sorted(keys)) + f"\n{version}\n#{issue_number}"
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _fingerprint_key(fix: dict, site: dict) -> tuple[str, ...]:
+    key = (fix["file"], fix["blob_sha"], site["target"], site["replacement"])
+    action = site.get("action") or "rename"
+    return key if action == "rename" else (*key, action)
 
 
 def site_keys(fixes: list[dict]) -> list[str]:
@@ -88,10 +94,10 @@ def branch_name(version: str) -> str:
 
 
 def commit_message(version: str, fixes: list[dict]) -> str:
-    """Built from validated tokens only (``fixcheck`` admits ``[a-z0-9_]`` fields and version-like versions)."""
-    renames = sorted({(s["target"], s["replacement"]) for f in fixes for s in f["sites"]})
-    old, new = renames[0]
-    return f"Stripe {version}: rename {old} to {new}"
+    """Built from validated tokens only: ``fixcheck`` admits Stripe field paths and table actions, and
+    :func:`prbody.phrase` admits nothing else; one change gives its phrase, several give "N migrations"."""
+    keys = {(str(s.get("action") or "rename"), str(s["target"])) for f in fixes for s in f["sites"]}
+    return f"Stripe {version}: {prbody.summary(keys)}"
 
 
 # --- entry points (called by the checker after the issue is reconciled) -----------------
@@ -120,7 +126,7 @@ def run_fix(
 
 
 def run_clean(conn: sqlite3.Connection, gh: GitHubClient, repo: sqlite3.Row, full_name: str, comment: str) -> str | None:
-    """No fix is wanted any more (clean check, or the renamed sites are gone): close the recorded PR, if any."""
+    """No fix is wanted any more (clean check, or the changed sites are gone): close the recorded PR, if any."""
     if repo["pr_number"] is None or repo["fix_state"] not in CLOSABLE:
         return None
     try:

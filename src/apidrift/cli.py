@@ -171,7 +171,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_imp.add_argument("--json", action="store_true", help="emit JSON instead of text")
     p_imp.set_defaults(func=cmd_impact)
 
-    p_fix = sub.add_parser("fix", help="dry run: show the documented renames that would fix the breaking call sites")
+    p_fix = sub.add_parser(
+        "fix", help="dry run: show the documented migrations (renames, removals, value rewrites) that fix breaking call sites"
+    )
     p_fix.add_argument("repo", help="directory (or single file) to scan; nothing is written")
     p_fix.add_argument("--provider", choices=providers, default="stripe")
     p_fix.add_argument("--old", default="previous", help="file path, snapshot name or prefix, or 'previous' (default)")

@@ -352,6 +352,7 @@ def _render_groups(lines: list[str], groups: list[dict], budget: int) -> int:
 # What the child may name in a fix: a Stripe field, a Stripe path, a method, a version. Anything else is dropped
 # before it reaches a commit message or a title, and rendered in code spans everywhere else.
 FIELD_RE = re.compile(r"[a-z0-9_]{1,80}")
+FIELD_PATH_RE = re.compile(r"[a-z0-9_]{1,80}(?:\.[a-z0-9_]{1,80}){0,4}")  # a field, or a nested one (filters.country)
 PATH_RE = re.compile(r"/v[12](?:/[a-z0-9_{}]+)+")
 METHOD_RE = re.compile(r"get|post|delete")
 VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")

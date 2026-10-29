@@ -111,6 +111,7 @@ class _PyScopes:
         self.mutations: dict[ast.AST | None, dict[str, list[MutationRec]]] = {None: {}}
         self.touches: dict[ast.AST | None, dict[str, list[tuple[int, str]]]] = {None: {}}  # reads/deletes of a key
         self.calls: list[tuple[ast.Call, ast.AST | None]] = []
+        self.tree = tree
         self._visit(tree, None)
 
     def _visit(self, node: ast.AST, fn: ast.AST | None) -> None:
@@ -236,6 +237,22 @@ class _PyScopes:
     def touched_keys(self, name: str, scope: ast.AST | None, after: int, before: int) -> set[str]:
         """Keys read, deleted or operated on in place through ``name`` on lines in ``(after, before)``."""
         return {k for line, k in self.touches[scope].get(name, ()) if after < line < before}
+
+    def escapes(self, name: str, scope: ast.AST | None, arg: ast.AST) -> bool:
+        """``name`` is read in ``scope`` other than as ``arg`` (the use at the call) or as the target of a write
+        into it (``p['k'] = v``, ``del p['k']``, ``p.update(...)``): returned, passed on, spread, aliased."""
+        for node in ast.walk(scope if scope is not None else self.tree):
+            if not isinstance(node, ast.Name) or node.id != name or node is arg or not isinstance(node.ctx, ast.Load):
+                continue
+            parent = self.parents.get(node)
+            if isinstance(parent, (ast.Subscript, ast.Attribute)) and parent.value is node:
+                if isinstance(parent.ctx, (ast.Store, ast.Del)):
+                    continue
+                call = self.parents.get(parent)
+                if isinstance(parent, ast.Attribute) and isinstance(call, ast.Call) and call.func is parent and parent.attr in DICT_MUTATORS:
+                    continue
+            return True
+        return False
 
     def _ancestors(self, node: ast.AST) -> list[ast.AST]:
         out: list[ast.AST] = []

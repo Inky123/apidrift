@@ -129,3 +129,24 @@ def test_a_call_that_sends_the_documented_replacement_has_migrated():
     # the same field names at an endpoint outside the migration table change nothing
     elsewhere = usage({"allowed_payment_method_types"}, complete=False, path="/v1/charges")
     assert one([elsewhere], [change("body_removed", "payment_method_types")]).certainty == POSSIBLE
+
+
+def test_v2_migrations_answer_their_own_changes():
+    sub, pm, fc = "/v1/subscriptions/{subscription_exposed_id}", "/v1/payment_methods/{payment_method}", "/v1/financial_connections/sessions"
+    anchor = change("body_type_changed", "billing_cycle_anchor", path=sub)
+    required = change("body_added_required", "billing_cycle_anchor.type", path=sub)
+    # Before the wrap: the type change hits, the required .type is only possible (the value is opaque).
+    before = assess([usage({"billing_cycle_anchor"}, path=sub)], [anchor, required])
+    assert [(i.change.kind, i.certainty) for i in before] == [("body_type_changed", AFFECTED), ("body_added_required", POSSIBLE)]
+    # After: both are gone, even when other arguments are not visible.
+    for complete in (True, False):
+        assert assess([usage({"billing_cycle_anchor", "billing_cycle_anchor.type"}, complete, path=sub)], [anchor, required]) == []
+    # A deleted key stays possible at a call whose arguments are not fully visible: a spread may send it.
+    payto = change("body_removed", "payto", path=pm)
+    assert assess([usage({"metadata"}, path=pm)], [payto]) == []
+    left = one([usage({"metadata"}, complete=False, path=pm)], [payto])
+    assert left.certainty == POSSIBLE and left.reason == "arguments are not fully visible at this call"
+    # rename_first: the new nested key replaces the old one.
+    countries = change("body_removed", "filters.countries", path=fc)
+    assert assess([usage({"filters", "filters.country"}, complete=False, path=fc)], [countries]) == []
+    assert one([usage({"filters", "filters.countries"}, path=fc)], [countries]).certainty == AFFECTED
