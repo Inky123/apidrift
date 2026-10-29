@@ -236,3 +236,19 @@ def test_a_nested_rename_edits_only_the_leaf_and_keeps_the_parent(tmp_path, lang
     why, edits = _candidate_edits(Locator(head + text + "\n", language, index), usage, m)
     assert why is None and len(edits) == 1
     assert apply(head + text + "\n", edits) == head + expected + "\n"
+
+
+@pytest.mark.parametrize("the_id", ["req.params.id", "`sub_${n}`", "ids[0]", "getId()"])
+def test_any_expression_in_the_id_slot_is_the_id_not_the_parameters(tmp_path, the_id):
+    plan = plan_v2(tmp_path, {"a.js": JS + f"stripe.subscriptions.update({the_id}, {{ billing_cycle_anchor: 'now' }});\n"})
+    assert content(plan) == JS + f"stripe.subscriptions.update({the_id}, {{ billing_cycle_anchor: {{ type: 'now' }} }});\n"
+
+
+def test_ruby_expression_in_the_id_slot(tmp_path):
+    plan = plan_v2(tmp_path, {"a.rb": RB + "Stripe::PaymentMethod.update(params[:id], { metadata: {}, payto: { pay_id: 'a' } })\n"})
+    assert content(plan) == RB + "Stripe::PaymentMethod.update(params[:id], { metadata: {} })\n"
+
+
+def test_an_expression_where_parameters_belong_is_still_refused(tmp_path):
+    plan = plan_v2(tmp_path, {"a.js": JS + "stripe.subscriptions.update('sub_1', build({ billing_cycle_anchor: 'now' }));\n"})
+    assert plan.fixes == []

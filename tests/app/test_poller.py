@@ -168,7 +168,16 @@ def test_initial_baseline_with_a_single_distinct_version_is_the_latest(tmp_path,
     doc = new_doc()
     doc["info"]["description"] = "docs-only"
     second = save_snapshot(doc, datetime(2026, 2, 2, tzinfo=timezone.utc))
-    assert initial_baseline(data) == second.name  # documented: the first check is a no-op diff
+    assert initial_baseline(data) != second.name  # the oldest stored snapshot, here the same version: a no-op diff
+
+
+def test_initial_baseline_is_the_oldest_release_not_the_previous_one(data_dir):
+    """A release with no breaking changes of its own must not hide the breaking changes of the one before it."""
+    oldest = snapshots(data_dir)[0].name
+    third = new_doc()
+    third["info"]["version"] = "2026-03-01.test"
+    save_snapshot(third, datetime(2026, 3, 1, tzinfo=timezone.utc))
+    assert len(snapshots(data_dir)) == 3 and initial_baseline(data_dir) == oldest
 
 
 def test_every_tick_records_its_outcome_in_meta(settings, conn, caplog):

@@ -115,6 +115,8 @@ class Locator:
                 match = IDENT.match(text, i)
                 name = match.group(0) if match else ""
                 if not name or text[i:b].strip() != name:
+                    if k == 0 and "{" in c.resolved.path:
+                        continue  # the id slot of a ``/{id}`` path (``req.params.id``, ``params[:id]``): a value, not params
                     out.incomplete = True
                     continue
                 self._js_variable(c, name, i, k == 0 and "{" in c.resolved.path, m, out)

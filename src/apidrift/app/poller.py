@@ -85,9 +85,15 @@ def baseline_for(snaps: list[Path]) -> Path | None:
 
 
 def initial_baseline(data_dir: Path) -> str | None:
-    """The snapshot a newly installed repo is compared from (see :func:`baseline_for`)."""
-    path = baseline_for(snapshots(data_dir))
-    return path.name if path else None
+    """The snapshot a newly installed repo is compared from: the OLDEST stored release.
+
+    A finding needs code that still sends a removed or reshaped field, so an older baseline only adds true
+    findings: a repo that already moved past a change does not send the old shape and is not flagged. Comparing
+    from the previous release instead told every repo installed after a release with no breaking changes of its
+    own (2026-10-28.endive after 2026-09-30.endive) that it was clean, even while it still sent fields the
+    earlier release removed. Each finding still names the release that introduced it (``diff_chain``)."""
+    snaps = snapshots(data_dir)
+    return snaps[0].name if snaps else None
 
 
 def validate(raw: bytes, previous: Path | None) -> str:
