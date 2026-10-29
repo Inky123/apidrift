@@ -27,8 +27,8 @@ against Stripe's own sample repository, apidrift flags five servers: <https://gi
 3. **Cross.** Each call site's request fields are matched against the diff. A removed field hits a
    call only if that call sends it; a field that became required binds only callers of its
    parent. The result is one issue per repository, updated in place, closed when the code is clean.
-4. **Fix.** When Stripe documents a like-for-like replacement (today: `payment_method_types`
-   renamed to `allowed_payment_method_types`), the same process renames the key at every affected
+4. **Fix.** When Stripe's changelog documents what to send instead (a renamed field, a removed
+   field, or a value that changed shape), the same process rewrites the request at every affected
    call site and re-scans the changed files; one pull request per repository is then opened from a
    branch `apidrift/stripe-<version>`. It lists the API-version pins it found and asks to be merged
    with the upgrade. `apidrift fix DIR --old X --new Y` is the dry run: it prints the diff.
@@ -72,7 +72,8 @@ comment in that file describes first boot and the proxy site block.
 
 ## What it does not do yet
 
-Fix anything but a documented rename: deletions, type changes and new required fields still arrive
-as issues. Vendors other than Stripe. Go, PHP, Java and .NET call sites (only literal URLs are found
-there; when such files mention Stripe, the issue says so instead of reporting the repository clean).
-Stripe clients hidden behind a local wrapper module that never mentions Stripe by name.
+Fix what Stripe has not documented a replacement for. The pull request covers renamed fields, removed
+fields and fields whose value changed shape (today: `payment_method_types`, `payto`, `filters.countries`,
+`billing_cycle_anchor`); anything else, such as a new required field whose value only you know, still
+arrives as an issue. Vendors other than Stripe. Go, PHP, Java and .NET (literal URLs only; the issue
+says so when such files mention Stripe). Stripe clients behind a local wrapper that never names Stripe.

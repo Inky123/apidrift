@@ -4,7 +4,7 @@
 
 <p>apidrift checks each selected repository within a few minutes. If a Stripe release affects a repository, <code>apidrift-check[bot]</code> opens one issue in that repository's Issues tab, naming the release and linking to each affected line. Repositories that are clean get nothing.</p>
 
-<p>When Stripe documents a replacement for what broke, an affected repository may also receive a pull request from <code>apidrift-check[bot]</code>, on a branch named <code>apidrift/stripe-&lt;version&gt;</code>, with the rename applied. It is safe to close it: apidrift never merges and never pushes to your default branch. If the installation has not accepted the write permissions, the issue gets one comment with the link to accept them instead.</p>
+<p>When Stripe documents a replacement for what broke, an affected repository may also receive a pull request from <code>apidrift-check[bot]</code>, on a branch named <code>apidrift/stripe-&lt;version&gt;</code>, with the change applied. It covers changes Stripe's changelog documents a replacement for: renamed fields, removed fields, and fields whose value changed shape (today: <code>payment_method_types</code>, <code>payto</code>, <code>filters.countries</code>, <code>billing_cycle_anchor</code>). Anything Stripe has not documented a replacement for (for example a new required field whose value only you know) still arrives as an issue. It is safe to close the pull request: apidrift never merges and never pushes to your default branch. If the installation has not accepted the write permissions, the issue gets one comment with the link to accept them instead.</p>
 
 <p>A repository with Issues disabled is skipped; enable Issues to receive findings.</p>
 

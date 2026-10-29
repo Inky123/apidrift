@@ -14,6 +14,14 @@ from apidrift.app import issue
 APP = Path(__file__).resolve().parents[2] / "src" / "apidrift" / "app"
 STYLESHEET = APP / "static" / "style.css"
 PAGES = ("landing.html", "installed.html", "privacy.html")
+TODAY = (
+    "(today: <code>payment_method_types</code>, <code>payto</code>, <code>filters.countries</code>, "
+    "<code>billing_cycle_anchor</code>)"
+)
+UNDOCUMENTED = (
+    "Stripe has not documented a replacement for (for example a new required field whose value only you know) "
+    "still arrives as an issue."
+)
 BUTTON = "Install on GitHub"
 
 
@@ -182,15 +190,17 @@ def test_landing_states_what_it_does_and_does_not_do(pages):
 
 def test_landing_describes_the_pull_request_step_honestly(pages):
     html = pages["landing.html"]
-    assert "When Stripe documents a replacement, it also opens one pull request with the rename applied." in html
+    assert "When Stripe documents a replacement, it also opens one pull request with the change applied." in html
     assert "pushes a branch named <code>apidrift/stripe-&lt;version&gt;</code>, and opens one pull request per repository" in html
-    assert "re-scans the changed files to confirm they no longer send the old one" in html
+    assert "documents what to send instead (a field renamed, a field removed, or a value that changed shape)" in html
+    assert "re-scans the changed files to confirm they now send what the new release expects" in html
+    assert "because Stripe rejects renamed and reshaped fields on older versions (a removed field can go on any version)." in html
     assert "lists the API-version pins it found and asks you to merge it together with your API-version and SDK upgrade" in html
     assert "Merging stays a human click." in html
     limitation = (
-        "Pull requests only for migrations Stripe has documented a replacement for (today: "
-        "<code>payment_method_types</code> renamed to <code>allowed_payment_method_types</code>), "
-        "verified by re-scanning the changed files. Every other breaking change still arrives as an issue."
+        "Pull requests only for changes Stripe's changelog documents a replacement for: renamed fields, removed "
+        f"fields, and fields whose value changed shape {TODAY}, verified by re-scanning the changed files. Anything "
+        f"{UNDOCUMENTED}"
     )
     assert f"<li>{limitation}</li>" in html
     assert html.index("<h2>What it does not do yet</h2>") < html.index(limitation)
@@ -284,8 +294,13 @@ def test_installed_page_says_what_happens_next(pages):
 def test_installed_page_says_a_pull_request_may_follow_and_is_safe_to_close(pages):
     html = pages["installed.html"]
     assert "may also receive a pull request from <code>apidrift-check[bot]</code>" in html
-    assert "on a branch named <code>apidrift/stripe-&lt;version&gt;</code>, with the rename applied" in html
-    assert "It is safe to close it: apidrift never merges and never pushes to your default branch." in html
+    assert "on a branch named <code>apidrift/stripe-&lt;version&gt;</code>, with the change applied" in html
+    assert (
+        "It covers changes Stripe's changelog documents a replacement for: renamed fields, removed fields, and fields "
+        f"whose value changed shape {TODAY}. Anything {UNDOCUMENTED}"
+    ) in html
+    assert "rename applied" not in html
+    assert "It is safe to close the pull request: apidrift never merges and never pushes to your default branch." in html
     assert "the issue gets one comment with the link to accept them instead" in html
 
 
@@ -309,3 +324,16 @@ def test_privacy_page_covers_the_required_points(pages):
     assert "The code is never executed." in html
     assert "Logs contain repository ids only" in html
     assert "never written to disk" in html
+
+
+def test_readme_names_what_the_pull_request_covers_and_what_stays_an_issue():
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    assert len(readme.splitlines()) < 80
+    section = readme[readme.index("## What it does not do yet"):]
+    flat = " ".join(section.split())
+    assert "renamed fields, removed fields and fields whose value changed shape" in flat
+    for field in ("payment_method_types", "payto", "filters.countries", "billing_cycle_anchor"):
+        assert f"`{field}`" in flat
+    assert "a new required field whose value only you know, still arrives as an issue" in flat
+    step = " ".join(readme[readme.index("4. **Fix.**"):readme.index("## Permissions")].split())
+    assert "(a renamed field, a removed field, or a value that changed shape)" in step and "renames the key" not in step
