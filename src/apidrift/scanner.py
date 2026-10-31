@@ -3,8 +3,8 @@
 Python files go through :mod:`pyparse` (``ast``), JavaScript, TypeScript and
 Ruby through :mod:`jsparse`. Every text file is also
 searched for literal ``api.stripe.com/v1/...`` URLs, which identify the
-endpoint but not the fields; in documentation-like files those are tagged
-``language="doc"`` and reported separately.
+endpoint but not the fields; in documentation, fixtures and tests (mostly
+HTTP stubs) those are tagged ``language="doc"`` and reported separately.
 """
 
 from __future__ import annotations
@@ -46,6 +46,8 @@ UNREAD_LANGUAGES = {
 }
 DOC_EXT = {".md", ".txt", ".yml", ".yaml", ".json", ".env"}
 DOC_DIRS = {"docs", "doc", "fixtures", "__fixtures__", "cassettes"}
+TEST_DIRS = {"spec", "specs", "test", "tests", "__tests__", "__mocks__", "e2e", "cypress"}
+TEST_FILE = re.compile(r"(?:^test_.*\.py|.*_test\.py|.*_spec\.rb|.*_test\.rb|.*\.(?:test|spec)\.[cm]?[jt]sx?)$")
 MAX_BYTES = 1_500_000
 STRIPE_HINT = re.compile(r"stripe", re.I)
 URL_RE = re.compile(r"api\.stripe\.com(/v\d+(?:/[^\s'\"`<>)\],;?]+)+)")
@@ -83,6 +85,13 @@ class Usage:
     complete: bool  # False when spreads, **kwargs or variables hide some fields
     language: str  # python / javascript / typescript / ruby / http, or "doc" for URLs in documentation
     reads: frozenset[str] = frozenset()  # member names read in the same file off a plausible response object
+    hidden: frozenset[str] | None = None  # prefixes ("" = top level) where unseen keys may be sent; None: all if not complete
+
+    def hides(self, path: str) -> bool:
+        """Whether ``path`` could be sent here without being visible (a spread, ``**kwargs`` or variable)."""
+        if self.hidden is None:
+            return not self.complete
+        return any(path.startswith(prefix) for prefix in self.hidden)
 
     @property
     def label(self) -> str:
@@ -231,7 +240,8 @@ def _read(path: Path) -> str | None:
 
 
 def _doc_like(rel: str, suffix: str) -> bool:
-    return suffix in DOC_EXT or any(part in DOC_DIRS for part in rel.split("/")[:-1])
+    *dirs, name = rel.split("/")
+    return suffix in DOC_EXT or any(part in DOC_DIRS or part in TEST_DIRS for part in dirs) or bool(TEST_FILE.match(name))
 
 
 def _reads(text: str) -> frozenset[str]:
@@ -272,7 +282,7 @@ def _resolve(index: SdkIndex, chain: list[str]) -> Resolved | None:
 def _scan_python(text: str, rel: str, index: SdkIndex, reads: frozenset[str]):
     found, missing = pyparse.extract(text, lambda chain: _resolve(index, chain))
     usages = [
-        Usage(rel, f.line, f.resolved.method, f.resolved.path, f.call, frozenset(f.fields), f.complete, "python", reads)
+        Usage(rel, f.line, f.resolved.method, f.resolved.path, f.call, frozenset(f.fields), f.complete, "python", reads, f.hidden)
         for f in found
     ]
     return usages, [(rel, line, call) for line, call in missing]
@@ -287,7 +297,7 @@ def _scan_dynamic(text: str, rel: str, index: SdkIndex, reads: frozenset[str], l
     )
     usages = [
         Usage(rel, f.line, f.resolved.method, f.resolved.path, f.call, frozenset(f.fields.paths), f.fields.complete,
-              language, reads)
+              language, reads, frozenset(f.fields.hidden))
         for f in found
     ]
     return usages, [(rel, line, call) for line, call in missing]
@@ -340,7 +350,7 @@ def render_scan_text(result: ScanResult) -> str:
         f"{result.files_scanned} files mention stripe; {len(result.unresolved)} other stripe calls (not API endpoints)"
     )
     if docs:
-        summary += f"; {len(docs)} URLs in documentation / fixtures (not counted)"
+        summary += f"; {len(docs)} URLs in documentation, fixtures and tests (not counted)"
     lines = [f"apidrift scan: {result.root}", summary]
     if result.skipped_files or result.skipped_dirs:
         lines.append(
@@ -359,7 +369,7 @@ def render_scan_text(result: ScanResult) -> str:
         if shown:
             lines.append(f"    fields: {shown}")
     if docs:
-        lines += ["", "documentation / fixtures (not counted):"]
+        lines += ["", "documentation, fixtures and tests (not counted):"]
         lines += [f"  {u.where}  {u.label}  via {u.call}" for u in docs]
     if result.unresolved:
         lines += ["", "other stripe calls (Stripe.js, webhooks, SDK helpers), not API endpoints:"]

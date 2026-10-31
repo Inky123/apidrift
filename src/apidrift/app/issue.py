@@ -45,7 +45,7 @@ def marker_in(body: str | None) -> str | None:
 def breaking(payload: dict) -> list[dict]:
     """The impacts that go in an issue: breaking changes, affected or possibly affected, in real code.
 
-    Usages tagged ``language == "doc"`` (URL matches in READMEs and fixtures) are not call sites. A possible
+    Usages tagged ``language == "doc"`` (URL matches in READMEs, fixtures and tests) are not call sites. A possible
     "``x.type`` now required" at a call that already has a finding on ``x`` itself says the same thing twice
     (``billing_cycle_anchor`` became an object with a required ``type``), so it is left out.
     """

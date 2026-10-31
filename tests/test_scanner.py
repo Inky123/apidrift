@@ -315,8 +315,8 @@ def test_documentation_urls_are_tagged_doc_and_not_counted(result2):
     assert by(result2, "notes/stripe.sh", 3).language == "http"
     assert all(u.language != "doc" for u in result2.counted) and len(result2.counted) == len(result2.usages) - 3
     text = render_scan_text(result2)
-    assert f"{len(result2.counted)} Stripe call sites" in text and "3 URLs in documentation / fixtures (not counted)" in text
-    assert "documentation / fixtures (not counted):\n  README.md:3" in text
+    assert f"{len(result2.counted)} Stripe call sites" in text and "3 URLs in documentation, fixtures and tests (not counted)" in text
+    assert "documentation, fixtures and tests (not counted):\n  README.md:3" in text
 
 
 def test_build_directories_are_skipped_only_at_project_roots(result2):

@@ -112,7 +112,7 @@ def test_documentation_hits_are_listed_separately_and_not_counted():
     assert len(impacts) == 2
     text = render_impact_text(result, impacts, "old", "new")
     assert "1 Stripe call sites in 1 files (python 1); 1 hit by this upgrade: 1 breaking" in text
-    assert "in documentation / fixtures (not counted): 1\n! README.md:3" in text
+    assert "in documentation, fixtures and tests (not counted): 1\n! README.md:3" in text
     payload = json.loads(render_impact_json(result, impacts, "old", "new"))
     assert payload["call_sites"] == 1 and payload["documentation_matches"] == 1
     assert payload["summary"]["breaking"] == 1 and len(payload["impacts"]) == 2

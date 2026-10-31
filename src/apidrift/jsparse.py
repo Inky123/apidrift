@@ -11,7 +11,7 @@ import bisect
 import re
 from dataclasses import dataclass, field
 
-from . import jsroots
+from . import jsroots, jsspread
 from .jsroots import CALL_ARGS, NAME
 from .sdkmap import Resolved, SdkIndex
 
@@ -60,11 +60,16 @@ class Fields:
     paths: set[str] = field(default_factory=set)
     complete: bool = True
     spans: dict[str, list[Span]] = field(default_factory=dict)
+    hidden: set[str] = field(default_factory=set)  # prefixes ("" = top level) under which unseen keys may be sent
 
     def add(self, path: str, span: Span | None = None) -> None:
         self.paths.add(path)
         if span is not None:
             self.spans.setdefault(path, []).append(span)
+
+    def hide(self, prefix: str) -> None:
+        self.complete = False
+        self.hidden.add(prefix)
 
 
 @dataclass
@@ -219,11 +224,11 @@ class Source:
                 i += 1
                 continue
             if text.startswith("...", i) or text.startswith("**", i):
-                out.complete = False
+                self.spread(i + (3 if c == "." else 2), prefix, out)
                 i = self.skip_scalar(i + 2)
                 continue
             if c == "[":  # computed key
-                out.complete = False
+                out.hide(prefix)
                 i = self.skip_space(self.skip_balanced(i))
                 i = self.skip_scalar(i + 1) if i < self.n and text[i] == ":" else i
                 continue
@@ -233,7 +238,7 @@ class Source:
                 key, i = self.read_string(i)
                 kind = "quoted"
             elif c == "`":
-                out.complete = False
+                out.hide(prefix)
                 i = self.skip_string(i)
             elif self.ruby and c == ":":
                 m = IDENT.match(text, i + 1)
@@ -242,7 +247,7 @@ class Source:
             else:
                 m = IDENT.match(text, i)
                 if not m:
-                    out.complete = False
+                    out.hide(prefix)
                     i = self.skip_scalar(i + 1)
                     continue
                 key, i = m.group(0), m.end()
@@ -277,6 +282,19 @@ class Source:
             out.add(path, Span(key_start, key_end, i, kind))
         return i
 
+    def spread(self, i: int, prefix: str, out: Fields) -> None:
+        """``...(cond ? { a: 1 } : {})``: the keys of literal branches are read, without spans so the fixer leaves
+        them alone; any other spread may add any key under ``prefix``."""
+        opens = jsspread.literal_branches(self, i)
+        if opens is None:
+            out.hide(prefix)
+        for k in opens or ():
+            sub = Fields()
+            self.object_fields(k + 1, prefix, sub)
+            out.paths |= sub.paths
+            out.hidden |= sub.hidden
+            out.complete = out.complete and sub.complete
+
     def value(self, i: int, path: str, out: Fields) -> int:
         i = self.skip_space(i)
         if i < self.n and self.text[i] == "{":
@@ -300,7 +318,7 @@ class Source:
                 i += 1
                 continue
             if text.startswith("...", i) or c == "*":
-                out.complete = False
+                out.hide(path + "[].")
                 i = self.skip_scalar(i + 1)
                 continue
             if c == "{":
@@ -409,9 +427,9 @@ def collect(
             merge(out, parse_object(src, i + 1))
             after = src.skip_space(src.skip_balanced(i))
             if text.startswith(MERGERS, after):  # { amount: 1 }.merge(extra)
-                out.complete = False
+                out.hide("")
         elif text.startswith("...", i) or (ruby and text.startswith("**", i)):
-            out.complete = False
+            out.hide("")
         elif ruby and RUBY_KEYWORD.match(text, i):
             sub = Fields()
             src.object_fields(i, "", sub, closer=")")
@@ -428,16 +446,16 @@ def collect(
             elif k == 0 and has_id and (binding is None or binding.literal is None):
                 continue
             else:
-                out.complete = False
+                out.hide("")
 
 
 def variable_fields(src: Source, bindings: jsroots.Bindings, binding: jsroots.Binding, at: int) -> Fields:
     """Fields of the object literal a variable was bound to, plus keys written into it before the call."""
     sub = parse_object(src, binding.literal + 1)
     if not sub.paths:  # ``const params = {}`` is filled in elsewhere
-        sub.complete = False
+        sub.hide("")
     for mutation in bindings.mutations(binding.name, binding.literal, at):
-        sub.complete = False
+        sub.hide("")
         if mutation.key:
             sub.paths.add(mutation.key)
         if mutation.literal is not None:
@@ -459,4 +477,5 @@ def merge(out: Fields, sub: Fields) -> None:
     out.paths |= sub.paths
     for path, spans in sub.spans.items():
         out.spans.setdefault(path, []).extend(spans)
+    out.hidden |= sub.hidden
     out.complete = out.complete and sub.complete

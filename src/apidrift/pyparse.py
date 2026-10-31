@@ -28,6 +28,7 @@ class PyFound:
     resolved: Resolved
     fields: set[str]
     complete: bool
+    hidden: frozenset[str] = frozenset()  # prefixes ("" = top level) under which unseen keys may be sent
 
 
 @dataclass
@@ -46,8 +47,8 @@ def extract(text: str, resolve: Callable[[list[str]], Resolved | None]) -> tuple
     resolved_calls, unresolved = calls(text, resolve)
     found: list[PyFound] = []
     for c in resolved_calls:
-        fields, complete = _py_fields(c.node, c.scopes.lookup(c.node.lineno, c.fn))
-        found.append(PyFound(c.node.lineno, c.call, c.resolved, fields, complete))
+        fields, hidden = _py_fields(c.node, c.scopes.lookup(c.node.lineno, c.fn))
+        found.append(PyFound(c.node.lineno, c.call, c.resolved, fields, not hidden, frozenset(hidden)))
     return found, unresolved
 
 
@@ -368,53 +369,52 @@ def _as_dict(node: ast.expr | None, assigned):
     return None
 
 
-def _py_fields(call: ast.Call, assigned) -> tuple[set[str], bool]:
+def _py_fields(call: ast.Call, assigned) -> tuple[set[str], set[str]]:
+    """The call's fields, and the prefixes ("" for the top level) under which keys may be sent unseen."""
     fields: set[str] = set()
-    complete = True
+    hidden: set[str] = set()
     for kw in call.keywords:
         if kw.arg is None or kw.arg == "params":
             node = _as_dict(kw.value, assigned)
-            complete &= _dict_fields(node, "", fields, assigned) if node is not None else False
+            if node is None:
+                hidden.add("")
+            else:
+                _dict_fields(node, "", fields, assigned, hidden)
             continue
         if kw.arg in OPTION_KWARGS:
             continue
         fields.add(kw.arg)
-        complete &= _nested(kw.value, kw.arg, fields, assigned)
+        _nested(kw.value, kw.arg, fields, assigned, hidden)
     for arg in call.args:
         if isinstance(arg, ast.Starred):
-            complete = False
+            hidden.add("")
         elif isinstance(arg, ast.Dict):
-            complete &= _dict_fields(arg, "", fields, assigned)
-    return fields, complete
+            _dict_fields(arg, "", fields, assigned, hidden)
+    return fields, hidden
 
 
-def _dict_fields(node: ast.expr, prefix: str, fields: set[str], assigned) -> bool:
-    complete = True
+def _dict_fields(node: ast.expr, prefix: str, fields: set[str], assigned, hidden: set[str]) -> None:
     if isinstance(node, ast.Call):  # dict(amount=1, currency="usd")
         pairs = [(kw.arg, kw.value) for kw in node.keywords]
     else:
         pairs = [(k.value if isinstance(k, ast.Constant) else None, v) for k, v in zip(node.keys, node.values)]
     for key, value in pairs:
         if not isinstance(key, str):
-            complete = False
+            hidden.add(prefix)
             continue
         path = prefix + key
         fields.add(path)
-        complete &= _nested(value, path, fields, assigned)
-    return complete
+        _nested(value, path, fields, assigned, hidden)
 
 
-def _nested(value: ast.expr, path: str, fields: set[str], assigned) -> bool:
+def _nested(value: ast.expr, path: str, fields: set[str], assigned, hidden: set[str]) -> None:
     node = _as_dict(value, assigned)
     if node is not None:
-        return _dict_fields(node, path + ".", fields, assigned)
-    if isinstance(value, (ast.List, ast.Tuple)):
-        complete = True
+        _dict_fields(node, path + ".", fields, assigned, hidden)
+    elif isinstance(value, (ast.List, ast.Tuple)):
         for item in value.elts:
             inner = _as_dict(item, assigned)
             if inner is not None:
-                complete &= _dict_fields(inner, path + "[].", fields, assigned)
+                _dict_fields(inner, path + "[].", fields, assigned, hidden)
             elif isinstance(item, ast.Starred):
-                complete = False
-        return complete
-    return True
+                hidden.add(path + "[].")

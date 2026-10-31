@@ -117,7 +117,7 @@ def _request_impact(change: Change, usage: Usage) -> Impact | None:
         return None
     if use == OPAQUE:
         return Impact(usage, change, POSSIBLE, f"{parent} is sent here but its contents are not visible")
-    if usage.complete:
+    if not usage.hides(target):
         return None
     return Impact(usage, change, POSSIBLE, "arguments are not fully visible at this call")
 
@@ -132,7 +132,7 @@ def _migrated(change: Change, usage: Usage, action: str) -> bool:
     migration = migrations.lookup(change)
     if migration is None or not migrations.migrated(migration, usage.fields):
         return False
-    return migration.action != "delete" or usage.complete
+    return migration.action != "delete" or not usage.hides(migration.target)
 
 
 def _required_impact(change: Change, usage: Usage, target: str, parent: str, use: str) -> Impact | None:
@@ -140,7 +140,7 @@ def _required_impact(change: Change, usage: Usage, target: str, parent: str, use
     if use == SENT:
         return None
     if not parent:
-        if usage.complete or change.kind.endswith("added_required"):
+        if not usage.hides(target) or change.kind.endswith("added_required"):
             return Impact(usage, change, AFFECTED, f"every caller must now send {target}")
         return Impact(usage, change, POSSIBLE, f"{target} may not be sent here (arguments not fully visible)")
     parent_use = _uses(usage.fields, parent)
@@ -148,7 +148,7 @@ def _required_impact(change: Change, usage: Usage, target: str, parent: str, use
         return Impact(usage, change, AFFECTED, f"{parent} is sent here without {target}")
     if parent_use in (SENT, OPAQUE) or use == OPAQUE:
         return Impact(usage, change, POSSIBLE, f"{parent} is sent here but its contents are not visible")
-    if usage.complete:
+    if not usage.hides(parent):
         return None
     return Impact(usage, change, POSSIBLE, f"{parent} may be sent here (arguments not fully visible)")
 
@@ -239,7 +239,7 @@ def render_impact_text(
         if show_all:
             lines += [f"  {u.where}  {u.label}  via {u.call}" for u in untouched]
     if in_docs:
-        lines += ["", f"in documentation / fixtures (not counted): {len(in_docs)}"]
+        lines += ["", f"in documentation, fixtures and tests (not counted): {len(in_docs)}"]
         lines += _impact_lines(in_docs)
     if result.unresolved:
         lines.append(f"other stripe calls (Stripe.js, webhooks, SDK helpers): {len(result.unresolved)} (apidrift scan lists them)")
