@@ -216,15 +216,16 @@ def render_impact_text(
     counts = summary(counted)
     hit = {(i.usage.file, i.usage.line, i.usage.path) for i in counted}
     langs = ", ".join(f"{lang} {n}" for lang, n in result.by_language().items()) or "none"
+    words, vendor = result.reader, result.reader.vendor.lower()
     lines = [
         f"apidrift impact: {result.root}",
         f"{old_label} -> {new_label}",
-        f"{len(result.counted)} Stripe call sites in {result.files_with_usages()} files ({langs}); "
+        f"{len(result.counted)} {words.vendor} call sites in {result.files_with_usages()} files ({langs}); "
         f"{len(hit)} hit by this upgrade: {counts[BREAKING]} breaking, {counts[WARNING]} warnings, "
         f"{counts[INFO]} informational",
     ]
     if result.unread:
-        lines.append("not read: " + unread_sentence(result.unread))
+        lines.append("not read: " + unread_sentence(result.unread, words.vendor))
     for sev in (BREAKING, WARNING, INFO):
         group = [i for i in counted if i.severity == sev]
         if not group:
@@ -242,7 +243,7 @@ def render_impact_text(
         lines += ["", f"in documentation, fixtures and tests (not counted): {len(in_docs)}"]
         lines += _impact_lines(in_docs)
     if result.unresolved:
-        lines.append(f"other stripe calls (Stripe.js, webhooks, SDK helpers): {len(result.unresolved)} (apidrift scan lists them)")
+        lines.append(f"other {vendor} calls ({words.others}): {len(result.unresolved)} (apidrift scan lists them)")
     return "\n".join(lines)
 
 
