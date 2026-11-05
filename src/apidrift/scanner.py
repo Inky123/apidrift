@@ -1,7 +1,7 @@
 """Find the Stripe calls in a checkout: which endpoint, which request fields, where.
 
 Python files go through :mod:`pyparse` (``ast``), JavaScript, TypeScript and
-Ruby through :mod:`jsparse`. Every text file is also
+Ruby through :mod:`jsparse`, PHP through :mod:`phpparse`. Every text file is also
 searched for literal ``api.stripe.com/v1/...`` URLs, which identify the
 endpoint but not the fields; in documentation, fixtures and tests (mostly
 HTTP stubs) those are tagged ``language="doc"`` and reported separately.
@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import jsparse, pyparse
+from . import jsparse, phpparse, pyparse
 from .sdkmap import Resolved, SdkIndex
 
 SKIP_DIRS = {"node_modules", "vendor", "site-packages", "__pycache__"}  # skipped anywhere
@@ -30,9 +30,10 @@ LANGUAGES = {
     ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
     ".ts": "typescript", ".tsx": "typescript", ".mts": "typescript", ".cts": "typescript",
     ".rb": "ruby", ".rake": "ruby",
+    ".php": "php",
 }
 TEXT_EXT = set(LANGUAGES) | {
-    ".go", ".php", ".java", ".kt", ".cs", ".sh", ".bash", ".zsh", ".yaml", ".yml", ".json", ".toml", ".env",
+    ".go", ".java", ".kt", ".cs", ".sh", ".bash", ".zsh", ".yaml", ".yml", ".json", ".toml", ".env",
     ".http", ".rs", ".swift", ".dart", ".ex", ".exs", ".scala", ".vue", ".svelte", ".html", ".erb", ".md", ".txt",
     ".cfg", ".ini", ".conf", ".graphql", ".sql",
 }
@@ -41,7 +42,7 @@ TEXT_EXT = set(LANGUAGES) | {
 # found. Swift, Kotlin and Dart are left out: those are Stripe's mobile SDKs, which talk to a different,
 # publishable-key surface rather than the server endpoints this diff covers.
 UNREAD_LANGUAGES = {
-    ".go": "Go", ".php": "PHP", ".java": "Java", ".cs": "C#", ".rs": "Rust", ".ex": "Elixir", ".exs": "Elixir",
+    ".go": "Go", ".java": "Java", ".cs": "C#", ".rs": "Rust", ".ex": "Elixir", ".exs": "Elixir",
     ".scala": "Scala",
 }
 DOC_EXT = {".md", ".txt", ".yml", ".yaml", ".json", ".env"}
@@ -54,6 +55,7 @@ URL_RE = re.compile(r"api\.stripe\.com(/v\d+(?:/[^\s'\"`<>)\],;?]+)+)")
 VERB_RE = re.compile(r"\b(get|post|delete)\b", re.I)
 METHOD_RE = re.compile(r"(?:method\s*[:=]\s*['\"]?|-X\s*['\"]?|--request\s+['\"]?)(get|post|delete)", re.I)
 MEMBER_RE = re.compile(r"\.\s*([A-Za-z_]\w*)|\[\s*[\"']([A-Za-z_]\w*)[\"']\s*\]")
+PHP_MEMBER_RE = re.compile(r"->\s*([A-Za-z_]\w*)(?!\w|\s*\()|\[\s*[\"']([A-Za-z_]\w*)[\"']\s*\]")
 GENERIC_RECEIVERS = {
     "event", "evt", "req", "request", "res", "response", "body", "params", "options", "opts", "ctx", "this", "self",
     "args", "kwargs", "process", "env",
@@ -175,8 +177,8 @@ def scan_text(text: str, rel: str, index: SdkIndex) -> tuple[list[Usage], list[t
     The third item names the language when the file is in one the scanner cannot parse yet (else None).
     """
     suffix = os.path.splitext(rel)[1].lower()
-    reads = _reads(text)
     language = LANGUAGES.get(suffix)
+    reads = _reads(text, PHP_MEMBER_RE if language == "php" else MEMBER_RE)
     found: list[Usage] = []
     unread_name: str | None = None
     if language == "python":
@@ -244,14 +246,15 @@ def _doc_like(rel: str, suffix: str) -> bool:
     return suffix in DOC_EXT or any(part in DOC_DIRS or part in TEST_DIRS for part in dirs) or bool(TEST_FILE.match(name))
 
 
-def _reads(text: str) -> frozenset[str]:
+def _reads(text: str, member: re.Pattern[str] = MEMBER_RE) -> frozenset[str]:
     """Member names read off something that could be an API response (not ``req.body.x`` or ``event.type``)."""
     out: set[str] = set()
-    for m in MEMBER_RE.finditer(text):
+    for m in member.finditer(text):
         name = m.group(1) or m.group(2)
         if name in NOT_READS or name[0].isupper() or "stripe" in name.lower() or re.search(r"[a-z][A-Z]", name):
             continue
-        if _receiver(text, m.start()) in GENERIC_RECEIVERS:
+        receiver = _receiver(text, m.start())
+        if (receiver.lstrip("$") if member is PHP_MEMBER_RE else receiver) in GENERIC_RECEIVERS:
             continue
         out.add(name)
     return frozenset(out)
@@ -288,13 +291,15 @@ def _scan_python(text: str, rel: str, index: SdkIndex, reads: frozenset[str]):
     return usages, [(rel, line, call) for line, call in missing]
 
 
-# --- JavaScript / TypeScript / Ruby -------------------------------------------
+# --- JavaScript / TypeScript / Ruby / PHP ---------------------------------------
 
 
 def _scan_dynamic(text: str, rel: str, index: SdkIndex, reads: frozenset[str], language: str):
-    found, missing = jsparse.extract(
-        text, index, ruby=language == "ruby", resolve=lambda chain: _resolve(index, chain)
-    )
+    resolve = lambda chain: _resolve(index, chain)  # noqa: E731
+    if language == "php":
+        found, missing = phpparse.extract(text, resolve)
+    else:
+        found, missing = jsparse.extract(text, index, ruby=language == "ruby", resolve=resolve)
     usages = [
         Usage(rel, f.line, f.resolved.method, f.resolved.path, f.call, frozenset(f.fields.paths), f.fields.complete,
               language, reads, frozenset(f.fields.hidden))

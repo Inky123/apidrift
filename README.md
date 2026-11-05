@@ -21,7 +21,7 @@ against Stripe's own sample repository, apidrift flags five servers: <https://gi
    informational) and records the release that introduced it.
 2. **Scan.** On install, on every push to the default branch, and on every Stripe release, the
    repository tarball is downloaded, scanned for Stripe call sites (Python via `ast`; JavaScript,
-   TypeScript and Ruby via a bracket-aware parser; literal `api.stripe.com` URLs anywhere), and
+   TypeScript, Ruby and PHP via bracket-aware parsers; literal `api.stripe.com` URLs anywhere), and
    deleted. SDK method names map to endpoints through the spec's own `x-stripeOperations`. The code
    is never executed: scanning runs in a separate process with no credentials, a memory cap and timeout.
 3. **Cross.** Each call site's request fields are matched against the diff. A removed field hits a
@@ -75,5 +75,5 @@ comment in that file describes first boot and the proxy site block.
 Fix what Stripe has not documented a replacement for. The pull request covers renamed fields, removed
 fields and fields whose value changed shape (today: `payment_method_types`, `payto`, `filters.countries`,
 `billing_cycle_anchor`); anything else, such as a new required field whose value only you know, still
-arrives as an issue. Vendors other than Stripe. Go, PHP, Java and .NET (literal URLs only; the issue
+arrives as an issue. Vendors other than Stripe. Go, Java and .NET (literal URLs only; the issue
 says so when such files mention Stripe). Stripe clients behind a local wrapper that never names Stripe.
