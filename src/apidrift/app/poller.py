@@ -1,4 +1,6 @@
-"""Notice Stripe releases: a conditional GET of the spec, a validated new snapshot, one release job per repo.
+"""Notice Stripe releases: a conditional GET of the spec, a validated new snapshot, then the release pass:
+every repo is checked against its index, and only those whose findings changed (or that have no usable index)
+get a release job (``releasepass``).
 
 Every tick records ``last_poll_at``, ``last_poll_status`` and ``latest_snapshot`` in the ``meta`` table,
 including 304s, rejections and errors, so an operator can tell a quiet Stripe from a broken poller.
@@ -137,7 +139,7 @@ def _record(conn: sqlite3.Connection, status: str, snaps: list[Path]) -> None:
 
 
 def poll_stripe(settings: Settings, conn: sqlite3.Connection, http: httpx.Client) -> Path | None:
-    """Fetch the spec if it changed; store it when it validates; queue release checks when the version is new.
+    """Fetch the spec if it changed; store it when it validates; run the release pass when the version is new.
 
     Returns the new snapshot path, or None (304, duplicate content or a rejected body). HTTP and transport
     errors propagate after being recorded in ``meta``.
@@ -176,10 +178,10 @@ def poll_stripe(settings: Settings, conn: sqlite3.Connection, http: httpx.Client
         logger.info("Stripe poll: saved %s (same version %s as before; no checks queued)", path.name, version)
         _record(conn, f"saved {path.name} (same version)", snapshots(settings.data))
         return path
-    with db.write(conn):
-        repos = db.active_repos(conn)
-        for offset, repo in enumerate(repos):
-            db.enqueue(conn, "check", repo["id"], "release", not_before=db.later(offset * STAGGER_SECONDS))
-    logger.info("Stripe poll: saved %s (version %s -> %s); %d release checks queued", path.name, previous_version, version, len(repos))
     _record(conn, f"saved {path.name}", snapshots(settings.data))
+    from . import releasepass  # here, not at the top: releasepass builds on checker, which imports this module
+
+    counts = releasepass.run(settings, conn)
+    queued = counts[releasepass.DIFFER] + counts[releasepass.NONE]
+    logger.info("Stripe poll: saved %s (version %s -> %s); %d release checks queued", path.name, previous_version, version, queued)
     return path

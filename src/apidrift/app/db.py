@@ -102,6 +102,17 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE repos ADD COLUMN pr_pending_sha TEXT;
     """,
+    # the index of a repo's Stripe call sites at ``sha`` (inventory.py): a release is assessed from it, without the code
+    """
+    CREATE TABLE repo_index (repo_id INTEGER PRIMARY KEY REFERENCES repos(id) ON DELETE CASCADE, sha TEXT NOT NULL,
+        format INTEGER NOT NULL, scanner TEXT NOT NULL, job_id INTEGER, extras TEXT NOT NULL, written_at TEXT NOT NULL,
+        checked TEXT, checked_at TEXT, checked_by TEXT);
+    CREATE TABLE index_sites (repo_id INTEGER NOT NULL REFERENCES repo_index(repo_id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL, file TEXT NOT NULL, line INTEGER NOT NULL, method TEXT NOT NULL, path TEXT NOT NULL,
+        call TEXT NOT NULL, language TEXT NOT NULL, complete INTEGER NOT NULL, fields TEXT NOT NULL, hidden TEXT,
+        PRIMARY KEY (repo_id, seq));
+    CREATE INDEX index_sites_endpoint ON index_sites(method, path);
+    """,
 ]
 
 

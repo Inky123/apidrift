@@ -1,4 +1,4 @@
-"""CLI commands of the GitHub App: ``serve``, ``worker``, ``check``, ``status`` and ``app-setup``."""
+"""CLI commands of the GitHub App: ``serve``, ``worker``, ``check``, ``status``, ``index`` and ``app-setup``."""
 
 from __future__ import annotations
 
@@ -44,9 +44,13 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     )
     p_check.set_defaults(func=cmd_check)
 
-    p_status = sub.add_parser("status", help="installations, repos, issues, recent jobs and the last Stripe poll")
+    p_status = sub.add_parser("status", help="installations, repos, issues, recent jobs, the index and the last Stripe poll")
     p_status.add_argument("--hours", type=int, default=24, help="how far back to list jobs (default 24)")
     p_status.set_defaults(func=cmd_status)
+
+    p_index = sub.add_parser("index", help="print the stored index of one repository: its Stripe call sites by endpoint")
+    p_index.add_argument("repo", metavar="OWNER/NAME", help="an installed repository")
+    p_index.set_defaults(func=cmd_index)
 
     p_setup = sub.add_parser("app-setup", help="print the GitHub App registration checklist and validate .env")
     p_setup.set_defaults(func=cmd_app_setup)
@@ -142,12 +146,35 @@ def _check_local(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     """Print what an operator asks first: is anything installed, checked, failing, and is Stripe being polled."""
     settings = from_env()
-    from . import db
+    from . import db, inventory
 
     conn = db.connect(settings.db_path)
     db.migrate(conn)
     try:
-        print(render_status(db.status_summary(conn, hours=args.hours), hours=args.hours))
+        summary = {**db.status_summary(conn, hours=args.hours), "index": inventory.summary(conn)}
+        print(render_status(summary, hours=args.hours))
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_index(args: argparse.Namespace) -> int:
+    """Print what apidrift knows one repository calls. For the operator's terminal only: repositories can be
+    private, and the web process (which has no user authentication) serves none of this."""
+    settings = from_env()
+    from . import db, inventory
+
+    conn = db.connect(settings.db_path)
+    db.migrate(conn)
+    try:
+        repo = db.find_repo(conn, args.repo)
+        if repo is None:
+            raise SystemExit(f"{args.repo} is not an installed repository")
+        header = inventory.get(conn, repo["id"])
+        if header is None:
+            print(f"{repo['full_name']} has no index yet; its next full check writes one")
+            return 1
+        print(inventory.render(repo["full_name"], header, inventory.sites(conn, repo["id"])))
     finally:
         conn.close()
     return 0
@@ -165,7 +192,25 @@ def render_status(summary: dict, hours: int = 24) -> str:
         lines.append(f"  job {err['id']} repo {err['repo_id']} {err['status']}: {err['error']}")
     lines.append(f"last poll: {summary.get('last_poll_at') or 'never'} ({summary.get('last_poll_status') or 'no status'})")
     lines.append(f"latest snapshot: {summary.get('latest_snapshot') or 'none'}")
+    index = summary.get("index")
+    if index is not None:
+        lines.append(
+            f"index: {index['repos']} repos indexed, {index['call_sites']} call sites on {index['endpoints']} endpoints"
+            f" ({index['doc_sites']} more in documentation and tests); {index['by_index']} last checked from the index"
+        )
+        lines.append("last release pass: " + _release_pass(summary.get("last_release_pass")))
     return "\n".join(lines)
+
+
+def _release_pass(raw: object) -> str:
+    try:
+        p = json.loads(raw if isinstance(raw, str) else "")
+        return (
+            f"{p['release']} at {p['at']}: {p['same'] + p['differ']} repos checked from the index in {p['ms']} ms,"
+            f" {p['differ']} needed a full check, {p['none']} had no index, {p['queued']} already had a check queued"
+        )
+    except (ValueError, KeyError, TypeError):
+        return "never"
 
 
 def cmd_app_setup(args: argparse.Namespace) -> int:

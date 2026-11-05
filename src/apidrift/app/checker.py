@@ -28,7 +28,7 @@ from ..openapi import Spec, load_spec
 from ..report import filter_changes
 from ..scanner import ScanResult, scan_repo
 from ..sdkmap import SdkIndex
-from . import db, fixpr, issue
+from . import db, fixpr, indexcheck, inventory, issue
 from .checkout import ExtractError, extract_tarball
 from .config import Settings
 from .github import GitHubClient, GitHubError, RateLimited, TarballTooLarge, scrub
@@ -89,6 +89,7 @@ class LocalCheck:
     new_spec: Spec
     versions: list[str] = field(default_factory=list)
     extra: dict = field(default_factory=dict)  # the fix plan (``--fix``): fixes, unfixable, pins, migrations, leftovers
+    index: dict | None = None  # every call site the scan found, for the parent to keep (``inventory.export``)
 
     @property
     def old_label(self) -> str:
@@ -106,6 +107,7 @@ class LocalCheck:
         data = json.loads(render_impact_json(self.result, self.impacts, self.old_label, self.new_label))
         data["old_version"], data["new_version"] = self.old_spec.version, self.new_spec.version
         data["versions"] = self.versions
+        data["index"] = self.index
         data.update(self.extra)
         return data
 
@@ -123,8 +125,10 @@ def run_local(repo_dir: Path, old: str, new: str, fix: bool = False) -> LocalChe
     middle = [load_spec(snap.load(p)) for p in snap.between("stripe", old_path, new_path)]
     changes, versions = diff_chain([old_spec, *middle, new_spec])
     changes = filter_changes(changes, min_severity=BREAKING)
-    result = scan_repo(Path(repo_dir), index)
+    recorder = inventory.Recorder(index)  # the scan asks the SDK index through it, so its questions can be kept
+    result = scan_repo(Path(repo_dir), recorder)
     check = LocalCheck(result, assess(result.usages, changes), old_path, new_path, old_spec, new_spec, versions)
+    check.index = inventory.export(result, recorder)
     if fix:
         from ..fixer import plan_fixes  # the child process only; imported here so the parent never loads it
 
@@ -247,6 +251,7 @@ def _check(job: sqlite3.Row, conn: sqlite3.Connection, gh: GitHubClient, setting
         db.update_repo(conn, repo["id"], full_name=full_name)
     if meta.get("archived") or not meta.get("has_issues", True):
         db.update_repo(conn, repo["id"], last_result="skipped", last_checked_at=db.now())
+        inventory.drop(conn, repo["id"])
         return "skipped: issues are disabled or the repository is archived"
     default_branch = str(meta.get("default_branch") or "main")
     sha = gh.branch_sha(token, full_name, default_branch)
@@ -268,6 +273,7 @@ def _check(job: sqlite3.Row, conn: sqlite3.Connection, gh: GitHubClient, setting
     logger.info("job %s (repo %s): tarball %d bytes, %s -> %s scanned in %.1f s",
                 job["id"], repo["id"], size, baseline.name, latest.name, time.monotonic() - started)
     outcome = _reconcile(conn, gh, settings, token, repo, full_name, sha, payload, latest)
+    indexcheck.record(conn, snaps, repo["id"], job["id"], sha, payload, baseline, latest)  # for the next Stripe release
     return outcome + _fix_step(conn, gh, settings, token, repo, full_name, default_branch, sha, payload, latest)
 
 
@@ -347,19 +353,25 @@ def _settle_issue(
     return int(number), state
 
 
+def issue_view(payload: dict, full_name: str, sha: str, new_version: str) -> tuple[list[dict], str, list[str], dict]:
+    """What a payload puts in the repo's issue: (findings, fingerprint, finding hashes, ``render_issue`` keywords).
+    One place, so a release assessed from the index (releasepass) compares against exactly what a check writes."""
+    impacts = issue.breaking(payload)
+    fp = issue.fingerprint(impacts)
+    render = dict(full_name=full_name, sha=sha, old_version=str(payload.get("old_version", "?")), new_version=new_version,
+                  call_sites=int(payload.get("call_sites", 0)), fingerprint=fp, unread=issue.unread_note(payload))
+    return issue.findings(payload, full_name, sha), fp, issue.finding_hashes(impacts), render
+
+
 def _reconcile(
     conn: sqlite3.Connection, gh: GitHubClient, settings: Settings, token: str, repo: sqlite3.Row,
     full_name: str, sha: str, payload: dict, latest: Path,
 ) -> str:
-    impacts = issue.breaking(payload)
-    items = issue.findings(payload, full_name, sha)
-    old_version, new_version = str(payload.get("old_version", "?")), str(payload.get("new_version", version_of(latest)))
+    new_version = str(payload.get("new_version", version_of(latest)))
+    items, fp, hashes, render = issue_view(payload, full_name, sha, new_version)
     number, state = _settle_issue(conn, gh, settings, token, repo, full_name, adopt=bool(items))
     repo = db.get_repo(conn, repo["id"]) or repo
-    fp, hashes = issue.fingerprint(impacts), issue.finding_hashes(impacts)
     previous = json.loads(repo["issue_items"]) if repo["issue_items"] else None
-    render = dict(full_name=full_name, sha=sha, old_version=old_version, new_version=new_version,
-                  call_sites=int(payload.get("call_sites", 0)), fingerprint=fp, unread=issue.unread_note(payload))
     title, body = issue.render_issue(items, **render)
     gained = set(hashes) - set(previous) if previous is not None else set()
     version_changed = repo["issue_version"] is not None and repo["issue_version"] != new_version

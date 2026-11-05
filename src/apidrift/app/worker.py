@@ -1,8 +1,9 @@
 """The worker process: poll Stripe on a timer, claim queued jobs, run each check, requeue on failure.
 
 Once a day it also sweeps: any active repo not checked since the latest snapshot and without a queued
-or running job gets a release check (jobs that failed for good are picked up again this way), and
-done/failed jobs older than 30 days are pruned.
+or running job goes through the release pass again (answered from its index when that is current, else a
+release check is queued; jobs that failed for good are picked up again this way), and done/failed jobs
+older than 30 days are pruned.
 """
 
 from __future__ import annotations
@@ -15,11 +16,11 @@ import time
 
 import httpx
 
-from . import db
+from . import db, inventory, releasepass
 from .checker import CheckError, run_job
 from .config import Settings
 from .github import GitHubClient, RateLimited, scrub
-from .poller import STAGGER_SECONDS, poll_stripe, snapshot_stamp, snapshots
+from .poller import poll_stripe, snapshot_stamp, snapshots
 
 IDLE_SECONDS = 5
 SWEEP_SECONDS = 24 * 3600
@@ -63,18 +64,19 @@ def drain(conn: sqlite3.Connection, gh: GitHubClient, settings: Settings) -> int
 
 
 def sweep(settings: Settings, conn: sqlite3.Connection) -> int:
-    """Queue a release check for every stale repo and prune old jobs; returns how many checks were queued."""
+    """Put every stale repo through the release pass and prune old jobs; returns how many checks were queued.
+
+    This is also what finishes a release pass that a crash interrupted: the repos it had not reached are stale."""
+    inventory.drop_superseded(conn)  # before the prune: a failed check must outlive its job row as "no index"
     pruned = db.prune_jobs(conn)
     snaps = snapshots(settings.data)
     if not snaps:
         logger.info("sweep: no snapshot yet; pruned %d old jobs", pruned)
         return 0
-    queued = 0
-    with db.write(conn):
-        for repo in db.stale_repos(conn, snapshot_stamp(snaps[-1])):
-            if db.enqueue(conn, "check", repo["id"], "release", not_before=db.later(queued * STAGGER_SECONDS)):
-                queued += 1
-    logger.info("sweep: %d stale repos queued behind %s; pruned %d old jobs", queued, snaps[-1].name, pruned)
+    counts = releasepass.run(settings, conn, db.stale_repos(conn, snapshot_stamp(snaps[-1])))
+    queued = counts[releasepass.DIFFER] + counts[releasepass.NONE]
+    logger.info("sweep: %d stale repos queued behind %s, %d answered from the index; pruned %d old jobs",
+                queued, snaps[-1].name, counts[releasepass.SAME], pruned)
     return queued
 
 
