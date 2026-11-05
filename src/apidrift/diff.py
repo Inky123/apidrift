@@ -14,7 +14,7 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
-from .openapi import Operation, Spec
+from .openapi import MAX_DEPTH, REF_RE, Operation, Spec
 
 BREAKING, WARNING, INFO = "breaking", "warning", "info"
 SEVERITY_RANK = {BREAKING: 0, WARNING: 1, INFO: 2}
@@ -22,6 +22,9 @@ MAX_NESTED = 3
 MIN_COLLAPSE = 3  # sibling removals that share a leaf and a shape fold into one ``parent.*.leaf`` change
 COLLAPSIBLE = {"body_removed": "body field", "param_removed": "parameter", "response_field_removed": "field"}
 SINGLE_REF_RE = re.compile(r"^(array<)?ref:([^|<>]+)(>)?$")
+OBJECT_RE = re.compile(r"^(array<)?(?:object|ref:[^|<>]+)(>)?$")
+ANY = "unknown"  # a schema that names no type accepts every type, so it is wider than any one of them
+NOUNS = {"param": "parameter", "body": "body field", "request": "request field"}
 
 
 @dataclass
@@ -154,14 +157,20 @@ def _alts(spec: Spec, type_str: str) -> frozenset[str]:
     return frozenset(spec.fingerprint_type(alt) for alt in type_str.split("|"))
 
 
+def _undefined(spec: Spec, type_str: str) -> bool:
+    """The type names a schema the spec does not define (Square shipped one): the spec says nothing about
+    the field there, so defining the schema later, or losing it, is not a change a client can act on."""
+    return any(name not in spec.schemas for name in REF_RE.findall(type_str))
+
+
 def _type_change(old_spec: Spec, a: str, new_spec: Spec, b: str, *, request: bool) -> tuple[str, str, str] | None:
     """Classify a type change as (severity, kind, verb), or None when only schema names differ."""
     old_alts, new_alts = _alts(old_spec, a), _alts(new_spec, b)
-    if old_alts == new_alts:
+    if old_alts == new_alts or _undefined(old_spec, a) or _undefined(new_spec, b):
         return None
-    if old_alts < new_alts:
+    if old_alts < new_alts or (ANY in new_alts and ANY not in old_alts):
         return (INFO if request else WARNING), "type_widened", "widened"
-    if new_alts < old_alts:
+    if new_alts < old_alts or (ANY in old_alts and ANY not in new_alts):
         return (BREAKING if request else INFO), "type_narrowed", "narrowed"
     return BREAKING, "type_changed", "changed"
 
@@ -204,13 +213,18 @@ def _response_set_change(old_spec: Spec, new_spec: Spec, a: Operation, b: Operat
 
 
 def _diff_request_fields(
-    old_spec: Spec, new_spec: Spec, method: str, path: str, scope: str, old: dict, new: dict
+    old_spec: Spec, new_spec: Spec, method: str | None, path: str | None, scope: str, old: dict, new: dict,
+    schema: str | None = None, affects: tuple = (),
 ) -> list[Change]:
+    """Changes to what a client sends: an operation's parameters (``param``) or body fields (``body``), or
+    the fields of a named schema that operations send without listing them (``request``)."""
     out: list[Change] = []
-    noun = "parameter" if scope == "param" else "body field"
+    noun = NOUNS[scope]
 
     def make(severity: str, kind: str, target: str, message: str, **extra: Any) -> Change:
-        return Change(severity, f"{scope}_{kind}", message, method, path, target=target, **extra)
+        if schema:
+            message = f"{message} (on {schema})"
+        return Change(severity, f"{scope}_{kind}", message, method, path, schema, target, affects=affects, **extra)
 
     for key in _top_level(old.keys() - new.keys()):
         out.append(make(BREAKING, "removed", key, f"{noun} {key} was removed", old=_summary(old[key])))
@@ -226,17 +240,35 @@ def _diff_request_fields(
             out.append(make(BREAKING, "now_required", key, f"{noun} {key} is now required"))
         elif a.required and not b.required:
             out.append(make(INFO, "now_optional", key, f"{noun} {key} is now optional"))
-        if a.type != b.type:
+        if a.type != b.type and not _same_object(old, a.type, new, b.type, key):
             verdict = _type_change(old_spec, a.type, new_spec, b.type, request=True)
             if verdict:
                 sev, kind, verb = verdict
                 msg = f"{noun} {key} type {verb} from {a.type} to {b.type}"
                 out.append(make(sev, kind, key, msg, old=a.type, new=b.type))
         open_enum = a.enum is None and a.type == "string" and b.open_enum
-        out += _enum_changes(make, key, noun, a.enum, b.enum, request=True, open_enum=open_enum)
+        if not (_undefined(old_spec, a.type) or _undefined(new_spec, b.type)):
+            out += _enum_changes(make, key, noun, a.enum, b.enum, request=True, open_enum=open_enum)
         if not a.deprecated and b.deprecated:
             out.append(make(WARNING, "deprecated", key, f"{noun} {key} is now deprecated"))
     return out
+
+
+def _listed(fields: dict, key: str) -> str | None:
+    """How a request field's own fields are listed: ``.`` (an object), ``[].`` (a list of objects) or None."""
+    for separator in (".", "[]."):
+        if any(other.startswith(key + separator) for other in fields):
+            return separator
+    return None
+
+
+def _same_object(old: dict, a: str, new: dict, b: str, key: str) -> bool:
+    """Both sides are one object, inline or named, and both list its fields. Those are compared one by one,
+    so an object that was given a name, or a different name, is not itself a change."""
+    if not (OBJECT_RE.match(a) and OBJECT_RE.match(b)):
+        return False
+    listed = _listed(old, key)
+    return listed is not None and listed == _listed(new, key)
 
 
 def _enum_changes(
@@ -288,9 +320,33 @@ def _diff_schemas(old: Spec, new: Spec) -> list[Change]:
             out.append(Change(INFO, "schema_removed", msg, schema=name))
     for name in sorted(new.schemas.keys() - old.schemas.keys()):
         out.append(Change(INFO, "schema_added", f"schema {name} was added", schema=name))
+    senders = _senders(new) if new.request_only else {}
     for name in sorted(old.schemas.keys() & new.schemas.keys()):
+        if name in old.request_only and name in new.request_only:
+            # A client only sends it. An operation whose body lists its fields reports the change there, as a
+            # body field; the rest (it is nested too deep, or sent as a parameter) are named here.
+            unlisted = _unlisted(new, name, senders.get(name, ()))
+            if unlisted:
+                a, b = old.schemas[name].fields, new.schemas[name].fields
+                out += _diff_request_fields(old, new, None, None, "request", a, b, schema=name, affects=unlisted)
+            continue
         out += _diff_schema(old, new, name, name, name, "", tuple(new.operations_returning(name)), 0)
     return out
+
+
+def _senders(spec: Spec) -> dict[str, list[Operation]]:
+    """The operations whose request can carry each named schema."""
+    out: dict[str, list[Operation]] = {}
+    for op in spec.operations.values():
+        for name in op.sends:
+            out.setdefault(name, []).append(op)
+    return out
+
+
+def _unlisted(spec: Spec, name: str, senders: list[Operation] | tuple) -> tuple[str, ...]:
+    """Labels of the operations that send a schema but whose body does not list every one of its fields."""
+    deepest = max((path.count(".") for path in spec.schemas[name].fields), default=0)
+    return tuple(sorted(op.label for op in senders if op.listed.get(name, MAX_DEPTH) + deepest >= MAX_DEPTH))
 
 
 def _rename_target(old_spec: Spec, new_spec: Spec, name: str) -> str | None:

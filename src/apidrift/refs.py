@@ -46,6 +46,7 @@ class Doc:
         components = doc.get("components")
         schemas = components.get("schemas") if isinstance(components, dict) else None
         self.schemas: dict = schemas if isinstance(schemas, dict) else {}
+        self._edges: dict[str, set[str]] = {}  # schema name -> the schemas it names, filled on demand
 
     def _pointer(self, ref: str) -> Any:
         """The node a local JSON pointer (``#/components/parameters/owner``) names; None when there is none."""
@@ -111,25 +112,42 @@ class Doc:
             return node
         return {**target, **{key: node[key] for key in KEPT_ON_ALIAS if key in node}}
 
-    def request_only(self) -> frozenset[str]:
-        """Named schemas a client only ever sends: reachable from a parameter or request body and from no
-        response, callback or webhook. A schema nothing refers to is not one of them."""
-        sent: list = []
-        received: list = [self.doc.get("webhooks"), self.doc.get("x-webhooks")]
+    def chain(self, node: Any) -> list[str]:
+        """The schema names a reference passes through on the way to the schema it stands for."""
+        names: list[str] = []
+        node = self.view(node)
+        while _is_ref(node) and len(names) < MAX_HOPS:
+            names.append(ref_name(node["$ref"]))
+            node = self.view(self.schemas.get(names[-1]))
+        return names
+
+    def received(self) -> set[str]:
+        """Named schemas a client can be handed: reachable from a response, a callback or a webhook."""
+        roots: list = [self.doc.get("webhooks"), self.doc.get("x-webhooks")]
         paths = self.doc.get("paths")
         for item in (paths.values() if isinstance(paths, dict) else ()):
-            if not isinstance(item, dict):
-                continue
-            sent.append(item.get("parameters"))
             for method in HTTP_METHODS:
-                op = item.get(method)
+                op = item.get(method) if isinstance(item, dict) else None
                 if isinstance(op, dict):
-                    sent += [op.get("parameters"), op.get("requestBody")]
-                    received += [op.get("responses"), op.get("callbacks")]
-        return frozenset(self._reach(sent) - self._reach(received))
+                    roots += [op.get("responses"), op.get("callbacks")]
+        return self.reach(roots)
 
-    def _reach(self, roots: list) -> set[str]:
-        """Every named schema the given nodes refer to, directly or through other references."""
+    def reach(self, roots: list) -> set[str]:
+        """Every named schema the given nodes refer to, directly or through other schemas."""
+        names: set[str] = set()
+        stack = list(self._named(roots))
+        while stack:
+            name = stack.pop()
+            if name in names:
+                continue
+            names.add(name)
+            if name not in self._edges:
+                self._edges[name] = self._named([self.schemas.get(name)])
+            stack.extend(self._edges[name])
+        return names
+
+    def _named(self, roots: list) -> set[str]:
+        """The schemas the given nodes name themselves; a reference to anything else is looked through."""
         names: set[str] = set()
         seen: set[str] = set()
         stack = list(roots)
@@ -143,7 +161,6 @@ class Doc:
                     seen.add(ref)
                     if ref.startswith(SCHEMA_PREFIX):
                         names.add(ref_name(ref))
-                        stack.append(self.schemas.get(ref_name(ref)))
                     else:
                         stack.append(self._pointer(ref))
                 stack.extend(node.values())
