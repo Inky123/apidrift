@@ -2,8 +2,12 @@
 
 Only the parts that matter for client breakage are kept: operations, their
 request parameters and body fields, and the component schemas they return.
-Nested inline objects are flattened to dotted paths. A ``$ref`` is kept as a
-leaf typed ``ref:Name`` because component schemas are diffed on their own.
+Nested objects are flattened to dotted paths. In a component schema a ``$ref``
+to another named object is kept as a leaf typed ``ref:Name``, because component
+schemas are diffed on their own. In a request body it is followed, because a
+request is diffed per operation and by the direction a client sends it in.
+:mod:`refs` resolves everything else a vendor names (parameters, bodies,
+responses, enums, ``allOf``).
 """
 
 from __future__ import annotations
@@ -13,10 +17,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .refs import HTTP_METHODS, Doc
+from .refs import ref_name as _ref_name
+
 MAX_DEPTH = 4
 FINGERPRINT_DEPTH = 3
 REF_RE = re.compile(r"ref:([^|<>]+)")
-HTTP_METHODS = ("get", "put", "post", "delete", "patch", "options", "head")
 
 
 @dataclass(frozen=True)
@@ -53,6 +59,8 @@ class Operation:
     params: dict[str, Param]
     body: dict[str, Field]
     response_schemas: tuple[str, ...]
+    sends: frozenset[str] = frozenset()  # every named schema the request can carry, however deep
+    listed: dict[str, int] = field(default_factory=dict)  # those whose fields ``body`` lists, and at which depth
 
     @property
     def key(self) -> tuple[str, str]:
@@ -88,6 +96,7 @@ class Spec:
     operations: dict[tuple[str, str], Operation] = field(default_factory=dict)
     schemas: dict[str, Schema] = field(default_factory=dict)
     sdk_ops: list[SdkOp] = field(default_factory=list)
+    request_only: frozenset[str] = frozenset()  # schemas a client only sends; their changes are reported per operation
 
     def operations_returning(self, schema_name: str) -> list[str]:
         """Labels of operations whose 2xx response is this schema (directly or as list items)."""
@@ -116,30 +125,18 @@ class Spec:
         return hashlib.sha1(repr(rows).encode()).hexdigest()[:16]
 
 
-def _ref_name(ref: str) -> str:
-    return ref.rsplit("/", 1)[-1]
-
-
-def _resolve(node: Any, components: dict) -> dict:
-    """Follow a top-level ``$ref`` chain to its component definition."""
-    hops = 0
-    while isinstance(node, dict) and "$ref" in node and hops < 8:
-        node = components.get(_ref_name(node["$ref"]), {})
-        hops += 1
-    return node if isinstance(node, dict) else {}
-
-
-def _type_of(schema: Any) -> str:
+def _type_of(schema: Any, refs: Doc) -> str:
+    schema = refs.inline(schema)
     if not isinstance(schema, dict):
         return "unknown"
     if "$ref" in schema:
         return "ref:" + _ref_name(schema["$ref"])
     for combo in ("anyOf", "oneOf", "allOf"):
         if combo in schema:
-            return "|".join(sorted({_type_of(s) for s in schema[combo]}))
+            return "|".join(sorted({_type_of(s, refs) for s in schema[combo]}))
     kind = schema.get("type")
     if kind == "array":
-        return f"array<{_type_of(schema.get('items', {}))}>"
+        return f"array<{_type_of(schema.get('items', {}), refs)}>"
     if kind is None:
         return "object" if "properties" in schema else "unknown"
     if isinstance(kind, list):
@@ -175,20 +172,30 @@ def _object_like(schema: Any) -> dict | None:
     return None
 
 
-def flatten(schema: Any, prefix: str = "", depth: int = 0) -> dict[str, Field]:
-    """Flatten an object schema into dotted field paths, at most MAX_DEPTH levels deep."""
+def flatten(
+    schema: Any, refs: Doc, prefix: str = "", depth: int = 0, listed: dict[str, int] | None = None
+) -> dict[str, Field]:
+    """Flatten an object schema into dotted field paths, at most MAX_DEPTH levels deep.
+
+    A reference to a named object is a leaf (component schemas) unless ``listed`` is given (request
+    bodies): then it is descended into, and ``listed`` records each named schema entered and how deep.
+    """
     out: dict[str, Field] = {}
-    obj = _object_like(schema)
+    obj = _object_like(refs.resolved(schema))
     if obj is None or depth >= MAX_DEPTH:
         return out
-    required = set(obj.get("required", []))
-    for name, sub in sorted(obj.get("properties", {}).items()):
+    for name in refs.chain(schema) if listed is not None else ():
+        listed[name] = min(depth, listed.get(name, depth))
+    required = {str(name) for name in obj.get("required") or []}
+    properties = obj.get("properties") or {}
+    for name, sub in sorted(((str(key), value) for key, value in properties.items()), key=lambda pair: pair[0]):
         if not isinstance(sub, dict):
             continue
         path = f"{prefix}{name}"
+        sub = refs.inline(sub)
         out[path] = Field(
             path=path,
-            type=_type_of(sub),
+            type=_type_of(sub, refs),
             required=name in required,
             enum=_enum_of(sub),
             deprecated=bool(sub.get("deprecated", False)),
@@ -196,9 +203,9 @@ def flatten(schema: Any, prefix: str = "", depth: int = 0) -> dict[str, Field]:
         )
         child, child_prefix = sub, f"{path}."
         if sub.get("type") == "array" and isinstance(sub.get("items"), dict):
-            child, child_prefix = sub["items"], f"{path}[]."
-        if "$ref" not in child:
-            out.update(flatten(child, child_prefix, depth + 1))
+            child, child_prefix = refs.inline(sub["items"]), f"{path}[]."
+        if "$ref" not in child or listed is not None:
+            out.update(flatten(child, refs, child_prefix, depth + 1, listed))
     return out
 
 
@@ -220,31 +227,33 @@ def _schema_refs(schema: Any, depth: int = 0) -> set[str]:
     return found
 
 
-def _response_schemas(responses: Any) -> tuple[str, ...]:
+def _response_schemas(responses: Any, refs: Doc) -> tuple[str, ...]:
     names: set[str] = set()
     if not isinstance(responses, dict):
         return ()
     for code, resp in responses.items():
-        if not str(code).startswith("2") or not isinstance(resp, dict):
+        if not str(code).startswith("2"):
             continue
-        for media in resp.get("content", {}).values():
+        for media in (refs.deref(resp).get("content") or {}).values():
             if isinstance(media, dict):
                 names |= _schema_refs(media.get("schema"))
     return tuple(sorted(names))
 
 
-def _params(raw: list, components: dict) -> dict[str, Param]:
+def _params(raw: list, refs: Doc) -> dict[str, Param]:
+    """Parameters by ``location:name``; later entries (the operation's own) replace the path's shared ones."""
     out: dict[str, Param] = {}
     for item in raw:
-        if not isinstance(item, dict) or "name" not in item:
+        item = refs.deref(item)
+        if "name" not in item:
             continue
-        schema = _resolve(item.get("schema", {}), components)
+        schema = refs.resolved(item.get("schema", {}))
         location = item.get("in", "query")
         param = Param(
             location=location,
             name=item["name"],
             required=bool(item.get("required", False)) or location == "path",
-            type=_type_of(schema),
+            type=_type_of(schema, refs),
             enum=_enum_of(schema),
             deprecated=bool(item.get("deprecated", False)),
             open_enum=_open_enum(schema),
@@ -253,43 +262,49 @@ def _params(raw: list, components: dict) -> dict[str, Param]:
     return out
 
 
-def _body(request_body: Any, components: dict) -> dict[str, Field]:
-    if not isinstance(request_body, dict):
-        return {}
-    for media in request_body.get("content", {}).values():
+def _body(request_body: Any, refs: Doc, listed: dict[str, int]) -> dict[str, Field]:
+    for media in (refs.deref(request_body).get("content") or {}).values():
         if isinstance(media, dict) and "schema" in media:
-            return flatten(_resolve(media["schema"], components))
+            return flatten(media["schema"], refs, listed=listed)
     return {}
 
 
 def load_spec(doc: dict) -> Spec:
     """Build a Spec from a parsed OpenAPI 3 document."""
-    components = doc.get("components", {}).get("schemas", {})
-    spec = Spec(version=str(doc.get("info", {}).get("version", "unknown")))
-    for path, item in sorted(doc.get("paths", {}).items()):
+    refs = Doc(doc)
+    info, paths = doc.get("info"), doc.get("paths")
+    version = info.get("version", "unknown") if isinstance(info, dict) else "unknown"
+    spec = Spec(version=str(version))
+    sent: set[str] = set()
+    for path, item in sorted(paths.items() if isinstance(paths, dict) else ()):
         if not isinstance(item, dict):
             continue
-        shared = item.get("parameters", [])
+        shared = item.get("parameters") or []
         for method in HTTP_METHODS:
             op = item.get(method)
             if not isinstance(op, dict):
                 continue
+            listed: dict[str, int] = {}
             operation = Operation(
                 method=method,
                 path=path,
                 operation_id=op.get("operationId"),
                 deprecated=bool(op.get("deprecated", False)),
-                params=_params(list(shared) + list(op.get("parameters", [])), components),
-                body=_body(op.get("requestBody"), components),
-                response_schemas=_response_schemas(op.get("responses")),
+                params=_params(list(shared) + list(op.get("parameters") or []), refs),
+                body=_body(op.get("requestBody"), refs, listed),
+                response_schemas=_response_schemas(op.get("responses"), refs),
+                sends=frozenset(refs.reach([shared, op.get("parameters"), op.get("requestBody")])),
+                listed=listed,
             )
             spec.operations[operation.key] = operation
-    for name, schema in sorted(components.items()):
+            sent |= operation.sends
+    spec.request_only = frozenset(sent - refs.received())
+    for name, schema in sorted(refs.schemas.items()):
         if isinstance(schema, dict):
             spec.schemas[name] = Schema(
                 name=name,
                 deprecated=bool(schema.get("deprecated", False)),
-                fields=flatten(schema),
+                fields=flatten(schema, refs),
             )
             spec.sdk_ops += _sdk_ops(name, schema, spec)
     return spec

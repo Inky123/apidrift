@@ -1,4 +1,10 @@
-"""Download and store dated, content-addressed snapshots of a provider's spec."""
+"""Download and store dated, content-addressed snapshots of a provider's spec.
+
+A snapshot is always gzipped JSON. A vendor that publishes JSON is stored byte for byte. A vendor that
+publishes YAML (Plaid) is stored as the compact JSON of the parsed document, in the vendor's key order:
+one file suffix and one reader for every provider, a load that costs milliseconds instead of a YAML
+parse, and a content hash that changes when the document does, not when its comments or wrapping do.
+"""
 
 from __future__ import annotations
 
@@ -11,11 +17,36 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+import yaml
 
 from .providers import Provider
 
 SUFFIX = ".json.gz"
 USER_AGENT = "apidrift/0.1 (+https://github.com/apidrift)"
+MAX_EXPANSION = 8  # a YAML source may grow this many times as JSON; aliases that expand further are refused
+_LEADING = b"\xef\xbb\xbf \t\r\n"
+
+
+class _SpecLoader(getattr(yaml, "CSafeLoader", yaml.SafeLoader)):
+    """Safe YAML that types plain scalars the way JSON does, which is how OpenAPI tooling reads a spec.
+
+    PyYAML follows YAML 1.1, where ``no``, ``on`` and ``off`` are booleans, ``2020-09-14`` is a date,
+    ``0123`` is octal and ``12:30`` is a base-60 number. In a spec those are enum values, versions and
+    examples, so only ``true``/``false``, decimal numbers and null are typed; the rest stay strings.
+    """
+
+
+_SpecLoader.yaml_implicit_resolvers = {
+    first: [(tag, rx) for tag, rx in pairs if not tag.endswith(("bool", "int", "float", "timestamp"))]
+    for first, pairs in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_SpecLoader.add_implicit_resolver("tag:yaml.org,2002:bool", re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF"))
+_SpecLoader.add_implicit_resolver("tag:yaml.org,2002:int", re.compile(r"^[-+]?(?:0|[1-9][0-9]*)$"), list("-+0123456789"))
+_SpecLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:float",
+    re.compile(r"^[-+]?(?:(?:0|[1-9][0-9]*)(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?$"),
+    list("-+0123456789."),
+)
 
 
 def data_dir() -> Path:
@@ -64,10 +95,42 @@ def between(provider_name: str | None, old_path: Path, new_path: Path) -> list[P
     return snaps[i + 1:j] if i < j else []
 
 
+def parse(raw: bytes) -> dict:
+    """The spec document in ``raw``, which is JSON or YAML. Raises ValueError for anything else."""
+    if raw.lstrip(_LEADING)[:1] == b"{":
+        doc = json.loads(raw)
+    else:
+        try:
+            doc = yaml.load(raw, Loader=_SpecLoader)  # a SafeLoader: plain data only, never Python objects
+        except yaml.YAMLError as exc:
+            raise ValueError(f"spec is neither JSON nor YAML: {str(exc)[:200]}") from None
+    if not isinstance(doc, dict):
+        raise ValueError("spec is not an object")
+    return doc
+
+
+def canonical(raw: bytes) -> tuple[dict, bytes]:
+    """``(document, bytes to store)``: JSON is stored as received, YAML as the compact JSON of what it parses to."""
+    doc = parse(raw)
+    if raw.lstrip(_LEADING)[:1] == b"{":
+        return doc, raw
+    limit, size, chunks = MAX_EXPANSION * len(raw) + 65536, 0, []
+    try:
+        for chunk in json.JSONEncoder(ensure_ascii=False, separators=(",", ":")).iterencode(doc):
+            size += len(chunk)
+            if size > limit:
+                raise ValueError("YAML spec expands past the size limit (nested aliases)")
+            chunks.append(chunk)
+    except TypeError as exc:  # a binary, set or tagged date value, or a mapping key that is not a scalar
+        raise ValueError(f"YAML spec holds a value JSON cannot: {exc}") from None
+    return doc, "".join(chunks).encode()
+
+
 def save(provider: Provider, raw: bytes, now: datetime | None = None) -> Path | None:
     """Store ``raw`` as a new snapshot. Returns None when the content is already stored."""
-    doc = json.loads(raw)
-    version = str(doc.get("info", {}).get("version", "unknown"))
+    doc, raw = canonical(raw)
+    info = doc.get("info")
+    version = str(info.get("version", "unknown")) if isinstance(info, dict) else "unknown"
     sha = digest(raw)[:12]
     if any(sha_of(p) == sha for p in list_snapshots(provider.name)):
         return None
@@ -88,9 +151,10 @@ def save(provider: Provider, raw: bytes, now: datetime | None = None) -> Path | 
 
 
 def load(path: Path) -> dict:
+    """The document in a snapshot or in a plain spec file (JSON or YAML, gzipped or not)."""
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rb") as fh:
-        return json.load(fh)
+        return parse(fh.read())
 
 
 def resolve(provider_name: str | None, ref: str) -> Path:
