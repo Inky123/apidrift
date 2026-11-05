@@ -1,9 +1,11 @@
 """Turn a check payload into the one issue apidrift opens: findings, fingerprint, title and body.
 
 The body groups call sites by the Stripe change that hits them, names the release that introduced
-each change, and says in one line what the change does to a request. Everything that comes from the
-scanned repository (file paths, call text) is rendered inside code spans, so a hostile file name can
-not mention a user, reference an issue or autolink.
+each change, and says in one line what the change does to a request. Under a change the fix pull
+request does not fully cover it lists the choices a person has ("Your options"), taken from
+:mod:`guidance` by keys this module derives. Everything that comes from the scanned repository (file
+paths, call text) is rendered inside code spans, so a hostile file name can not mention a user,
+reference an issue or autolink.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ import hashlib
 import re
 from urllib.parse import quote
 
-from .. import migrations
+from .. import guidance, migrations
 from ..diff import BREAKING
 from ..impact import AFFECTED, POSSIBLE
 from ..scanner import unread_sentence
@@ -20,12 +22,17 @@ from ..scanner import unread_sentence
 MARKER_RE = re.compile(r"<!-- apidrift:fp=([0-9a-f]{64}) -->")
 MAX_FINDINGS = 50
 MAX_INLINE_LINKS = 10  # a group with more call sites than this is folded into <details>
+MAX_INLINE_OPTION_GROUPS = 3  # with more groups than this carrying options, every options list is folded
 MAX_BODY_CHARS = 60_000  # GitHub rejects issue bodies over 65,536 characters
 CHANGELOG = "https://docs.stripe.com/changelog"
 FINDING_KEYS = (
     "file", "line", "url", "method", "path", "label", "call", "language",
     "change_kind", "change_message", "change_target", "introduced", "consequence", "reason", "certainty",
 )
+# ``findings`` adds one key on top of the contract: what the fix step does at the site. "" when Stripe documents no
+# mechanical migration for the change; otherwise PLANNED (the fix pull request rewrites it), a reason the fixer gave
+# for leaving it alone (a key of ``prbody.UNFIXABLE_WHY``), or MANUAL (documented, not rewritten, no reason known).
+FIX_KEY, PLANNED, MANUAL = "fix", "planned", "manual"
 # Markdown punctuation that could open a link, code span, table cell, emphasis or URL; backslash-escaped.
 _ESCAPES = {ch: "\\" + ch for ch in "\\<`|[]():*"}
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -197,12 +204,15 @@ def consequence(change: dict) -> str:
 
 
 def findings(payload: dict, full_name: str, sha: str) -> list[dict]:
-    """Flat finding dicts with exactly FINDING_KEYS, the shape ``demo.json`` and the issue body share."""
+    """Flat finding dicts with FINDING_KEYS, the shape ``demo.json`` and the issue body share, plus FIX_KEY."""
     out: list[dict] = []
     fallback = str(payload.get("new_version") or "")
+    states = _fix_states(payload)
     for impact in breaking(payload):
         usage, change = impact["usage"], impact["change"]
         method = str(usage["method"]).upper()
+        migration = migrations.lookup_dict({**change, "method": method, "path": usage["path"]})
+        site = (str(usage["file"]), int(usage["line"]), str(usage["path"]), migration.target if migration else "")
         out.append({
             "file": usage["file"],
             "line": int(usage["line"]),
@@ -219,9 +229,36 @@ def findings(payload: dict, full_name: str, sha: str) -> list[dict]:
             "consequence": consequence(change),
             "reason": impact["reason"],
             "certainty": impact["certainty"],
+            FIX_KEY: states.get(site, MANUAL) if migration is not None else "",
         })
     out.sort(key=lambda f: (f["file"], f["line"], f["path"], f["change_kind"]))
     return out
+
+
+def _dicts(value: object) -> list[dict]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _fix_states(payload: dict) -> dict[tuple[str, int, str, str], str]:
+    """The child's fix plan by (file, line, path, target): PLANNED where it rewrote the site, the fixer's reason
+    where it refused. The plan is child output, so a reason is kept only when it is one of our own keys, and the
+    only thing a state ever selects is which of our own sentences the issue shows."""
+    from .prbody import UNFIXABLE_WHY  # prbody builds on this module
+
+    states: dict[tuple[str, int, str, str], str] = {}
+    for item in _dicts(payload.get("unfixable")):
+        why = str(item.get("why") or "")
+        states[_plan_key(item.get("file"), item)] = why if why in UNFIXABLE_WHY else MANUAL
+    for fix in _dicts(payload.get("fixes")):
+        for site in _dicts(fix.get("sites")):
+            states[_plan_key(fix.get("file"), site)] = PLANNED
+    return states
+
+
+def _plan_key(file: object, site: dict) -> tuple[str, int, str, str]:
+    line = site.get("line")
+    number = line if isinstance(line, int) and not isinstance(line, bool) else 0
+    return str(file), number, str(site.get("path")), str(site.get("target"))
 
 
 def distinct_sites(items: list[dict]) -> int:
@@ -241,7 +278,8 @@ def title_for(version: str, count: int) -> str:
 
 
 def group_findings(items: list[dict], fallback: str) -> list[dict]:
-    """Findings grouped by the change that hits them: ``{heading, introduced, changelog, consequence, items}``."""
+    """Findings grouped by the change that hits them: ``{heading, introduced, changelog, consequence, items,
+    options, partial}``."""
     groups: dict[tuple, dict] = {}
     for f in items:
         introduced = str(f.get("introduced") or fallback)
@@ -254,7 +292,24 @@ def group_findings(items: list[dict], fallback: str) -> list[dict]:
             "items": [],
         })
         group["items"].append(f)
+    for group in groups.values():
+        group["options"], group["partial"] = _options(group["items"])
     return [groups[key] for key in sorted(groups)]
+
+
+def _options(items: list[dict]) -> tuple[tuple[guidance.Option, ...], bool]:
+    """(options, partial) for one group: the choices at the sites the fix pull request leaves alone, and whether it
+    rewrites some of the others. A group it covers completely has no options. The options are selected by the
+    finding's method, path, kind and target only; their text is :mod:`guidance`'s."""
+    left = [f for f in items if f.get(FIX_KEY) != PLANNED]
+    if not left:
+        return (), False
+    first = items[0]
+    found = guidance.options(
+        first["method"], first["path"], first["change_kind"], first.get("change_target") or "",
+        certain=any(f["certainty"] != POSSIBLE for f in left), possible=any(f["certainty"] == POSSIBLE for f in left),
+    )
+    return found, len(left) < len(items)
 
 
 def _doc_for(f: dict, introduced: str) -> str:
@@ -269,7 +324,35 @@ def _site_line(f: dict) -> str:
     line = f"- {where} via {code(f['call'])}"
     if f["certainty"] == POSSIBLE:
         line += f" (possibly affected: {escape(str(f['reason']))})"
+    else:
+        from .prbody import UNFIXABLE_WHY  # prbody builds on this module; the sentence is ours, never the child's
+
+        why = UNFIXABLE_WHY.get(str(f.get(FIX_KEY) or ""))
+        line += f" (not rewritten by apidrift: {escape(why)})" if why else ""
     return line
+
+
+def _marked(text: str) -> str:
+    """Text from our own tables as Markdown: ``backtick`` runs become code spans, the rest is escaped."""
+    parts = text.split("`")
+    return "".join(code(part) if index % 2 else escape(part) for index, part in enumerate(parts))
+
+
+def _option(option: guidance.Option) -> str:
+    linked = option.doc.startswith(guidance.DOCS) and " " not in option.doc and ")" not in option.doc
+    return _marked(option.text) + (f" ([Stripe docs]({option.doc}))" if linked else "")
+
+
+def _option_lines(group: dict, folded: bool) -> list[str]:
+    """The "Your options" block of a group, or [] when the fix pull request covers every site in it."""
+    found: tuple[guidance.Option, ...] = group["options"]
+    if not found:
+        return []
+    label = "Your options for the call sites apidrift does not rewrite" if group["partial"] else "Your options"
+    items = [f"- {_option(option)}" for option in found]
+    if folded:
+        return ["", f"<details><summary>{label} ({len(items)})</summary>", "", *items, "", "</details>"]
+    return ["", f"{label}:", *items]
 
 
 def unread_note(payload: dict) -> str:
@@ -338,16 +421,22 @@ def render_issue(
     if unread:
         footer.append(unread)
     footer.append(marker(fingerprint))
-    budget = MAX_BODY_CHARS - sum(len(ln) + 1 for ln in lines + footer) - 64  # room for the "and N more." line
-    shown = _render_groups(lines, group_findings(items, new_version), budget)
+    pin = ["", _option(guidance.PIN_HOW)]  # said once, for every "Your options" list above it
+    budget = MAX_BODY_CHARS - sum(len(ln) + 1 for ln in lines + pin + footer) - 64  # room for the "and N more." line
+    shown, with_options = _render_groups(lines, group_findings(items, new_version), budget)
     if len(items) > shown:
         lines += ["", f"and {len(items) - shown} more."]
+    if with_options:
+        lines += pin
     return title_for(newest, sites), "\n".join(lines + footer) + "\n"
 
 
-def _render_groups(lines: list[str], groups: list[dict], budget: int) -> int:
-    """Append the group blocks to ``lines`` within the character budget and MAX_FINDINGS; returns links shown."""
+def _render_groups(lines: list[str], groups: list[dict], budget: int) -> tuple[int, bool]:
+    """Append the group blocks to ``lines`` within the character budget and MAX_FINDINGS; returns the links shown
+    and whether any shown group carries options."""
     used = shown = 0
+    with_options = False
+    fold_options = sum(1 for group in groups if group["options"]) > MAX_INLINE_OPTION_GROUPS
     for group in groups:
         head = [
             "",
@@ -357,13 +446,14 @@ def _render_groups(lines: list[str], groups: list[dict], budget: int) -> int:
         folded = len(group["items"]) > MAX_INLINE_LINKS
         if folded:
             head += [f"<details><summary>{len(group['items'])} call sites</summary>", ""]
-        tail = ["", "</details>"] if folded else []
+        tail = (["", "</details>"] if folded else []) + _option_lines(group, fold_options)
         reserve = sum(len(ln) + 1 for ln in head + tail)
         first = _site_line(group["items"][0])
         if shown >= MAX_FINDINGS or used + reserve + len(first) + 1 > budget:
             break
         lines += head
         used += reserve
+        with_options = with_options or bool(group["options"])
         for f in group["items"]:
             site = _site_line(f)
             if shown >= MAX_FINDINGS or used + len(site) + 1 > budget:
@@ -372,7 +462,7 @@ def _render_groups(lines: list[str], groups: list[dict], budget: int) -> int:
             used += len(site) + 1
             shown += 1
         lines += tail
-    return shown
+    return shown, with_options
 
 
 # What the child may name in a fix: a Stripe field, a Stripe path, a method, a version. Anything else is dropped
