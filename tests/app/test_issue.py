@@ -36,7 +36,8 @@ def render(items, **overrides):
 
 def test_findings_have_exactly_the_contract_keys(payload):
     items = issue.findings(payload, "octo/shop", SHA)
-    assert [tuple(f) for f in items] == [issue.FINDING_KEYS] * 3
+    assert [tuple(f) for f in items] == [issue.FINDING_KEYS + (issue.FIX_KEY,)] * 3
+    assert {f[issue.FIX_KEY] for f in items} == {""}  # no documented migration for this change
     assert [f["file"] for f in items] == ["server.js", "server.py", "server.rb"]
     for f in items:
         assert f["url"] == f"https://github.com/octo/shop/blob/{SHA}/{f['file']}#L{f['line']}"
@@ -70,6 +71,19 @@ def test_golden_issue_body():
         f"- https://github.com/octo/shop/blob/{SHA}/src/pay.py#L40 via `stripe.Charge.create`"
         " (possibly affected: arguments are not fully visible at this call)\n"
         f"- https://github.com/octo/shop/blob/{SHA}/web/app.js#L3 via `stripe.charges.create`\n"
+        "\n"
+        "Your options:\n"
+        "- Remove the field from the request at the listed lines\\: Stripe answers a parameter it does not expect "
+        "with `parameter_unknown`, and the documented remedy is to remove it. "
+        "([Stripe docs](https://docs.stripe.com/error-codes))\n"
+        "- For a possibly affected site, find where the arguments apidrift cannot see are built \\(the spread or "
+        "variable in that call\\) and check whether they carry the field.\n"
+        "- Stay on your current API version until this code is changed \\(how\\: the note at the end of this issue\\).\n"
+        "\n"
+        "Staying on your current API version\\: each Stripe SDK release sends the API version that was current when "
+        "it shipped, so hold the SDK upgrade or set the version yourself \\(`apiVersion`, `api_version` or the "
+        "`Stripe-Version` header; not possible in Java, Go or .NET\\); requests with no pinned version use the "
+        "account default in Workbench. ([Stripe docs](https://docs.stripe.com/api/versioning))\n"
         "\n"
         "---\n"
         f"Scanned octo/shop at {SHA} against Stripe {OLD_VERSION} -> {NEW_VERSION}: 9 Stripe call sites; "
