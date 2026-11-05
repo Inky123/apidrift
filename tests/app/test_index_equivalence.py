@@ -11,7 +11,10 @@ from apidrift.app.poller import snapshots
 
 # The releases after which a fixture's calls resolve to other operations than its index recorded. The index
 # must then refuse to answer (the full check runs); everywhere else it must answer, and answer identically.
-RESOLVES_DIFFERENTLY = {("plain", "repick"), ("possible", "repick"), ("docs", "repick"), ("fixes", "repick"), ("possible", "refunds")}
+RESOLVES_DIFFERENTLY = {(tree, "repick") for tree in TREES} | {("possible", "refunds")}
+# stripe-go struct fields are matched to the request fields of both ends of the comparison. Once the baseline is
+# the release that dropped ``description``, ``Description`` names no request field unless the release restores it.
+GO_FIELD_UNKNOWN = {("go", mutation) for mutation in MUTATIONS if mutation != "restored"}
 
 
 @pytest.fixture
@@ -62,6 +65,12 @@ def test_a_release_assessed_from_the_index_equals_a_full_check_of_the_same_commi
     got = from_index(conn, repo_row, baseline, third)
     if (tree, mutation) in RESOLVES_DIFFERENTLY:
         assert got is None
+        assert expected["index"]["sites"] != first["index"]["sites"]  # not over-caution: a fresh scan does differ
+        return
+    if advanced and (tree, mutation) in GO_FIELD_UNKNOWN:
+        # Caution here: the reader falls back to spelling the field name itself and a fresh scan comes out the
+        # same, but an answer changed, and the index only vouches for a scan whose every answer is unchanged.
+        assert got is None and expected["index"]["sites"] == first["index"]["sites"]
         return
     assert got is not None
     for key in COMPARED:

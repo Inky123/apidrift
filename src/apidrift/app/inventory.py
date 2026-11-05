@@ -26,7 +26,9 @@ from ..sdkmap import MAX_CHAIN, Resolved, SdkIndex
 from . import db
 from .issue import PATH_RE, valid_path
 
-FORMAT = 1
+FORMAT = 2  # 2: reads per call site, and the questions asked of the stripe-go names (``SdkIndex.go``)
+# What a check may ask ``SdkIndex.go`` and the shape of each question's arguments: s a name, o an (method, path).
+GO_QUESTIONS = {"resolve": "sss", "known": "sss", "owns": "ss", "field": "oss", "children": "os", "path_param": "os"}
 MAX_SITES = 10_000  # call sites of one repo, documentation matches included
 MAX_FIELDS = 400  # request fields (or hidden prefixes) at one call site
 MAX_READS = 200_000  # hashed member names, all files together
@@ -40,8 +42,8 @@ _HASH_RE = re.compile(r"[0-9a-f]{%d}" % HASH_CHARS)
 # Modules of the core package that cannot change what a scan finds; every other one (the scanner, the parsers,
 # and any parser added later) is part of ``scanner_digest``.
 _NOT_SCANNING = frozenset({
-    "__init__.py", "cli.py", "diff.py", "impact.py", "migrations.py", "openapi.py", "providers.py", "report.py",
-    "snapshot.py",
+    "__init__.py", "cli.py", "diff.py", "guidance.py", "impact.py", "migrations.py", "openapi.py", "providers.py",
+    "refs.py", "report.py", "snapshot.py",
 })
 logger = logging.getLogger("apidrift.index")
 _digest: str | None = None
@@ -64,13 +66,16 @@ class HashedNames(frozenset):
 
 def scanner_digest() -> str:
     """A hash over the source of every module that can shape a scan or its export: the core package minus
-    _NOT_SCANNING and the fixer, plus the tarball extraction and this module. An index written under another
-    digest is not used: a newer scanner (a new language, a parser fix) may find call sites the stored one
-    lacks. Empty when the sources cannot be read, and an empty digest never matches."""
+    _NOT_SCANNING and the fixers (``fix*.py``, ``*fix.py``), plus the tarball extraction and this module. An
+    index written under another digest is not used: a newer scanner (a new language, a parser fix) may find
+    call sites the stored one lacks. Empty when the sources cannot be read, and an empty digest never matches."""
     global _digest
     if _digest is None:
         here = Path(__file__).resolve()
-        core = [p for p in here.parents[1].glob("*.py") if p.name not in _NOT_SCANNING and not p.name.startswith("fix")]
+        core = [
+            p for p in here.parents[1].glob("*.py")
+            if p.name not in _NOT_SCANNING and not p.name.startswith("fix") and not p.name.endswith("fix.py")
+        ]
         hasher = hashlib.sha256()
         try:
             for path in sorted(core) + [here.with_name("checkout.py"), here]:
@@ -98,7 +103,9 @@ class Recorder:
         self.chains: dict[tuple[str, ...], None] = {}
         self.urls: dict[str, None] = {}
         self.paths: dict[str, None] = {}
+        self.go_asked: dict[tuple[str, tuple], None] = {}
         self.untracked: set[str] = set()
+        self.go = _GoRecorder(index.go, self) if getattr(index, "go", None) is not None else None
 
     @property
     def empty(self) -> bool:
@@ -125,22 +132,52 @@ class Recorder:
         return getattr(self._index, name)
 
 
+class _GoRecorder:
+    """The same for ``SdkIndex.go``, the stripe-go names the Go reader and fixer ask: each of GO_QUESTIONS is
+    noted with its arguments; anything else, or a call in another shape, is passed through and noted as untracked."""
+
+    def __init__(self, go: object, owner: Recorder) -> None:
+        self._go, self._owner = go, owner
+
+    def __getattr__(self, name: str):
+        if name.startswith("__") or name in ("_go", "_owner"):
+            raise AttributeError(name)
+        target = getattr(self._go, name)
+        if name not in GO_QUESTIONS:
+            self._owner.untracked.add("go." + name)
+            return target
+
+        def ask(*args, **kwargs):
+            try:
+                if kwargs or len(args) != len(GO_QUESTIONS[name]):
+                    raise TypeError(name)
+                self._owner.go_asked[(name, args)] = None
+            except TypeError:  # keywords, another arity, an argument that is not a name or an operation
+                self._owner.untracked.add("go." + name)
+            return target(*args, **kwargs)
+
+        return ask
+
+
 def export(result: ScanResult, recorder: Recorder) -> dict:
-    """The scan as plain data for the parent: every call site in scan order, the hashed reads of each file
-    and the questions the scan asked the SDK index."""
-    reads: dict[str, frozenset[str]] = {}
-    sites: list[dict] = []
-    for u in result.usages:
-        if reads.setdefault(u.file, u.reads) != u.reads or recorder.untracked:
-            return {"format": FORMAT, "unusable": True}
-        sites.append({
+    """The check as plain data for the parent: every call site in scan order with the hashed reads that go with
+    it, and the questions the scan and the fixer asked the SDK index."""
+    reads: dict[frozenset[str], int] = {}
+    sites = [
+        {
             "file": u.file, "line": u.line, "method": u.method, "path": u.path, "call": u.call, "language": u.language,
             "complete": u.complete, "fields": sorted(u.fields), "hidden": None if u.hidden is None else sorted(u.hidden),
-        })
+            "reads": reads.setdefault(u.reads, len(reads)),
+        }
+        for u in result.usages
+    ]
     return {
         "format": FORMAT, "unusable": bool(recorder.untracked), "sites": sites,
-        "reads": {file: sorted({name_hash(n) for n in names}) for file, names in reads.items() if names},
-        "asked": {"chains": [list(c) for c in recorder.chains], "urls": list(recorder.urls), "paths": list(recorder.paths)},
+        "reads": [sorted({name_hash(n) for n in names}) for names in reads],
+        "asked": {
+            "chains": [list(c) for c in recorder.chains], "urls": list(recorder.urls), "paths": list(recorder.paths),
+            "go": [[name, [list(a) if isinstance(a, tuple) else a for a in args]] for name, args in recorder.go_asked],
+        },
     }
 
 
@@ -150,10 +187,12 @@ def export(result: ScanResult, recorder: Recorder) -> dict:
 @dataclass(frozen=True)
 class Index:
     usages: tuple[Usage, ...]  # scan order; ``reads`` are HashedNames
-    reads: dict[str, tuple[str, ...]]  # file -> hashes
+    reads: tuple[tuple[str, ...], ...]  # the distinct sets of hashes
+    site_reads: tuple[int, ...]  # per call site, which of ``reads`` goes with it
     chains: tuple[tuple[str, ...], ...]
     urls: tuple[str, ...]
     paths: tuple[str, ...]
+    go: tuple[tuple[str, tuple], ...]  # (question, arguments) asked of ``SdkIndex.go``
 
 
 class _Budget:
@@ -181,21 +220,28 @@ def _names(value: object, what: str, empty: bool = False) -> list[str]:
     return names
 
 
-def _usage(site: object, reads: dict[str, HashedNames], budget: _Budget) -> Usage:
+def _operation(method: object, path: object, wild: bool = False) -> tuple[str, str]:
+    if not isinstance(method, str) or not _METHOD_RE.fullmatch(method) or (method == "?" and not wild):
+        raise Invalid("method is not an HTTP method")
+    if not isinstance(path, str) or len(path) > MAX_FIELD or not PATH_RE.fullmatch(path):
+        raise Invalid("path is not a Stripe path")
+    return method, path
+
+
+def _usage(site: object, reads: list[HashedNames], budget: _Budget) -> Usage:
     if not isinstance(site, dict):
         raise Invalid("a call site is not an object")
     file = _text(site.get("file"), MAX_FILE, "file")
-    line, method, path, complete = site.get("line"), site.get("method"), site.get("path"), site.get("complete")
+    line, complete, which = site.get("line"), site.get("complete"), site.get("reads")
     if not valid_path(file):
         raise Invalid("file is not a relative path")
     if isinstance(line, bool) or not isinstance(line, int) or not 1 <= line <= MAX_LINE:
         raise Invalid("line is not a line number")
-    if not isinstance(method, str) or not _METHOD_RE.fullmatch(method):
-        raise Invalid("method is not an HTTP method")
-    if not isinstance(path, str) or len(path) > MAX_FIELD or not PATH_RE.fullmatch(path):
-        raise Invalid("path is not a Stripe path")
+    method, path = _operation(site.get("method"), site.get("path"), wild=True)
     if not isinstance(complete, bool):
         raise Invalid("complete is not a boolean")
+    if isinstance(which, bool) or not isinstance(which, int) or not 0 <= which < len(reads):
+        raise Invalid("a call site names no set of reads")
     call, language = _text(site.get("call"), MAX_CALL, "call"), site.get("language")
     if not isinstance(language, str) or not _LANGUAGE_RE.fullmatch(language):
         raise Invalid("language is not a language name")
@@ -203,30 +249,48 @@ def _usage(site: object, reads: dict[str, HashedNames], budget: _Budget) -> Usag
     hidden = None if site.get("hidden") is None else _names(site["hidden"], "hidden", empty=True)
     budget.take(file, call, *fields, *(hidden or ()))
     return Usage(
-        file, line, method, path, call, frozenset(fields), complete, language, reads.get(file, HashedNames()),
+        file, line, method, path, call, frozenset(fields), complete, language, reads[which],
         None if hidden is None else frozenset(hidden),
     )
 
 
-def _reads(raw: object) -> dict[str, tuple[str, ...]]:
-    if not isinstance(raw, dict):
-        raise Invalid("reads is not an object")
-    out: dict[str, tuple[str, ...]] = {}
+def _reads(raw: object) -> tuple[tuple[str, ...], ...]:
+    if not isinstance(raw, list) or len(raw) > MAX_SITES:
+        raise Invalid("reads is not a list within the cap")
     total = 0
-    for file, hashes in raw.items():
+    for hashes in raw:
         if not isinstance(hashes, list) or not all(isinstance(h, str) and _HASH_RE.fullmatch(h) for h in hashes):
             raise Invalid("reads are not name hashes")
         total += len(hashes)
         if total > MAX_READS or len(set(hashes)) != len(hashes):
             raise Invalid("reads are over the cap or repeated")
-        out[file] = tuple(hashes)
-    return out
+    return tuple(tuple(hashes) for hashes in raw)
 
 
-def _asked(raw: object, budget: _Budget) -> tuple[tuple, tuple, tuple]:
-    if not isinstance(raw, dict) or not all(isinstance(raw.get(k), list) for k in ("chains", "urls", "paths")):
-        raise Invalid("asked is not three lists")
-    if sum(len(raw[k]) for k in ("chains", "urls", "paths")) > MAX_ASKED:
+def _go_question(item: object, budget: _Budget) -> tuple[str, tuple]:
+    """One question to ``SdkIndex.go``: a known name with arguments of its shape, names and operations only."""
+    if not isinstance(item, list) or len(item) != 2 or not isinstance(item[0], str) or item[0] not in GO_QUESTIONS:
+        raise Invalid("a Go question is not one of the known ones")
+    shape, args = GO_QUESTIONS[item[0]], item[1]
+    if not isinstance(args, list) or len(args) != len(shape):
+        raise Invalid("a Go question has the wrong arguments")
+    out: list = []
+    for kind, arg in zip(shape, args):
+        if kind == "s":
+            out.append(_text(arg, MAX_FIELD, "a Go name", empty=True))
+            budget.take(arg)
+        elif not isinstance(arg, list) or len(arg) != 2:
+            raise Invalid("a Go question names no operation")
+        else:
+            out.append(_operation(*arg))
+    return item[0], tuple(out)
+
+
+def _asked(raw: object, budget: _Budget) -> tuple[tuple, tuple, tuple, tuple]:
+    kinds = ("chains", "urls", "paths", "go")
+    if not isinstance(raw, dict) or not all(isinstance(raw.get(k), list) for k in kinds):
+        raise Invalid("asked is not four lists")
+    if sum(len(raw[k]) for k in kinds) > MAX_ASKED:
         raise Invalid("too many questions asked of the SDK index")
     chains = []
     for chain in raw["chains"]:
@@ -238,7 +302,7 @@ def _asked(raw: object, budget: _Budget) -> tuple[tuple, tuple, tuple]:
     budget.take(*urls)
     if not all(isinstance(p, str) and len(p) <= MAX_FIELD and PATH_RE.fullmatch(p) for p in raw["paths"]):
         raise Invalid("an asked path is not a Stripe path")
-    return tuple(chains), urls, tuple(raw["paths"])
+    return tuple(chains), urls, tuple(raw["paths"]), tuple(_go_question(item, budget) for item in raw["go"])
 
 
 def parse(raw: object) -> Index:
@@ -252,11 +316,11 @@ def parse(raw: object) -> Index:
         raise Invalid("call sites: not a list within the cap")
     budget = _Budget(MAX_CHARS)
     reads = _reads(raw.get("reads"))
-    sets = {file: HashedNames(hashes) for file, hashes in reads.items()}
-    usages = tuple(_usage(site, sets, budget) for site in sites)
-    if set(reads) - {u.file for u in usages}:
-        raise Invalid("reads for a file that has no call site")
-    return Index(usages, reads, *_asked(raw.get("asked"), budget))
+    usages = tuple(_usage(site, [HashedNames(hashes) for hashes in reads], budget) for site in sites)
+    which = tuple(site["reads"] for site in sites)
+    if set(which) != set(range(len(reads))):
+        raise Invalid("a set of reads that no call site uses")
+    return Index(usages, reads, which, *_asked(raw.get("asked"), budget))
 
 
 def parse_unread(raw: object) -> dict[str, int]:
@@ -292,8 +356,8 @@ def store(
 ) -> None:
     """Replace the repo's index with ``index`` (validated), marked as checked against snapshot ``checked``."""
     extras = json.dumps(
-        {"reads": {file: "".join(hashes) for file, hashes in index.reads.items()}, "answers": answers, "unread": unread,
-         "impacts": impacts},
+        {"reads": ["".join(hashes) for hashes in index.reads], "site_reads": list(index.site_reads), "answers": answers,
+         "unread": unread, "impacts": impacts},
         separators=(",", ":"),
     )
     rows = [
@@ -326,14 +390,12 @@ def load(conn: sqlite3.Connection, header: db.Row) -> Stored | None:
     """The stored index as Usage objects in scan order; None when a row does not read back."""
     try:
         extras = json.loads(header["extras"])
-        reads = {
-            file: HashedNames(text[i:i + HASH_CHARS] for i in range(0, len(text), HASH_CHARS))
-            for file, text in extras["reads"].items()
-        }
+        reads = [HashedNames(text[i:i + HASH_CHARS] for i in range(0, len(text), HASH_CHARS)) for text in extras["reads"]]
+        which = extras["site_reads"]
         usages = tuple(
             Usage(
                 row["file"], row["line"], row["method"], row["path"], row["call"], frozenset(json.loads(row["fields"])),
-                bool(row["complete"]), row["language"], reads.get(row["file"], HashedNames()),
+                bool(row["complete"]), row["language"], reads[which[row["seq"]]],
                 None if row["hidden"] is None else frozenset(json.loads(row["hidden"])),
             )
             for row in sites(conn, header["repo_id"])

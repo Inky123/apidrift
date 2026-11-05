@@ -13,7 +13,10 @@ from apidrift.app import db
 from apidrift.app.poller import poll_stripe, snapshots
 from apidrift.app.worker import drain
 
-TREES = {"plain": REPO, "possible": FIXTURES / "repo_possible", "docs": FIXTURES / "repo_docs", "fixes": FIXTURES / "repo_fixes"}
+TREES = {
+    "plain": REPO, "possible": FIXTURES / "repo_possible", "docs": FIXTURES / "repo_docs", "fixes": FIXTURES / "repo_fixes",
+    "go": FIXTURES / "repo_go", "php": FIXTURES / "repo_php",
+}
 FOURTH_VERSION, FIFTH_VERSION = "2026-04-01.test", "2026-05-01.test"
 _OP = {"method_on": "service", "operation": "post"}
 

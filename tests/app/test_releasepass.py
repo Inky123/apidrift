@@ -166,34 +166,43 @@ def documented(monkeypatch):
     monkeypatch.setattr(checker, "scan_subprocess", in_process_child)
 
 
-def test_an_issue_with_planned_refused_and_options_only_groups_is_answered_from_the_index(installed, conn, gh, settings, documented):
+# Per fixture: the fix states its issue shows. Python/JavaScript/Ruby, PHP and Go each with a call the fixer
+# refuses and one whose arguments are hidden; all but Go (whose fixer has no rule for this test rename) with one
+# it rewrites; all with a group nothing is documented for ("").
+FIX_STATES = {
+    "fixes": {issue.PLANNED, "leftover_tokens", issue.MANUAL, ""},
+    "php": {issue.PLANNED, "incomplete_binding", issue.MANUAL, ""},
+    "go": {"sdk_no_rewrite", issue.MANUAL, ""},
+}
+
+
+@pytest.mark.parametrize("tree", sorted(FIX_STATES))
+def test_an_issue_with_planned_refused_and_options_only_groups_is_answered_from_the_index(installed, conn, gh, settings, documented, tree):
     """The issue body depends on the fix plan (planned / refused / by hand / none documented), and the index keeps
     no fix plan. The pass does not render: it requires the whole impact list to be the one the issue was written
     from. This shows that is enough: the full check of the same commit then plans the same fixes and writes the
     same body, but for the version in the footer."""
-    installed.tree = TREES["fixes"]
+    installed.tree = TREES[tree]
     installed.grant_writes()
     checked(conn, gh, settings)
+    assert inventory.get(conn, 501) is not None  # the check, fix plan included, could be recorded
     poll(settings, conn, gh, third_doc())  # currency goes too: a second group, with nothing documented to fix it
     assert queued(conn) == [(501, "release")]
     checked(conn, gh, settings)
     repo, body = db.get_repo(conn, 501), installed.issues[1]["body"]
-    assert (repo["issue_state"], repo["fix_state"], repo["issue_version"]) == ("open", "open", THIRD_VERSION)
+    planned = issue.PLANNED in FIX_STATES[tree]
+    assert (repo["issue_state"], repo["fix_state"], repo["issue_version"]) == ("open", "open" if planned else None, THIRD_VERSION)
     baseline = repo["baseline"]
-    written = in_process_child(TREES["fixes"], baseline, latest(settings).name, settings.data, fix=True)
-    states = {(f["file"], f["change_target"]): f[issue.FIX_KEY] for f in issue.findings(written, "octo/shop", SHA)}
-    assert states == {
-        ("planned.py", "description"): issue.PLANNED, ("refused.js", "description"): "leftover_tokens",
-        ("hidden.rb", "description"): issue.MANUAL,
-        ("planned.py", "currency"): "", ("refused.js", "currency"): "", ("hidden.rb", "currency"): "",
-    }
-    assert prbody.UNFIXABLE_WHY["leftover_tokens"] in body and body.count("Your options") == 2
+    written = in_process_child(TREES[tree], baseline, latest(settings).name, settings.data, fix=True)
+    assert {f[issue.FIX_KEY] for f in issue.findings(written, "octo/shop", SHA)} == FIX_STATES[tree]
+    refusal = next(state for state in FIX_STATES[tree] if state in prbody.UNFIXABLE_WHY)
+    assert prbody.UNFIXABLE_WHY[refusal] in body and "Your options" in body
     requests = len(installed.requests)
     quiet = release("unrelated", version=FOURTH_VERSION, base=third_doc())
     path = poll(settings, conn, gh, quiet)
     assert queued(conn) == [] and last_pass(conn)["same"] == 1 and calls(installed, requests) == LOOKUP
     assert inventory.get(conn, 501)["checked"] == path.name and installed.issues[1]["body"] == body
-    now = in_process_child(TREES["fixes"], baseline, path.name, settings.data, fix=True)  # the full check, as it would run
+    now = in_process_child(TREES[tree], baseline, path.name, settings.data, fix=True)  # the full check, as it would run
     for key in ("impacts", "fixes", "unfixable", "not_attempted", "leftovers", "call_sites", "unread"):
         assert now[key] == written[key], key
     assert issue.findings(now, "octo/shop", SHA) == issue.findings(written, "octo/shop", SHA)

@@ -67,12 +67,44 @@ def test_the_recorder_notes_every_question_and_flags_anything_else(data_dir):
         inventory.parse(exported)
 
 
+def test_the_recorder_notes_the_go_questions_and_flags_any_other_way_into_the_go_names(data_dir):
+    index = SdkIndex.build(load_spec(old_doc()))
+    recorder = inventory.Recorder(index)
+    go, op = recorder.go, ("post", "/v1/charges")
+    assert go.resolve("package", "charge", "New").path == "/v1/charges" and go.resolve("api", "Nope", "New") is None
+    assert go.owns("api", "Charges") and go.known("api", "Charges", "New") and not go.owns("service", "Nope")
+    assert go.field(op, "", "Amount") == "amount" and go.field(op, "", "Nope") is None
+    assert go.children(op, "shipping.") and not go.children(op, "amount.") and not go.path_param(op, "Charge")
+    assert list(recorder.go_asked) == [
+        ("resolve", ("package", "charge", "New")), ("resolve", ("api", "Nope", "New")), ("owns", ("api", "Charges")),
+        ("known", ("api", "Charges", "New")), ("owns", ("service", "Nope")), ("field", (op, "", "Amount")),
+        ("field", (op, "", "Nope")), ("children", (op, "shipping.")), ("children", (op, "amount.")), ("path_param", (op, "Charge")),
+    ]
+    exported = json.loads(json.dumps(inventory.export(ScanResult("r", [], 0, []), recorder)))
+    assert not exported["unusable"] and inventory.parse(exported).go == tuple(recorder.go_asked)
+    stored = json.loads(json.dumps(indexcheck.answers(index, (), (), (), recorder.go_asked)))
+    assert [answer for _, answer in stored["go"]] == ["post /v1/charges", None, True, True, False, "amount", None, True, False, False]
+    assert indexcheck.same_answers(index, stored)
+    other = old_doc()
+    other["paths"]["/v1/charges"]["post"]["requestBody"]["content"]["application/x-www-form-urlencoded"]["schema"]["properties"].pop("amount")
+    assert not indexcheck.same_answers(SdkIndex.build(load_spec(other)), stored)  # Amount no longer names a request field
+    for reach in (lambda: go._names(op, ""), lambda: go.field(op, prefix="", go_name="Amount"), lambda: go.owns("api")):
+        fresh = inventory.Recorder(index)
+        go = fresh.go
+        try:
+            reach()
+        except TypeError:
+            pass
+        assert len(fresh.untracked) == 1 and inventory.export(ScanResult("r", [], 0, []), fresh)["unusable"]
+
+
 def _site(export, **changes):
     export["sites"][0].update(changes)
 
 
 BAD = {
-    "another format": lambda e: e.update(format=2),
+    "another format": lambda e: e.update(format=3),
+    "the format before this one": lambda e: e.update(format=1),
     "format true": lambda e: e.update(format=True),
     "unusable": lambda e: e.update(unusable=True),
     "sites not a list": lambda e: e.update(sites={}),
@@ -101,11 +133,21 @@ BAD = {
     "field too long": lambda e: _site(e, fields=["f" * 301]),
     "too many fields": lambda e: _site(e, fields=[f"f{i}" for i in range(401)]),
     "hidden not a list": lambda e: _site(e, hidden="x"),
-    "reads not an object": lambda e: e.update(reads=[]),
-    "reads in clear": lambda e: e["reads"].update({"server.py": ["receipt_url"]}),
-    "reads repeated": lambda e: e["reads"].update({"server.py": ["0" * 12, "0" * 12]}),
-    "reads for an unknown file": lambda e: e["reads"].update({"other.py": ["0" * 12]}),
+    "reads not a list": lambda e: e.update(reads={}),
+    "reads in clear": lambda e: e["reads"].__setitem__(0, ["receipt_url"]),
+    "reads repeated": lambda e: e["reads"].__setitem__(0, ["0" * 12, "0" * 12]),
+    "reads no call site uses": lambda e: e["reads"].append(["0" * 12]),
+    "site reads out of range": lambda e: _site(e, reads=99),
+    "site reads true": lambda e: _site(e, reads=True),
     "asked missing": lambda e: e.pop("asked"),
+    "go questions missing": lambda e: e["asked"].pop("go"),
+    "go question unknown": lambda e: e["asked"]["go"].append(["_aliases", []]),
+    "go question with too few arguments": lambda e: e["asked"]["go"].append(["owns", ["api"]]),
+    "go question without an operation": lambda e: e["asked"]["go"].append(["field", ["post", "", "Amount"]]),
+    "go question with a path that is not stripe": lambda e: e["asked"]["go"].append(["children", [["post", "/etc"], ""]]),
+    "go question with a wildcard method": lambda e: e["asked"]["go"].append(["children", [["?", "/v1/charges"], ""]]),
+    "go question with a newline": lambda e: e["asked"]["go"].append(["owns", ["api", "a\nb"]]),
+    "go question with a number": lambda e: e["asked"]["go"].append(["owns", ["api", 7]]),
     "chain of one": lambda e: e["asked"]["chains"].append(["stripe"]),
     "chain of five": lambda e: e["asked"]["chains"].append(["a", "b", "c", "d", "e"]),
     "chain with a newline": lambda e: e["asked"]["chains"].append(["stripe", "x\ny"]),
@@ -126,7 +168,7 @@ def test_an_export_that_breaks_a_rule_is_refused_whole(data_dir, conn, repo_row,
     assert inventory.get(conn, 501) is None and conn.execute("SELECT count(*) FROM index_sites").fetchone()[0] == 0
 
 
-@pytest.mark.parametrize("cap,value", [("MAX_SITES", 5), ("MAX_CHARS", 60), ("MAX_ASKED", 3), ("MAX_READS", 2)])
+@pytest.mark.parametrize("cap,value", [("MAX_SITES", 5), ("MAX_CHARS", 60), ("MAX_ASKED", 3), ("MAX_READS", 0)])
 def test_an_export_over_a_cap_is_refused_not_truncated(data_dir, conn, repo_row, monkeypatch, cap, value):
     payload, old, new = check(data_dir)
     inventory.parse(payload["index"])
@@ -203,10 +245,10 @@ def test_storage_is_one_bounded_set_of_rows_per_repo_replaced_by_each_check(data
     assert record(conn, data_dir, payload, job_id=2) is None
     assert conn.execute("SELECT count(*) FROM index_sites").fetchone()[0] == 6
     header = inventory.get(conn, 501)
-    assert (header["sha"], header["job_id"], header["format"], header["checked"], header["checked_by"]) == (SHA, 2, 1, new.name, "full")
+    assert (header["sha"], header["job_id"], header["format"], header["checked"], header["checked_by"]) == (SHA, 2, 2, new.name, "full")
     assert header["scanner"] == inventory.scanner_digest() and len(header["scanner"]) == 16
     assert inventory.summary(conn) == {"repos": 1, "by_index": 0, "call_sites": 6, "doc_sites": 0, "endpoints": 2}
-    assert "receipt_url" not in header["extras"] and "charge" not in json.loads(header["extras"])["reads"].get("server.py", "")
+    assert "receipt_url" not in header["extras"] and all(set(text) <= set("0123456789abcdef") for text in json.loads(header["extras"])["reads"])
 
 
 def test_the_index_goes_with_the_repo_and_with_the_installation(data_dir, conn, settings, fake):

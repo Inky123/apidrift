@@ -111,20 +111,33 @@ def pair(snaps: list[Path], baseline: Path, latest: Path) -> Pair:
     return found
 
 
-def answers(index: SdkIndex, chains, urls, paths) -> dict:
-    """What ``index`` answers to the questions a scan asked (JSON-shaped, so it compares with a stored copy)."""
-    resolved = [(list(chain), index.resolve(chain)) for chain in chains]
+def _operation(resolved) -> str | None:
+    return f"{resolved.method} {resolved.path}" if resolved is not None else None
+
+
+def _go_answer(go, name: str, args) -> object:
+    """What the stripe-go names answer to one recorded question (None when there are none to ask)."""
+    if go is None:
+        return None
+    result = getattr(go, name)(*[tuple(arg) if isinstance(arg, list) else arg for arg in args])
+    return _operation(result) if name == "resolve" else result
+
+
+def answers(index: SdkIndex, chains, urls, paths, go=()) -> dict:
+    """What ``index`` answers to the questions a check asked (JSON-shaped, so it compares with a stored copy)."""
+    plain = [(name, [list(arg) if isinstance(arg, (tuple, list)) else arg for arg in args]) for name, args in go]
     return {
-        "chains": [[chain, f"{r.method} {r.path}" if r is not None else None] for chain, r in resolved],
+        "chains": [[list(chain), _operation(index.resolve(chain))] for chain in chains],
         "urls": [[url, index.match_path(url)] for url in urls],
         "paths": [[path, index.methods_for(path)] for path in paths],
+        "go": [[[name, args], _go_answer(index.go, name, args)] for name, args in plain],
     }
 
 
 def same_answers(index: SdkIndex, stored: dict) -> bool:
-    """Whether ``index`` resolves every recorded question as the index of the scan did: then a scan of the same
-    code with it finds the same call sites."""
-    asked = [[question for question, _ in stored.get(kind, [])] for kind in ("chains", "urls", "paths")]
+    """Whether ``index`` answers every recorded question as the index of the check did: then a scan of the same
+    code with it finds the same call sites, and the fixer plans the same fixes for the same impacts."""
+    asked = [[question for question, _ in stored.get(kind, [])] for kind in ("chains", "urls", "paths", "go")]
     return answers(index, *asked) == stored
 
 
@@ -158,7 +171,7 @@ def record(
         if any(mine[key] != payload.get(key) for key in ("impacts", "call_sites", "old_version", "new_version")):
             raise inventory.Invalid("the index does not reproduce the impacts of its own check")
         inventory.store(
-            conn, repo_id, sha, job_id, index, answers(pr.index, index.chains, index.urls, index.paths), unread,
+            conn, repo_id, sha, job_id, index, answers(pr.index, index.chains, index.urls, index.paths, index.go), unread,
             inventory.impacts_digest(mine["impacts"]), latest.name,
         )
     except Exception as exc:  # noqa: BLE001 - whatever went wrong, the repo just has no index
