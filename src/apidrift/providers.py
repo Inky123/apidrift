@@ -18,6 +18,13 @@ PROVIDERS: dict[str, Provider] = {
         spec_url="https://raw.githubusercontent.com/stripe/openapi/master/openapi/spec3.sdk.json",
         changelog_url="https://docs.stripe.com/changelog",
     ),
+    # One YAML file per API version; 2020-09-14 is the only version Plaid publishes. ``info.version`` is
+    # ``2020-09-14_<release>`` and the changelog is keyed by that release number.
+    "plaid": Provider(
+        name="plaid",
+        spec_url="https://raw.githubusercontent.com/plaid/plaid-openapi/master/2020-09-14.yml",
+        changelog_url="https://github.com/plaid/plaid-openapi/blob/master/CHANGELOG.md",
+    ),
 }
 
 
