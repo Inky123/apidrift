@@ -160,6 +160,29 @@ def test_reading_a_nested_value_out_of_the_params_makes_only_that_branch_uncerta
     assert u.fields == {"amount", "shipping"} and u.hides("shipping.name") and not u.hides("amount") and not u.hides("customer")
 
 
+def test_a_goto_in_the_function_makes_statement_order_untrustworthy():
+    text = go(
+        "func f(retry bool) {\n"
+        "\tparams := &stripe.PaymentIntentParams{Amount: stripe.Int64(1)}\n"
+        "again:\n"
+        "\tpaymentintent.New(params)\n"
+        "\tif retry {\n\t\tparams.Customer = stripe.String(\"cus_1\")\n\t\tretry = false\n\t\tgoto again\n\t}\n}\n", PI,
+    )
+    u = one(text)
+    assert u.fields == {"amount"} and not u.complete and u.hides("customer")
+
+
+@pytest.mark.parametrize("text", [
+    "", "package x\n", 'package x\nimport "github.com/stripe/stripe-go/v86/customer"\nfunc f() { customer.New(',
+    'package x\nimport "github.com/stripe/stripe-go/v86"\nfunc f() { p := &stripe.CustomerParams{ Email: }; sc.V1Customers.Create(ctx, p',
+    'import "github.com/stripe/stripe-go/v86"\n}}}} ))) sc.Customers.New(&stripe.CustomerParams{',
+    'import ("github.com/stripe/stripe-go/v86"\n x.V1Customers.Create(a, &stripe.',
+    'package x\nimport "github.com/stripe/stripe-go/v86"\nvar x = `unterminated\nfunc f() { c.Customers.New(nil) }',
+])
+def test_truncated_or_broken_source_never_raises(text):
+    usages(text)  # no exception: what is found in a file that does not parse is best effort
+
+
 @pytest.mark.parametrize("snippet, kinds", [
     ("func f() { if x == (T{}) { g() } }", [BLOCK, LIT, BLOCK]),
     ("func f() { for _, v := range []string{\"a\"} { g(v) } }", [BLOCK, LIT, BLOCK]),

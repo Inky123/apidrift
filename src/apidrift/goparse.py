@@ -138,6 +138,8 @@ class GoFile:
             d for d in vars_.decls(name) if not d.declares and d.tok < use and vars_.decl_for(name, d.tok) is decl
         ]
         fn = src.func_of(use)
+        if fn >= 0 and any(fn < g < src.match[fn] for g in src.ids("goto")):
+            out.hidden.add("")  # a jump: statement order no longer says what ran before the call
         dom = None
         for e in sorted(events, key=lambda e: e.tok, reverse=True):
             lo, hi = src.region(e.tok)
