@@ -4,7 +4,7 @@ import textwrap
 
 from apidrift.diff import BREAKING, Change, collapse_removals, diff_specs
 from apidrift.impact import AFFECTED, POSSIBLE, assess
-from apidrift.localize import place, places
+from apidrift.localize import place, places, shared_leaves
 from apidrift.openapi import load_spec
 from apidrift.plaidmap import PlaidIndex
 from apidrift.plaidscan import scan_text
@@ -33,9 +33,11 @@ def impacts(mutate, source, rel="app.ts", called=None):
     old, new = specs(mutate)
     head = PY_HEAD if rel.endswith(".py") else NODE_HEAD
     usages, _, _ = scan_text(head + textwrap.dedent(source), rel, PlaidIndex.build(old, new))
-    changes = place(diff_specs(old, new), old, new, called if called is not None else {u.path for u in usages})
+    called = called if called is not None else {u.path for u in usages}
+    changes = place(diff_specs(old, new), old, new, called)  # the steps ``apidrift impact --provider plaid`` takes
     lines = head.count("\n")
-    return [(i.usage.line - lines, i.change.kind, i.change.target, i.certainty) for i in assess(usages, changes)]
+    found = assess(usages, changes, shared_leaves(old, new, called))
+    return [(i.usage.line - lines, i.change.kind, i.change.target, i.certainty) for i in found]
 
 
 def drop_accuracy(doc):
@@ -159,6 +161,44 @@ def test_a_change_inside_a_returned_object_reaches_the_operations_whose_response
         (2, "response_field_removed", "merchant_name", AFFECTED)
     ]
     assert impacts(drop, source) == [(2, "response_field_removed", "merchant_name", POSSIBLE)]
+
+
+def test_a_read_of_a_name_several_returned_objects_share_is_only_possible():
+    def drop(doc):
+        schemas(doc)["Account"]["properties"].pop("mask")
+
+    old, new = plaid_doc(), plaid_doc()
+    for doc in (old, new):
+        schemas(doc)["Transaction"]["properties"]["mask"] = STRING
+    drop(new)
+    old, new = load_spec(old), load_spec(new)
+    assert "mask" in shared_leaves(old, new, {"/accounts/get", "/transactions/get"})
+    assert "mask" not in shared_leaves(old, new, {"/accounts/get"}) and "official_name" not in shared_leaves(old, new, {"/accounts/get", "/transactions/get"})
+
+    source = NODE_HEAD + "const a = await client.accountsGet({ access_token: t });\nshow(a.data.accounts[0].mask);\n"
+    usages, _, _ = scan_text(source, "a.js", PlaidIndex.build(old, new))
+    changes = place(diff_specs(old, new), old, new)
+    [alone] = assess(usages, changes, shared_leaves(old, new, {"/accounts/get"}))
+    assert (alone.certainty, alone.reason) == (AFFECTED, "response field mask is read in this file")
+    [among] = assess(usages, changes, shared_leaves(old, new, {"/accounts/get", "/transactions/get"}))
+    assert (among.certainty, among.reason) == (POSSIBLE, "a field named mask is read in this file (several returned objects have one)")
+
+
+def test_a_read_is_certain_only_when_one_operation_called_in_the_file_returns_the_object():
+    def drop(doc):
+        schemas(doc)["Item"]["properties"].pop("webhook")
+
+    one = """
+        const a = await client.accountsGet({ access_token: t });
+        const b = await client.accountsGet({ access_token: u });
+        show(a.data.item.webhook);
+    """
+    assert impacts(drop, one) == [(2, "response_field_removed", "webhook", AFFECTED), (3, "response_field_removed", "webhook", AFFECTED)]
+    two = one + "const c = await client.transactionsGet({ access_token: t, start_date: s, end_date: e });\n"
+    assert impacts(drop, two) == [
+        (2, "response_field_removed", "webhook", POSSIBLE), (3, "response_field_removed", "webhook", POSSIBLE),
+        (5, "response_field_removed", "webhook", POSSIBLE),
+    ]
 
 
 def test_a_schema_returned_directly_keeps_its_operations_and_gains_the_ones_that_nest_it():

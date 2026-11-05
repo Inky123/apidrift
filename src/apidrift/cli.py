@@ -13,7 +13,7 @@ from .app.commands import add_parsers as add_app_parsers
 from .diff import BREAKING, Change, diff_chain
 from .fixer import plan_fixes, render_fix_text
 from .impact import assess, render_impact_json, render_impact_text
-from .localize import place
+from .localize import place, shared_leaves
 from .openapi import Spec, load_spec
 from .profiles import get_profile
 from .providers import PROVIDERS, get_provider
@@ -111,9 +111,11 @@ def cmd_impact(args: argparse.Namespace) -> int:
     changes, versions = _changes(args.provider, old_path, old_spec, new_path, new_spec)
     changes = filter_changes(changes, min_severity=args.severity)
     result = scan_repo(Path(args.repo), index, profile.reader)
+    shared: frozenset[str] | None = None
     if profile.nested:  # changes the diff reports on a schema: put them on the operations this checkout calls
-        changes = place(changes, old_spec, new_spec, {u.path for u in result.usages})
-    impacts = assess(result.usages, changes)
+        called = {u.path for u in result.usages}
+        changes, shared = place(changes, old_spec, new_spec, called), shared_leaves(old_spec, new_spec, called)
+    impacts = assess(result.usages, changes, shared)
     old_label, new_label = _label(old_path, old_spec), _label(new_path, new_spec)
     if args.json:
         print(_with_versions(render_impact_json(result, impacts, old_label, new_label), versions))

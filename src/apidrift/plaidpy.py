@@ -17,6 +17,7 @@ elsewhere leave the fields under that object unknown. Built on the scopes of :mo
 from __future__ import annotations
 
 import ast
+from dataclasses import dataclass
 
 from . import pyparse
 from .plaidmap import PlaidIndex
@@ -25,13 +26,21 @@ from .pyparse import PyFound
 CLIENT_CLASSES = ("PlaidApi", "Client")  # Client: the pre-2021 SDK
 
 
+@dataclass
+class Found(PyFound):
+    values: frozenset[tuple[str, str | None]] = frozenset()  # see scanner.Usage.values
+
+
 class _Imports:
     def __init__(self, tree: ast.AST) -> None:
         self.sdk: set[str] = set()  # names bound to the plaid package, one of its modules or one of its classes
         self.likely: set[str] = set()  # names imported from a module of the project that is named after Plaid
         self.star = False  # ``from plaid.models import *``
+        self.theirs: set[str] = set()  # classes this project defines or imports from its own modules
         for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
+            if isinstance(node, ast.ClassDef):
+                self.theirs.add(node.name)
+            elif isinstance(node, ast.Import):
                 for alias in node.names:
                     if alias.name.split(".")[0] == "plaid":
                         self.sdk.add(alias.asname or "plaid")
@@ -42,8 +51,10 @@ class _Imports:
                 if node.level == 0 and node.module.split(".")[0] == "plaid":
                     self.sdk |= names
                     self.star = self.star or any(alias.name == "*" for alias in node.names)
-                elif "plaid" in node.module.lower():
-                    self.likely |= names
+                else:
+                    self.theirs |= names
+                    if "plaid" in node.module.lower():
+                        self.likely |= names
 
 
 class _Clients:
@@ -75,7 +86,9 @@ class _Clients:
         chain = pyparse._chain(node.func)
         if not chain:
             return False
-        if chain[-1] == "PlaidApi" or (chain[-1] == "Client" and chain[0] in self.imports.sdk):
+        if chain[-1] == "Client" and chain[0] in self.imports.sdk:
+            return True
+        if chain[-1] == "PlaidApi" and chain[0] not in self.imports.theirs:  # not a project's own class of that name
             return True
         return chain[-1] in self.factories and len(chain) <= 2
 
@@ -170,7 +183,11 @@ def extract(text: str, index: PlaidIndex) -> tuple[list[PyFound], list[tuple[int
             reader.hidden.add("")  # positional arguments under the old client's own names
         else:
             reader.argument(name)
-        found.append(PyFound(node.lineno, ".".join(chain), resolved, reader.fields, not reader.hidden, frozenset(reader.hidden)))
+            if not held and reader.foreign():
+                continue  # a project's own function with the SDK method's name
+        found.append(Found(
+            node.lineno, ".".join(chain), resolved, reader.fields, not reader.hidden, frozenset(reader.hidden), frozenset(reader.values),
+        ))
     return found, other
 
 
@@ -181,6 +198,7 @@ class _Request:
         self.index, self.op, self.scopes, self.imports, self.call, self.fn = index, op, scopes, imports, call, fn
         self.fields: set[str] = set()
         self.hidden: set[str] = set()
+        self.values: set[tuple[str, str | None]] = set()
         self._active: set[str] = set()  # variables being read, so a self-referring binding ends
 
     def argument(self, method: str) -> None:
@@ -192,6 +210,13 @@ class _Request:
             self.object(keywords[f"{method}_request"], "")
         elif None in keywords:
             self.hidden.add("")
+
+    def foreign(self) -> bool:
+        """The first argument cannot be the SDK's request: a plain literal, or an object with a key the operation
+        has never had. Asked only of receivers known by name alone, where a wrapper can share the SDK's names."""
+        if self.call.args and isinstance(self.call.args[0], ast.Constant):
+            return True
+        return any("." not in f and "[" not in f and not self.index.knows(self.op, f) for f in self.fields)
 
     def object(self, node: ast.expr, prefix: str) -> None:
         if isinstance(node, ast.Starred):
@@ -222,8 +247,10 @@ class _Request:
     def field(self, path: str, value: ast.expr) -> None:
         """A field and, when the spec lists fields under it, the object or list of objects it is given."""
         self.fields.add(path)
-        if not self.index.has_children(self.op, path):
-            return  # a plain value, an enum model (Products('auth')) or a free-form object
+        if not self.index.has_children(self.op, path):  # a plain value, an enum model (Products('auth')), a free-form object
+            items = value.elts if isinstance(value, (ast.List, ast.Tuple)) else [value]
+            self.values |= {(path, _plain(item)) for item in items}
+            return
         if not isinstance(value, ast.Name):
             self.nested(path, value)
             return
@@ -299,3 +326,12 @@ class _Request:
             if not keys:
                 self.hidden.add(prefix)  # request.update(other), request[name] = value
         self._active.discard(node.id)
+
+
+def _plain(node: ast.expr) -> str | None:
+    """A literal as the API receives it; ``Products("auth")``, a generated enum model, is its one argument."""
+    if isinstance(node, ast.Call) and len(node.args) == 1 and not node.keywords and isinstance(node.func, (ast.Name, ast.Attribute)):
+        node = node.args[0]
+    if not isinstance(node, ast.Constant) or node.value is None:
+        return None
+    return str(node.value).lower() if isinstance(node.value, bool) else str(node.value)

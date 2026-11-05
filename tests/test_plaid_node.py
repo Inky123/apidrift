@@ -195,6 +195,62 @@ def test_code_that_is_not_a_plaid_client_is_not_matched_even_with_the_same_metho
     assert found == [] and other == []
 
 
+def test_a_projects_own_wrapper_is_not_the_client_even_when_it_borrows_the_sdk_names():
+    # midday-ai/midday: its own ``PlaidApi`` class wraps the SDK's and shares method names with it
+    wrapper = """
+        import { PlaidApi as PlaidBaseApi } from 'plaid';
+        export class PlaidApi {
+          #client: PlaidBaseApi;
+          constructor() { this.#client = new PlaidBaseApi(config); }
+          async linkTokenCreate({ userId, language }) {
+            return this.#client.linkTokenCreate({ user: { client_user_id: userId }, client_name: 'A', language });
+          }
+          async getAccounts(id) { return this.institutionsGetById(id); }
+        }
+    """
+    found, other = extract(wrapper, head="")
+    assert [(c.call, c.line) for c in found] == [("client.linkTokenCreate", 7)] and other == []
+
+    caller = """
+        import { PlaidApi } from '@acme/banking/plaid';
+        import { GoCardLessApi } from '@acme/banking/gocardless';
+        export async function link(userId) {
+          const api = new PlaidApi();
+          return api.linkTokenCreate({ userId, language: 'en' });
+        }
+        export async function accounts(id) {
+          const api = new GoCardLessApi();
+          return api.getAccounts(id);
+        }
+    """
+    assert extract(caller, head="") == ([], [])
+
+
+def test_a_receiver_known_by_name_alone_is_dropped_when_its_argument_cannot_be_a_request():
+    found, _ = extract("""
+        await plaidService.accountsGet({ userId, access_token: t });
+        await plaidService.accountsGet('user_1');
+        await plaidService.accountsGet(`user_${id}`);
+        await plaidService.accountsGet({ access_token: t });
+        await plaidService.accountsGet(user.id);
+        await client.accountsGet({ userId });
+    """)
+    assert [(c.line, c.call, sorted(c.fields.paths), c.fields.complete) for c in found] == [
+        (7, "plaidService.accountsGet", ["access_token"], True),
+        (8, "plaidService.accountsGet", [], False),  # cannot be told from a request held in an object: kept, fields unseen
+        (9, "client.accountsGet", ["userId"], True),  # a client this file builds is believed
+    ]
+
+
+def test_a_known_variable_is_a_client_only_where_its_own_assignment_makes_it_one():
+    found, other = extract("""
+        async function a() { const api = new PlaidApi(config); return api.accountsGet({ access_token: t }); }
+        async function b() { const api = new OtherBank(config); api.accountsGet({ access_token: t }); return api.getAccounts(); }
+        async function c(api) { return api.accountsGet({ access_token: t }); }
+    """, head="import { PlaidApi } from 'plaid';\n")
+    assert [c.line for c in found] == [3, 5] and other == []  # an untyped parameter of that name may be handed the client
+
+
 def test_the_pre_2021_client_is_recognised_and_its_methods_are_listed_as_not_matched():
     found, other = extract("""
         const plaid = require('plaid');

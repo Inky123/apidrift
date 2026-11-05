@@ -21,6 +21,7 @@ AFFECTED, POSSIBLE = "affected", "possible"
 SENT, OPAQUE, ABSENT = "sent", "opaque", "absent"
 PARENT_RE = re.compile(r"^(.*?)(?:\[\])?\.[^.\[\]]+$")
 RELAXATIONS = {"added", "now_optional", "enum_added", "enum_relaxed", "type_widened"}
+VALUE_ACTIONS = {"enum_removed", "enum_restricted"}  # judged by the value sent, where the reader collected values
 IGNORED = {"endpoint_added", "schema_added", "schema_renamed", "response_schema_narrowed", "response_field_added"}
 GENERIC_LEAVES = {  # member names so common that a read in the file need not be of this response
     "type", "id", "status", "object", "data", "amount", "currency", "created", "livemode", "metadata", "url", "name",
@@ -50,7 +51,11 @@ class Impact:
         }
 
 
-def assess(usages: list[Usage], changes: list[Change]) -> list[Impact]:
+def assess(usages: list[Usage], changes: list[Change], shared: frozenset[str] | None = None) -> list[Impact]:
+    """``shared`` is given for a vendor whose responses nest many named objects: the field names several
+    returned objects have (see :func:`localize.shared_leaves`). A read of one of those in a file is not
+    pinned on the object that changed, and neither is a read in a file where calls to different
+    operations return the changed object; both are *possible*."""
     out: list[Impact] = []
     for change in changes:
         if change.kind in IGNORED:
@@ -60,15 +65,34 @@ def assess(usages: list[Usage], changes: list[Change]) -> list[Impact]:
             continue
         for usage in usages:
             if _calls(usage, ops):
-                impact = _impact(change, usage)
+                impact = _impact(change, usage, shared or frozenset())
                 if impact is not None:
                     out.append(impact)
+    if shared is not None:
+        out = _one_source(out)
     out.sort(
         key=lambda i: (
             SEVERITY_RANK[i.severity], 0 if i.certainty == AFFECTED else 1,
             i.usage.file, i.usage.line, i.change.kind, i.change.target or "",
         )
     )
+    return out
+
+
+def _one_source(impacts: list[Impact]) -> list[Impact]:
+    """A response field read in a file is certain only when one operation called there returns it."""
+    sources: dict[tuple[str, int], set[str]] = {}
+    read = [i for i in impacts if i.certainty == AFFECTED and i.change.kind.startswith("response_") and i.change.target]
+    for impact in read:
+        sources.setdefault((impact.usage.file, id(impact.change)), set()).add(impact.usage.label)
+    read_ids = {id(impact) for impact in read}
+    out: list[Impact] = []
+    for impact in impacts:
+        labels = sources.get((impact.usage.file, id(impact.change)), ()) if id(impact) in read_ids else ()
+        if len(labels) > 1:
+            reason = f"{impact.reason} ({len(labels)} operations called here return it)"
+            impact = Impact(impact.usage, impact.change, POSSIBLE, reason)
+        out.append(impact)
     return out
 
 
@@ -89,7 +113,7 @@ def _calls(usage: Usage, ops: set[tuple[str, str]]) -> bool:
     return (usage.method, usage.path) in ops
 
 
-def _impact(change: Change, usage: Usage) -> Impact | None:
+def _impact(change: Change, usage: Usage, shared: frozenset[str] = frozenset()) -> Impact | None:
     kind = change.kind
     if kind in ("endpoint_removed", "endpoint_deprecated"):
         return Impact(usage, change, AFFECTED, "every call to this endpoint")
@@ -97,7 +121,7 @@ def _impact(change: Change, usage: Usage) -> Impact | None:
         return _request_impact(change, usage)
     if kind.startswith("request_"):
         return _unplaced_impact(change, usage)
-    return _response_impact(change, usage)
+    return _response_impact(change, usage, shared)
 
 
 def _request_impact(change: Change, usage: Usage) -> Impact | None:
@@ -113,6 +137,8 @@ def _request_impact(change: Change, usage: Usage) -> Impact | None:
         return _required_impact(change, usage, target, parent, use)
     if _migrated(change, usage, action):
         return None
+    if use == SENT and usage.values is not None and action in VALUE_ACTIONS:
+        return _value_impact(change, usage, target, action)
     if use == SENT:
         return Impact(usage, change, AFFECTED, f"{target} is sent here")
     if action in RELAXATIONS:
@@ -122,6 +148,27 @@ def _request_impact(change: Change, usage: Usage) -> Impact | None:
     if not usage.hides(target):
         return None
     return Impact(usage, change, POSSIBLE, "arguments are not fully visible at this call")
+
+
+def _value_impact(change: Change, usage: Usage, target: str, action: str) -> Impact | None:
+    """A change to the values a field accepts, at a call whose reader collected the values it sends: it
+    hits when a value sent is one no longer accepted, cannot be ruled out when a value is not a visible
+    literal, and misses when every value sent is still accepted."""
+    gone = action == "enum_removed"
+    listed = [str(v) for v in (change.old if gone else change.new) or ()]
+    sent = [value for path, value in usage.values if path == target]
+    for value in sorted(v for v in sent if v is not None):
+        among = _flat(value) in {_flat(v) for v in listed} if value.startswith("~") else value in listed
+        if among == gone:
+            return Impact(usage, change, AFFECTED, f"{target} is sent here as {value.lstrip('~')}")
+    if not sent or None in sent:
+        return Impact(usage, change, POSSIBLE, f"{target} is sent here; its value is not visible")
+    return None
+
+
+def _flat(value: str) -> str:
+    """Letters and digits, lowercased: a generated enum member (``ProcessorEnum.ModernTreasury``) against its value."""
+    return re.sub(r"[^a-z0-9]", "", value.lower())
 
 
 def _unplaced_impact(change: Change, usage: Usage) -> Impact | None:
@@ -182,7 +229,7 @@ def _parent(target: str) -> str:
     return m.group(1) if m else ""
 
 
-def _response_impact(change: Change, usage: Usage) -> Impact | None:
+def _response_impact(change: Change, usage: Usage, shared: frozenset[str] = frozenset()) -> Impact | None:
     kind = change.kind
     if kind in ("response_schema_changed", "schema_removed"):
         return Impact(usage, change, AFFECTED, "the response of this endpoint changed shape")
@@ -192,6 +239,8 @@ def _response_impact(change: Change, usage: Usage) -> Impact | None:
     if name and name in usage.reads:
         if name in GENERIC_LEAVES:
             return Impact(usage, change, POSSIBLE, f"a field named {name} is read in this file (common name; may be another object)")
+        if name in shared:
+            return Impact(usage, change, POSSIBLE, f"a field named {name} is read in this file (several returned objects have one)")
         return Impact(usage, change, AFFECTED, f"response field {name} is read in this file")
     if name and change.severity != BREAKING:
         return None  # a warning about a response field this file never reads is noise

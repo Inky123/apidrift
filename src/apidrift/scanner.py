@@ -92,6 +92,9 @@ class Usage:
     language: str  # python / javascript / typescript / ruby / http, or "doc" for URLs in documentation
     reads: frozenset[str] = frozenset()  # member names read in the same file off a plausible response object
     hidden: frozenset[str] | None = None  # prefixes ("" = top level) where unseen keys may be sent; None: all if not complete
+    # (field, value) for plain values the call sends, value None where it is not a visible literal ("~name": an
+    # SDK enum member). None: the reader does not collect values, and a sent field is judged without them.
+    values: frozenset[tuple[str, str | None]] | None = None
 
     def hides(self, path: str) -> bool:
         """Whether ``path`` could be sent here without being visible (a spread, ``**kwargs`` or variable)."""

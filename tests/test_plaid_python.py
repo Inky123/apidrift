@@ -219,6 +219,23 @@ def test_a_client_from_another_module_is_read_when_it_or_its_module_is_named_aft
     assert other == [] and all(c.hidden == {""} for c in found)
 
 
+def test_a_projects_own_wrapper_is_not_the_client_even_when_it_borrows_the_sdk_names():
+    found, other = extract("""
+        from banking.plaid import PlaidApi
+        from banking import plaid_service
+
+        def link(user_id):
+            api = PlaidApi()
+            api.link_token_create({"user_id": user_id})
+            plaid_service.accounts_get("user_1")
+            plaid_service.accounts_get({"user_id": user_id})
+            plaid_service.accounts_get({"access_token": t})
+            return plaid_service.accounts_get(user_id)
+    """, head="")
+    assert [(c.line, sorted(c.fields), c.complete) for c in found] == [(10, ["access_token"], True), (11, [], False)]
+    assert other == []
+
+
 def test_the_pre_2021_client_resolves_by_its_path_like_names_with_fields_unseen():
     found, other = extract("""
         from plaid import Client

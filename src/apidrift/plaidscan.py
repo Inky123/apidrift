@@ -39,14 +39,15 @@ def scan_text(text: str, rel: str, index: PlaidIndex) -> tuple[list[Usage], list
     if language == "python":
         calls, other = plaidpy.extract(text, index)
         found = [
-            Usage(rel, c.line, c.resolved.method, c.resolved.path, c.call, frozenset(c.fields), c.complete, language, reads, c.hidden)
+            Usage(rel, c.line, c.resolved.method, c.resolved.path, c.call, frozenset(c.fields), c.complete, language, reads,
+                  c.hidden, c.values)
             for c in calls
         ]
     elif language in READ:
         calls, other = plaidjs.extract(text, index)
         found = [
             Usage(rel, c.line, c.resolved.method, c.resolved.path, c.call, frozenset(c.fields.paths), c.fields.complete,
-                  language, reads, frozenset(c.fields.hidden))
+                  language, reads, frozenset(c.fields.hidden), c.values)
             for c in calls
         ]
     unread = None if language in READ else UNREAD_LANGUAGES.get(suffix)

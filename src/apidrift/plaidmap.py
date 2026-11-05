@@ -71,6 +71,10 @@ class PlaidIndex:
     def methods_for(self, path: str) -> list[str]:
         return sorted(m for m, p in self.operations if p == path)
 
+    def knows(self, op: Op, name: str) -> bool:
+        """Some spec lists ``name`` as a top-level request field of this operation."""
+        return any(name in body.body for _, body in self._bodies.get(op, ()))
+
     def has_children(self, op: Op, path: str) -> bool:
         """Some spec gives the request field at ``path`` fields of its own (an object or a list of objects),
         including a named object nested deeper than an operation's body lists."""

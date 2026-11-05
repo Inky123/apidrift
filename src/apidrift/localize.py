@@ -99,3 +99,21 @@ def places(spec: Spec, op: Operation, name: str) -> set[str]:
                 if not any(other.startswith(prefix) for other in op.body):  # else the body lists those fields itself
                     stack += [(prefix + sub, item.type) for sub, item in spec.schemas[ref].fields.items()]
     return found
+
+
+def shared_leaves(old: Spec, new: Spec, called: set[str]) -> frozenset[str]:
+    """Field names found on more than one of the schemas the called operations can return. Plaid's responses
+    nest many objects (an account, a transaction and a security each have a ``type``), so a file that reads
+    such a name need not be reading the object a change is on."""
+    carried: set[str] = set()
+    for spec in (old, new):
+        for op in spec.operations.values():
+            if op.path in called:
+                carried |= op.receives
+    owners: dict[str, set[str]] = {}
+    for spec in (old, new):
+        for name in carried:
+            schema = spec.schemas.get(name)
+            for path in schema.fields if schema else ():
+                owners.setdefault(path.rsplit(".", 1)[-1].replace("[]", ""), set()).add(name)
+    return frozenset(leaf for leaf, names in owners.items() if len(names) > 1)
