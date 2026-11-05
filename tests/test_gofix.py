@@ -238,5 +238,5 @@ def test_go_is_listed_among_the_languages_apidrift_reads():
     from apidrift.scanner import LANGUAGES, UNREAD_LANGUAGES
 
     _, body = render_unread_issue("o/r", "a" * 40, {"unread": {"Rust": 1}, "call_sites": 0})
-    assert "apidrift reads Python, JavaScript, TypeScript, Ruby and Go call sites" in body
+    assert "apidrift reads Python, JavaScript, TypeScript, Ruby, PHP and Go call sites" in body
     assert LANGUAGES[".go"] == "go" and ".go" not in UNREAD_LANGUAGES

@@ -22,8 +22,8 @@ JS_CALL = re.compile(
     rf"(?<![\w$.])((?:(?:new\s+)?{NOT_A_RECEIVER}{SEGMENT}|\(\s*await\s+(?:this\s*\.\s*)?{SEGMENT}\s*\))"
     rf"\s*\.\s*(?:{NAME}\s*\.\s*){{0,4}}{NAME})\s*\("
 )
-RUBY_CALL = re.compile(
-    r"(?<![\w:.])((?:[A-Za-z_]\w*\s*(?:\.|::)\s*){1,5}[A-Za-z_]\w*)"
+RUBY_CALL = re.compile(  # a leading ``::`` is allowed; ``::`` never starts a line (``else`` + newline + ``::Stripe``)
+    r"(?<![\w:.])(?:::)?((?:[A-Za-z_]\w*(?:\s*\.|[ \t]*::)\s*){1,5}[A-Za-z_]\w*)"
     r"(?:\s*(\()|[ \t]+(?=[A-Za-z_]\w*\s*:(?!:)|:[A-Za-z_]\w*\s*=>|[\"'][^\"'\n]*[\"']\s*=>))"
 )
 RUBY_KEYWORD = re.compile(r"(?:[A-Za-z_]\w*\s*:(?!:)|:[A-Za-z_]\w*\s*=>|[\"'][^\"']*[\"']\s*=>)")
@@ -336,9 +336,13 @@ class Mask:
         self.spans = [(m.start(), m.end()) for m in (RUBY_MASK if ruby else JS_MASK).finditer(text)]
         self.starts = [a for a, _ in self.spans]
 
-    def covers(self, pos: int) -> bool:
+    def end(self, pos: int) -> int:
+        """End of the string or comment that holds ``pos``; 0 when ``pos`` is code."""
         k = bisect.bisect_right(self.starts, pos) - 1
-        return k >= 0 and self.spans[k][0] <= pos < self.spans[k][1]
+        return self.spans[k][1] if k >= 0 and self.spans[k][0] <= pos < self.spans[k][1] else 0
+
+    def covers(self, pos: int) -> bool:
+        return self.end(pos) > 0
 
 
 def eligible(chain: list[str], roots: set[str]) -> bool:
@@ -388,8 +392,11 @@ def calls(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> tu
     resolve = resolve or index.resolve
     found: list[Call] = []
     unresolved: list[tuple[int, str]] = []
-    for m in (RUBY_CALL if ruby else JS_CALL).finditer(src.text):
-        if mask.covers(m.start()):
+    pattern, at = (RUBY_CALL if ruby else JS_CALL), 0
+    while (m := pattern.search(src.text, at)) is not None:
+        at = m.end()
+        if mask.covers(m.start()):  # e.g. a comment ending in "." joined to the next line: look again after it
+            at = mask.end(m.start())
             continue
         if ruby:
             chain, hint = [p for p in re.split(r"\s*(?:\.|::)\s*", m.group(1).strip()) if p], False

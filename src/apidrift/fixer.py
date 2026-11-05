@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import gofix, migrations, scanner
+from . import gofix, migrations, phpfix, phplex, scanner
 from .diff import BREAKING, Change
 from .fixedit import Edit, Locator, apply
 from .fixtokens import accessed, tokens, variable_uses
@@ -28,11 +28,11 @@ from .migrations import Migration
 from .scanner import LANGUAGES, ScanResult, Usage, scan_text
 from .sdkmap import SdkIndex
 
-FIX_LANGUAGES = {"python", "javascript", "typescript", "ruby", "go"}
+FIX_LANGUAGES = {"python", "javascript", "typescript", "ruby", "php", "go"}
 WHY = (
     "nested", "not_found", "incomplete_binding", "unsupported_key_form", "oracle_changed_other_calls",
     "oracle_finding_remains", "oracle_new_finding", "leftover_tokens", "not_utf8", "too_large", "cap",
-    "nested_array", "unsupported_value", "would_empty_literal", "syntax",
+    "nested_array", "unsupported_value", "would_empty_literal", "syntax", "unbounded",
     gofix.NO_REWRITE,
 )
 NOT_VISIBLE = "arguments are not fully visible at this call"  # impact.py's reason at an incomplete call
@@ -41,7 +41,8 @@ CAP_FILES, CAP_FILE_BYTES, CAP_TOTAL_BYTES = 25, 1_000_000, 3_000_000
 MAX_PINS = 100
 PROJECT_MARKERS = scanner.PROJECT_FILES | {"requirements.txt", "Pipfile", "setup.cfg", "Gemfile.lock", "deno.json"}
 PIN_RE = re.compile(
-    r"""(?:\bapiVersion|\bapi_version|['"]?Stripe-Version['"]?)\s*(?:=>|[:=])\s*['"](\d{4}-\d{2}-\d{2}(?:\.[A-Za-z]\w*)?)['"]"""
+    r"""(?:(?:\bapiVersion|\bapi_version|['"]?Stripe-Version['"]?)\s*(?:=>|[:=])|['"](?:api|stripe)_version['"]\s*=>"""
+    r"""|\bsetApiVersion\()\s*['"](\d{4}-\d{2}-\d{2}(?:\.[A-Za-z]\w*)?)['"]"""
 )
 
 
@@ -187,7 +188,7 @@ def _plan_file(
     plan: FixPlan, file: str, text: str, group: list[Candidate], index: SdkIndex, changes: list[Change]
 ) -> tuple[Fix | None, list[int]]:
     language = group[0][0].usage.language
-    locator = Locator(text, language, index)
+    locator = (phpfix.Locator if language == "php" else Locator)(text, language, index)
     edits: list[Edit] = []
     planned: list[Planned] = []
     for impact, migration in group:
@@ -205,8 +206,10 @@ def _plan_file(
     except ValueError:
         _drop(plan, pairs, "not_found")
         return None, []
-    if language == "python" and not _parses(content):
-        _drop(plan, pairs, "syntax")  # checked by the real parser, not the reader that placed the edits
+    if (language == "python" and not _parses(content)) or (
+        language == "php" and not phplex.same_structure(text, content, edits)
+    ):
+        _drop(plan, pairs, "syntax")  # Python: the real parser. PHP: strings and brackets outside the edits unmoved
         return None, []
     if language == "go" and not gofix.balanced(text, content):
         _drop(plan, pairs, "syntax")  # no Go compiler here: at least every bracket still closes

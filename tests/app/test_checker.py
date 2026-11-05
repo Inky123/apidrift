@@ -385,18 +385,18 @@ def test_jobs_fail_for_good_after_eight_attempts(installed, conn, gh, settings):
 # --- languages apidrift cannot read yet --------------------------------------------------
 
 
-def go_tree(tmp_path, base=REPO):
-    tree = tmp_path / "with-go"
+def rust_tree(tmp_path, base=REPO):
+    tree = tmp_path / "with-rust"
     shutil.copytree(base, tree)
-    (tree / "pay.go").write_text('package main\nimport "github.com/stripe/stripe-go/v82"\n')
+    (tree / "pay.rs").write_text("// stripe\nfn pay() { PaymentIntent::create(&client, params); }\n")
     return tree
 
 
-def test_clean_repo_with_go_files_gets_one_notice_issue_not_silence(installed, conn, gh, settings, tmp_path):
-    installed.tree = go_tree(tmp_path, fixed_tree(tmp_path))
+def test_clean_repo_with_unread_files_gets_one_notice_issue_not_silence(installed, conn, gh, settings, tmp_path):
+    installed.tree = rust_tree(tmp_path, fixed_tree(tmp_path))
     assert run_job(claim(conn), conn, gh, settings).startswith("clean; baseline advanced")
-    assert [i["title"] for i in installed.issues.values()] == ["apidrift cannot read Go call sites in this repository yet"]
-    assert "1 Go file mention Stripe and were not checked" in installed.issues[1]["body"]
+    assert [i["title"] for i in installed.issues.values()] == ["apidrift cannot read Rust call sites in this repository yet"]
+    assert "1 Rust file mention Stripe and were not checked" in installed.issues[1]["body"]
     assert db.get_repo(conn, 501)["unread_issue"] == 1
     db.enqueue(conn, "check", 501, "push")
     run_job(claim(conn), conn, gh, settings)
@@ -404,14 +404,14 @@ def test_clean_repo_with_go_files_gets_one_notice_issue_not_silence(installed, c
 
 
 def test_findings_issue_carries_the_note_instead_of_a_second_issue(installed, conn, gh, settings, tmp_path):
-    installed.tree = go_tree(tmp_path)
+    installed.tree = rust_tree(tmp_path)
     assert run_job(claim(conn), conn, gh, settings) == "findings: opened #1"
-    assert len(installed.issues) == 1 and "does not read Go call sites yet" in installed.issues[1]["body"]
+    assert len(installed.issues) == 1 and "does not read Rust call sites yet" in installed.issues[1]["body"]
     assert db.get_repo(conn, 501)["unread_issue"] is None
 
 
 def test_notice_is_closed_once_every_file_is_read(installed, conn, gh, settings, tmp_path):
-    installed.tree = go_tree(tmp_path, fixed_tree(tmp_path))
+    installed.tree = rust_tree(tmp_path, fixed_tree(tmp_path))
     run_job(claim(conn), conn, gh, settings)
     installed.tree = fixed_tree(tmp_path / "again")
     db.enqueue(conn, "check", 501, "push")

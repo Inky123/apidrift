@@ -350,15 +350,15 @@ def test_files_in_unparsed_languages_that_mention_stripe_are_counted_not_passed_
     index = SdkIndex.build(load_spec(sdk_doc()))
     (tmp_path / "pay.go").write_text('package main\nimport "github.com/stripe/stripe-go/v82"\nfunc f() { paymentintent.New(params) }\n')
     (tmp_path / "other.go").write_text("package main\nfunc g() {}\n")
-    (tmp_path / "Pay.php").write_text("<?php $stripe->paymentIntents->create(['amount' => 1]);\n")
+    (tmp_path / "Pay.cs").write_text("class Pay { void F() { new Stripe.PaymentIntentService().Create(o); } }\n")
     (tmp_path / "Pay.java").write_text("class Pay { void f() { PaymentIntent.create(params); } }\n")
     (tmp_path / "pay.rs").write_text("// stripe\nfn f() { PaymentIntent::create(&client, params); }\n")
     result = scan_repo(tmp_path, index)
-    assert result.unread == {"PHP": 1, "Rust": 1}  # Go is read now: pay.go imports no stripe-go package it calls
+    assert result.unread == {"C#": 1, "Rust": 1}  # Go and PHP are read now: pay.go imports no stripe-go package it calls
     assert result.usages == []
     text = render_scan_text(result)
-    assert "not read: apidrift does not read PHP or Rust call sites yet: 1 PHP file and 1 Rust file mention Stripe" in text
-    assert json.loads(render_scan_json(result))["unread"] == {"PHP": 1, "Rust": 1}
+    assert "not read: apidrift does not read C# or Rust call sites yet: 1 C# file and 1 Rust file mention Stripe" in text
+    assert json.loads(render_scan_json(result))["unread"] == {"C#": 1, "Rust": 1}
 
 
 def test_the_module_fixture_reads_its_go_file(result):

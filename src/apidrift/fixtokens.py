@@ -10,7 +10,7 @@ import ast
 import re
 from dataclasses import dataclass
 
-from . import jsparse
+from . import jsparse, phplex
 from .jsparse import QUOTES, Source
 
 PY_MASK = re.compile(
@@ -32,7 +32,7 @@ def tokens(text: str, language: str, key: str) -> list[Token]:
     """Where ``key`` appears as a token in code: outside strings and comments, or as the whole content of
     a string literal (a quoted key)."""
     mask_re = PY_MASK if language == "python" else (jsparse.RUBY_MASK if language == "ruby" else jsparse.JS_MASK)
-    spans = [(m.start(), m.end()) for m in mask_re.finditer(text)]
+    spans = phplex.mask_spans(text) if language == "php" else [(m.start(), m.end()) for m in mask_re.finditer(text)]
     quoted = {a for a, b in spans if text[a] in "'\"" and text[a + 1 : b - 1] == key}
     out: list[Token] = []
     k = 0
@@ -55,7 +55,7 @@ def variable_uses(text: str, language: str, found: list[Token]) -> set[int]:
     """Positions among ``found`` that are plain identifier uses (a variable named like the key), not keys:
     unquoted, not after ``.``/``:``/``[``, not before ``:``/``=>``, and not a shorthand entry of an object.
     Python: the positions of ``Name`` and parameter nodes with that name."""
-    if not found:
+    if not found or language == "php":  # a PHP variable is ``$name``: never a bare token
         return set()
     if language == "python":
         return _py_names(text, {t.pos for t in found if not t.quoted})
@@ -132,7 +132,7 @@ def accessed(text: str, language: str, key: str, t: Token) -> bool:
     if t.quoted:
         return True  # a string naming the key, not as a key: a lookup
     before = text[max(0, t.pos - 3) : t.pos]
-    if before.endswith(".") and not before.endswith("..."):
+    if (before.endswith(".") and not before.endswith("...")) or (language == "php" and before.endswith(("->", "::"))):
         return True
     return before.endswith("[") or (language == "ruby" and before.endswith(":") and not before.endswith("::"))
 

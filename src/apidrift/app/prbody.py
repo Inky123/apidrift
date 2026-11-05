@@ -33,6 +33,8 @@ UNFIXABLE_WHY = {
     "cap": "the repository has more files to fix than one pull request carries",
     "unsupported_key_form": "the key is written in a form apidrift does not rewrite",
     "sdk_no_rewrite": "stripe-go models this field its own way and apidrift has no verified rewrite for it",
+    "unbounded": "the code around this call can change variables in ways apidrift cannot follow, or the file "
+    "cannot be read with certainty",
 }
 NOT_ATTEMPTED_WHY = {"arguments_not_visible": "arguments are not fully visible"}
 UNKNOWN_UNFIXABLE = "apidrift could not rewrite this site safely"

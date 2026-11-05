@@ -371,7 +371,7 @@ def render_unread_issue(full_name: str, sha: str, payload: dict) -> tuple[str, s
     joined = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " or " + names[-1]
     title = f"apidrift cannot read {joined} call sites in this repository yet"
     body = [
-        f"{unread_sentence(unread)} apidrift reads Python, JavaScript, TypeScript, Ruby and Go call sites and finds literal",
+        f"{unread_sentence(unread)} apidrift reads Python, JavaScript, TypeScript, Ruby, PHP and Go call sites and finds literal",
         "api.stripe.com URLs in any file; Stripe calls made through the SDK in other languages are invisible to it today.",
         "",
         "What this means: a Stripe release can break code in those files without apidrift opening an issue here.",
