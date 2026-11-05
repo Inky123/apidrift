@@ -21,7 +21,7 @@ against Stripe's own sample repository, apidrift flags five servers: <https://gi
    informational) and records the release that introduced it.
 2. **Scan.** On install, on every push to the default branch, and on every Stripe release, the
    repository tarball is downloaded, scanned for Stripe call sites (Python via `ast`; JavaScript,
-   TypeScript and Ruby via a bracket-aware parser; literal `api.stripe.com` URLs anywhere), and
+   TypeScript and Ruby via a bracket-aware parser; Go (stripe-go) via a tokenizer; literal `api.stripe.com` URLs anywhere), and
    deleted. SDK method names map to endpoints through the spec's own `x-stripeOperations`. The code
    is never executed: scanning runs in a separate process with no credentials, a memory cap and timeout.
 3. **Cross.** Each call site's request fields are matched against the diff. A removed field hits a

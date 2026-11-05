@@ -352,16 +352,17 @@ def test_files_in_unparsed_languages_that_mention_stripe_are_counted_not_passed_
     (tmp_path / "other.go").write_text("package main\nfunc g() {}\n")
     (tmp_path / "Pay.php").write_text("<?php $stripe->paymentIntents->create(['amount' => 1]);\n")
     (tmp_path / "Pay.java").write_text("class Pay { void f() { PaymentIntent.create(params); } }\n")
+    (tmp_path / "pay.rs").write_text("// stripe\nfn f() { PaymentIntent::create(&client, params); }\n")
     result = scan_repo(tmp_path, index)
-    assert result.unread == {"Go": 1, "PHP": 1}
+    assert result.unread == {"PHP": 1, "Rust": 1}  # Go is read now: pay.go imports no stripe-go package it calls
     assert result.usages == []
     text = render_scan_text(result)
-    assert "not read: apidrift does not read Go or PHP call sites yet: 1 Go file and 1 PHP file mention Stripe" in text
-    assert json.loads(render_scan_json(result))["unread"] == {"Go": 1, "PHP": 1}
+    assert "not read: apidrift does not read PHP or Rust call sites yet: 1 PHP file and 1 Rust file mention Stripe" in text
+    assert json.loads(render_scan_json(result))["unread"] == {"PHP": 1, "Rust": 1}
 
 
-def test_the_module_fixture_counts_its_go_file_as_unread(result):
-    assert result.unread == {"Go": 1}
+def test_the_module_fixture_reads_its_go_file(result):
+    assert result.unread == {}
 
 
 def test_unread_sentence_wording():
@@ -381,5 +382,6 @@ def test_scan_text_matches_scan_repo_for_one_file_and_needs_no_filesystem(result
     usages, unresolved, unread = scan_text(JS, "pay.js", index)
     assert usages == [u for u in result.usages if u.file == "pay.js"]
     assert unresolved == [(f, line, call) for f, line, call in result.unresolved if f == "pay.js"] and unread is None
-    assert scan_text(GO, "x/main.go", index)[2] == "Go"
+    assert scan_text(GO, "x/main.go", index)[2] is None
+    assert scan_text(GO, "x/main.rs", index)[2] == "Rust"
     assert scan_text(README, "docs/x.md", index)[0][0].language == "doc"

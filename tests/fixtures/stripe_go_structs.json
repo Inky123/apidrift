@@ -1,0 +1,296 @@
+{
+ "source": "github.com/stripe/stripe-go: params struct fields as [form tag, Go type], read from the tagged source",
+ "v86.0.0": {
+  "api_version": "2026-05-27.dahlia",
+  "structs": {
+   "CheckoutSessionCreateParams": {
+    "PaymentMethodTypes": [
+     "payment_method_types",
+     "[]*string"
+    ]
+   },
+   "CheckoutSessionParams": {
+    "PaymentMethodTypes": [
+     "payment_method_types",
+     "[]*string"
+    ]
+   },
+   "FinancialConnectionsSessionCreateFiltersParams": {
+    "Countries": [
+     "countries",
+     "[]*string"
+    ]
+   },
+   "FinancialConnectionsSessionFiltersParams": {
+    "Countries": [
+     "countries",
+     "[]*string"
+    ]
+   },
+   "InvoiceCreatePreviewSubscriptionDetailsParams": {
+    "BillingCycleAnchor": [
+     "billing_cycle_anchor",
+     "*int64"
+    ],
+    "BillingCycleAnchorNow": [
+     "-",
+     "*bool"
+    ],
+    "BillingCycleAnchorUnchanged": [
+     "-",
+     "*bool"
+    ]
+   },
+   "PaymentIntentConfirmParams": {
+    "PaymentMethodTypes": [
+     "payment_method_types",
+     "[]*string"
+    ]
+   },
+   "PaymentIntentCreateParams": {
+    "PaymentMethodTypes": [
+     "payment_method_types",
+     "[]*string"
+    ]
+   },
+   "PaymentIntentParams": {
+    "PaymentMethodTypes": [
+     "payment_method_types",
+     "[]*string"
+    ]
+   },
+   "PaymentIntentUpdateParams": {
+    "PaymentMethodTypes": [
+     "payment_method_types",
+     "[]*string"
+    ]
+   },
+   "PaymentMethodCreateParams": {
+    "Payto": [
+     "payto",
+     "*PaymentMethodCreatePaytoParams"
+    ],
+    "Type": [
+     "type",
+     "*string"
+    ]
+   },
+   "PaymentMethodParams": {
+    "Payto": [
+     "payto",
+     "*PaymentMethodPaytoParams"
+    ],
+    "Type": [
+     "type",
+     "*string"
+    ]
+   },
+   "PaymentMethodUpdateParams": {
+    "Payto": [
+     "payto",
+     "*PaymentMethodUpdatePaytoParams"
+    ]
+   },
+   "SetupIntentCreateParams": {
+    "PaymentMethodTypes": [
+     "payment_method_types",
+     "[]*string"
+    ]
+   },
+   "SetupIntentParams": {
+    "PaymentMethodTypes": [
+     "payment_method_types",
+     "[]*string"
+    ]
+   },
+   "SetupIntentUpdateParams": {
+    "PaymentMethodTypes": [
+     "payment_method_types",
+     "[]*string"
+    ]
+   },
+   "SubscriptionParams": {
+    "BillingCycleAnchor": [
+     "billing_cycle_anchor",
+     "*int64"
+    ],
+    "BillingCycleAnchorNow": [
+     "-",
+     "*bool"
+    ],
+    "BillingCycleAnchorUnchanged": [
+     "-",
+     "*bool"
+    ]
+   },
+   "SubscriptionResumeParams": {
+    "BillingCycleAnchor": [
+     "billing_cycle_anchor",
+     "*string"
+    ]
+   },
+   "SubscriptionUpdateParams": {
+    "BillingCycleAnchor": [
+     "billing_cycle_anchor",
+     "*int64"
+    ],
+    "BillingCycleAnchorNow": [
+     "-",
+     "*bool"
+    ],
+    "BillingCycleAnchorUnchanged": [
+     "-",
+     "*bool"
+    ]
+   }
+  }
+ },
+ "v87.0.0": {
+  "api_version": "2026-09-30.endive",
+  "structs": {
+   "CheckoutSessionCreateParams": {
+    "AllowedPaymentMethodTypes": [
+     "allowed_payment_method_types",
+     "[]*string"
+    ]
+   },
+   "CheckoutSessionParams": {
+    "AllowedPaymentMethodTypes": [
+     "allowed_payment_method_types",
+     "[]*string"
+    ]
+   },
+   "FinancialConnectionsSessionCreateFiltersParams": {
+    "Country": [
+     "country",
+     "*string"
+    ]
+   },
+   "FinancialConnectionsSessionFiltersParams": {
+    "Country": [
+     "country",
+     "*string"
+    ]
+   },
+   "InvoiceCreatePreviewSubscriptionDetailsBillingCycleAnchorParams": {
+    "Timestamp": [
+     "timestamp",
+     "*int64"
+    ],
+    "Type": [
+     "type",
+     "*string"
+    ]
+   },
+   "InvoiceCreatePreviewSubscriptionDetailsParams": {
+    "BillingCycleAnchor": [
+     "billing_cycle_anchor",
+     "*InvoiceCreatePreviewSubscriptionDetailsBillingCycleAnchorParams"
+    ]
+   },
+   "PaymentIntentConfirmParams": {
+    "AllowedPaymentMethodTypes": [
+     "allowed_payment_method_types",
+     "[]*string"
+    ]
+   },
+   "PaymentIntentCreateParams": {
+    "AllowedPaymentMethodTypes": [
+     "allowed_payment_method_types",
+     "[]*string"
+    ]
+   },
+   "PaymentIntentParams": {
+    "AllowedPaymentMethodTypes": [
+     "allowed_payment_method_types",
+     "[]*string"
+    ]
+   },
+   "PaymentIntentUpdateParams": {
+    "AllowedPaymentMethodTypes": [
+     "allowed_payment_method_types",
+     "[]*string"
+    ]
+   },
+   "PaymentMethodCreateParams": {
+    "Payto": [
+     "payto",
+     "*PaymentMethodCreatePaytoParams"
+    ],
+    "Type": [
+     "type",
+     "*string"
+    ]
+   },
+   "PaymentMethodParams": {
+    "Payto": [
+     "payto",
+     "*PaymentMethodPaytoParams"
+    ],
+    "Type": [
+     "type",
+     "*string"
+    ]
+   },
+   "PaymentMethodUpdateParams": {},
+   "SetupIntentCreateParams": {
+    "AllowedPaymentMethodTypes": [
+     "allowed_payment_method_types",
+     "[]*string"
+    ]
+   },
+   "SetupIntentParams": {
+    "AllowedPaymentMethodTypes": [
+     "allowed_payment_method_types",
+     "[]*string"
+    ]
+   },
+   "SetupIntentUpdateParams": {
+    "AllowedPaymentMethodTypes": [
+     "allowed_payment_method_types",
+     "[]*string"
+    ]
+   },
+   "SubscriptionParams": {
+    "BillingCycleAnchor": [
+     "billing_cycle_anchor",
+     "*int64"
+    ],
+    "BillingCycleAnchorNow": [
+     "-",
+     "*bool"
+    ],
+    "BillingCycleAnchorUnchanged": [
+     "-",
+     "*bool"
+    ]
+   },
+   "SubscriptionResumeBillingCycleAnchorParams": {
+    "Type": [
+     "type",
+     "*string"
+    ]
+   },
+   "SubscriptionResumeParams": {
+    "BillingCycleAnchor": [
+     "billing_cycle_anchor",
+     "*SubscriptionResumeBillingCycleAnchorParams"
+    ]
+   },
+   "SubscriptionUpdateParams": {
+    "BillingCycleAnchor": [
+     "billing_cycle_anchor",
+     "*int64"
+    ],
+    "BillingCycleAnchorNow": [
+     "-",
+     "*bool"
+    ],
+    "BillingCycleAnchorUnchanged": [
+     "-",
+     "*bool"
+    ]
+   }
+  }
+ }
+}
