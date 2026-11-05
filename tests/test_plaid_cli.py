@@ -39,7 +39,7 @@ def repo(tmp_path):
     (root / "src").mkdir(parents=True)
     (root / "src" / "plaid.ts").write_text(NODE)
     (root / "bank.py").write_text(PYTHON)
-    (root / "legacy.js").write_text("const plaid = require('plaid');\nconst old = new plaid.Client(cfg);\nold.getAccounts(token);\n")
+    (root / "legacy.js").write_text("const plaid = require('plaid');\nconst old = new plaid.Client(cfg);\nold.getCategories(cb);\nold.getAccounts(token);\n")
     (root / "Bank.java").write_text("// PlaidApi plaidClient\n")
     (root / "billing.py").write_text("import stripe\nstripe.Charge.create(amount=1)\n")
     return root
@@ -51,18 +51,19 @@ def test_scan_lists_plaid_calls_in_node_and_python_and_says_what_it_did_not_read
     payload = json.loads(capsys.readouterr().out)
     assert [(u["file"], u["line"], u["method"], u["path"], u["complete"]) for u in payload["usages"]] == [
         ("bank.py", 6, "post", "/transactions/sync", True),
+        ("legacy.js", 4, "post", "/accounts/get", False),  # the pre-2021 client: endpoint known, fields not
         ("src/plaid.ts", 4, "post", "/link/token/create", True),
         ("src/plaid.ts", 7, "post", "/transactions/sync", False),
     ]
     assert payload["unread"] == {"Java": 1}
-    assert payload["unresolved"] == [{"file": "legacy.js", "line": 3, "call": "old.getAccounts"}]
+    assert payload["unresolved"] == [{"file": "legacy.js", "line": 3, "call": "old.getCategories"}]  # not in this spec
     assert payload["files_scanned"] == 4  # the Stripe-only file is not read
 
     assert main(["scan", str(repo), "--provider", "plaid", "--spec", spec]) == 0
     text = capsys.readouterr().out
-    assert "3 Plaid call sites in 2 files (typescript 2, python 1); 4 files mention plaid; 1 other plaid calls (not matched to an endpoint)" in text
+    assert "4 Plaid call sites in 3 files (typescript 2, javascript 1, python 1); 4 files mention plaid; 1 other plaid calls (not matched to an endpoint)" in text
     assert "not read: apidrift does not read Java call sites yet: 1 Java file mention Plaid and were not checked." in text
-    assert "other plaid calls (the pre-2021 SDK's methods, SDK helpers), not matched to an endpoint:" in text
+    assert "other plaid calls (SDK helpers, methods whose endpoint the stored specs lack), not matched to an endpoint:" in text
 
 
 def test_the_default_provider_still_reads_stripe_and_ignores_plaid_calls(tmp_path, repo, capsys):
@@ -93,11 +94,11 @@ def test_impact_reports_a_removed_request_field_where_it_is_sent_and_possibly_wh
     args = ["impact", str(repo), "--provider", "plaid", "--old", write(tmp_path, "a.json", old), "--new", write(tmp_path, "b.json", new)]
     assert main(args + ["--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
-    assert payload["call_sites"] == 3
+    assert payload["call_sites"] == 4
     assert [(i["usage"]["file"], i["usage"]["line"], i["change"]["kind"], i["certainty"]) for i in payload["impacts"]] == [
         ("bank.py", 6, "body_removed", "affected"), ("src/plaid.ts", 7, "body_removed", "possible"),
     ]
     assert main(args) == 1
     text = capsys.readouterr().out
-    assert "3 Plaid call sites in 2 files (typescript 2, python 1); 2 hit by this upgrade: 2 breaking" in text
-    assert "other plaid calls (the pre-2021 SDK's methods, SDK helpers): 1 (apidrift scan lists them)" in text
+    assert "4 Plaid call sites in 3 files (typescript 2, javascript 1, python 1); 2 hit by this upgrade: 2 breaking" in text
+    assert "other plaid calls (SDK helpers, methods whose endpoint the stored specs lack): 1 (apidrift scan lists them)" in text

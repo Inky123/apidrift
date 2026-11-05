@@ -251,14 +251,31 @@ def test_a_known_variable_is_a_client_only_where_its_own_assignment_makes_it_one
     assert [c.line for c in found] == [3, 5] and other == []  # an untyped parameter of that name may be handed the client
 
 
-def test_the_pre_2021_client_is_recognised_and_its_methods_are_listed_as_not_matched():
+def test_the_pre_2021_client_resolves_by_its_own_method_table_with_fields_unseen():
     found, other = extract("""
         const plaid = require('plaid');
         const client = new plaid.Client({ clientID: id, secret, env: plaid.environments.sandbox });
         client.getTransactions(token, start, end, { count: 250 }, cb);
         const res = await client.exchangePublicToken(publicToken);
+        client.getAllTransactions(token, start, end);
+        client.getCategories(cb);
+        client.somethingElse();
+        plaidClient.getTransactions(token, start, end);
     """, head="")
-    assert found == [] and other == [(4, "client.getTransactions"), (5, "client.exchangePublicToken")]
+    assert [(c.line, c.call, c.resolved.path, sorted(c.fields.paths), sorted(c.fields.hidden)) for c in found] == [
+        (4, "client.getTransactions", "/transactions/get", [], [""]),
+        (5, "client.exchangePublicToken", "/item/public_token/exchange", [], [""]),
+        (6, "client.getAllTransactions", "/transactions/get", [], [""]),
+    ]
+    # an endpoint the specs do not have, a method the client never had; a client known by name alone is not asked
+    assert other == [(7, "client.getCategories"), (8, "client.somethingElse")]
+
+
+def test_the_legacy_table_names_only_paths_and_every_one_is_a_post_in_the_real_shape():
+    from apidrift.plaidlegacy import NODE_METHODS
+
+    assert len(NODE_METHODS) == 52 and all(path.startswith("/") and path == path.lower() for path in NODE_METHODS.values())
+    assert NODE_METHODS["createStripeToken"] == NODE_METHODS["createProcessorToken"] == "/processor/token/create"
 
 
 def test_scan_text_tags_language_reads_urls_and_names_unread_languages():

@@ -47,14 +47,13 @@ def place(changes: list[Change], old: Spec, new: Spec, called: set[str] | None =
 
 
 def _carriers(old: Spec, new: Spec, called: set[str] | None) -> dict[str, set[str]]:
-    """Schema name -> labels of the operations whose response can carry it, in either spec."""
+    """Schema name -> labels of the operations whose response carried it before the change and that still
+    exist. An operation the old spec does not have, or one that only now returns the object, lost nothing."""
     out: dict[str, set[str]] = {}
-    for key, op in new.operations.items():
-        if called is not None and op.path not in called:
-            continue
-        before = old.operations.get(key)
-        for name in op.receives | (before.receives if before else frozenset()):
-            out.setdefault(name, set()).add(op.label)
+    for key, before in old.operations.items():
+        if key in new.operations and (called is None or before.path in called):
+            for name in before.receives:
+                out.setdefault(name, set()).add(before.label)
     return out
 
 

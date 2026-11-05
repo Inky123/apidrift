@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from . import jsparse, jsroots
 from .jsparse import Fields, Mask, Source
 from .jsroots import NAME, NO_ASSIGN_OP, TYPE_ANN
+from .plaidlegacy import NODE_METHODS
 from .plaidmap import PlaidIndex
 
 QUOTED = r"['\"](?P<spec>[^'\"\n]*)['\"]"
@@ -162,6 +163,13 @@ def extract(text: str, index: PlaidIndex) -> tuple[list[Found], list[tuple[int, 
             continue
         resolved = index.method(chain[-1]) if "_" not in chain[-1] else None
         line = src.text.count("\n", 0, m.start()) + 1
+        if resolved is None and holds and chain[-1] in NODE_METHODS:  # the pre-2021 client: positional arguments
+            resolved = index.endpoint(NODE_METHODS[chain[-1]], chain[-1])
+            if resolved is not None:
+                unseen = Fields()
+                unseen.hide("")
+                found.append(Found(line, jsroots.display(m.group(1)), resolved, unseen))
+                continue
         if resolved is None:
             if holds:
                 other.append((line, jsroots.display(m.group(1))))

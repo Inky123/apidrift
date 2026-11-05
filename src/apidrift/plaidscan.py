@@ -71,5 +71,5 @@ def _urls(text: str, rel: str, index: PlaidIndex, reads: frozenset[str], taken: 
 
 READER = Reader(
     vendor="Plaid", hint=HINT, scan_text=scan_text,
-    others="the pre-2021 SDK's methods, SDK helpers", others_are="not matched to an endpoint",
+    others="SDK helpers, methods whose endpoint the stored specs lack", others_are="not matched to an endpoint",
 )

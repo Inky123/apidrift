@@ -216,6 +216,16 @@ def test_a_schema_returned_directly_keeps_its_operations_and_gains_the_ones_that
     assert placed.affects == ("POST /accounts/get", "POST /item/get", "POST /transactions/get")
 
 
+def test_an_operation_that_is_new_or_only_now_returns_the_object_lost_nothing():
+    old, new = plaid_doc(), plaid_doc()
+    schemas(new)["Transaction"]["properties"].pop("merchant_name")
+    new["paths"]["/transactions/recurring/get"] = new["paths"]["/transactions/get"]  # a new endpoint returning it
+    schemas(new)["AccountsGetResponse"]["properties"]["recent"] = {"type": "array", "items": ref("Transaction")}
+    old, new = load_spec(old), load_spec(new)
+    [placed] = [c for c in place(diff_specs(old, new), old, new) if c.kind == "response_field_removed"]
+    assert placed.affects == ("POST /transactions/get", "POST /transactions/sync")
+
+
 def test_receives_follows_maps_and_unions_that_field_types_do_not_show():
     doc = plaid_doc()
     schemas(doc)["AccountsGetResponse"]["properties"]["by_id"] = {"type": "object", "additionalProperties": ref("Geo")}

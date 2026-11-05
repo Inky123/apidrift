@@ -59,6 +59,11 @@ class PlaidIndex:
             return None
         return self.method("_".join(snake(part) for part in parts))
 
+    def endpoint(self, path: str, name: str) -> Resolved | None:
+        """The operation at a spec path a hand-written client method posts to, if some spec has that path."""
+        methods = self.methods_for(path)
+        return Resolved(methods[0], path, name) if methods else None
+
     def match_path(self, url_path: str) -> str | None:
         """Spec path for a concrete URL path such as ``/transactions/sync``."""
         segments = [WILD if re.search(r"[${}:%#+\"']", s) else s for s in url_path.strip("/").split("/")]
