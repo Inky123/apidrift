@@ -58,16 +58,40 @@ def test_the_second_argument_is_http_options_and_is_not_read():
     assert call.fields.paths == {"access_token"} and call.fields.complete
 
 
-def test_a_request_variable_is_followed_to_its_literal_and_writes_into_it_leave_it_incomplete():
+def test_a_request_built_key_by_key_is_read_with_the_objects_written_into_it():
     call = one("""
-        async function sync(token, cursor) {
+        async function sync(token, cursor, days) {
           const request = { access_token: token };
           if (cursor) request.cursor = cursor;
+          if (days) { request['options'] = { days_requested: days }; }
+          Object.assign(request, { count: 100 });
+          delete request.count;
           return client.transactionsSync(request);
         }
     """)
-    assert call.fields.paths == {"access_token", "cursor"}
-    assert not call.fields.complete and call.fields.hidden == {""}
+    assert call.fields.paths == {"access_token", "cursor", "options", "options.days_requested", "count"}
+    assert call.fields.complete and call.fields.hidden == set()
+
+
+def test_a_request_variable_stays_open_when_keys_or_writers_are_not_visible():
+    found, _ = extract("""
+        const shared = { access_token: t };
+        function prepare() { shared.cursor = load(); }
+        async function a(key, v) { const r = { access_token: t }; r[key] = v; return client.transactionsSync(r); }
+        async function b(more) { const r = { access_token: t }; Object.assign(r, more); return client.transactionsSync(r); }
+        async function c() { const r = { access_token: t }; decorate(r); return client.transactionsSync(r); }
+        async function d() { const r = { access_token: t }; r.options.days_requested = 3; return client.transactionsSync(r); }
+        async function e() { return client.transactionsSync(shared); }
+        async function f() { const r = {}; return client.transactionsSync(r); }
+    """)
+    assert [(sorted(c.fields.paths), sorted(c.fields.hidden)) for c in found] == [
+        (["access_token"], [""]),
+        (["access_token"], [""]),
+        (["access_token"], [""]),
+        (["access_token", "options"], ["options."]),
+        (["access_token"], [""]),  # another function writes into the module-level object
+        ([], []),
+    ]
 
 
 def test_a_typed_literal_binding_and_a_cast_are_read():

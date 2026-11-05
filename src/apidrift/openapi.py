@@ -60,6 +60,7 @@ class Operation:
     body: dict[str, Field]
     response_schemas: tuple[str, ...]
     sends: frozenset[str] = frozenset()  # every named schema the request can carry, however deep
+    receives: frozenset[str] = frozenset()  # every named schema a 2xx response can carry, however deep
     listed: dict[str, int] = field(default_factory=dict)  # those whose fields ``body`` lists, and at which depth
 
     @property
@@ -241,6 +242,10 @@ def _response_schemas(responses: Any, refs: Doc) -> tuple[str, ...]:
     return tuple(sorted(names))
 
 
+def _successes(responses: Any) -> list:
+    return [resp for code, resp in responses.items() if str(code).startswith("2")] if isinstance(responses, dict) else []
+
+
 def _params(raw: list, refs: Doc) -> dict[str, Param]:
     """Parameters by ``location:name``; later entries (the operation's own) replace the path's shared ones."""
     out: dict[str, Param] = {}
@@ -295,6 +300,7 @@ def load_spec(doc: dict) -> Spec:
                 body=_body(op.get("requestBody"), refs, listed),
                 response_schemas=_response_schemas(op.get("responses"), refs),
                 sends=frozenset(refs.reach([shared, op.get("parameters"), op.get("requestBody")])),
+                receives=frozenset(refs.reach(_successes(op.get("responses")))),
                 listed=listed,
             )
             spec.operations[operation.key] = operation

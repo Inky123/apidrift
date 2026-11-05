@@ -93,8 +93,10 @@ def _impact(change: Change, usage: Usage) -> Impact | None:
     kind = change.kind
     if kind in ("endpoint_removed", "endpoint_deprecated"):
         return Impact(usage, change, AFFECTED, "every call to this endpoint")
-    if kind.startswith(("param_", "body_")):
+    if kind.startswith(("param_", "body_")) or (kind.startswith("request_") and change.method):
         return _request_impact(change, usage)
+    if kind.startswith("request_"):
+        return _unplaced_impact(change, usage)
     return _response_impact(change, usage)
 
 
@@ -120,6 +122,14 @@ def _request_impact(change: Change, usage: Usage) -> Impact | None:
     if not usage.hides(target):
         return None
     return Impact(usage, change, POSSIBLE, "arguments are not fully visible at this call")
+
+
+def _unplaced_impact(change: Change, usage: Usage) -> Impact | None:
+    """A change to a schema this call's request can carry, when where it sits in the request is not known
+    (:func:`localize.place` found no path to it): nothing here says whether the call sends it."""
+    if change.kind.split("_", 1)[1] in RELAXATIONS:
+        return None
+    return Impact(usage, change, POSSIBLE, f"this request can carry {change.schema}; whether it does here is not visible")
 
 
 def _migrated(change: Change, usage: Usage, action: str) -> bool:

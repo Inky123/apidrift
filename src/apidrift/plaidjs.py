@@ -33,6 +33,8 @@ SDK_PACKAGE = "plaid"
 CLIENT_CLASSES = ("PlaidApi", "Client")  # Client: the pre-2021 SDK
 NOT_A_MODULE = re.compile(r"plaid-link|plaid-threads|^@plaid/", re.I)  # Link's browser and mobile SDKs: no API client
 ENDS = r"\s*(?:;|\}|$)"
+VARIABLE = re.compile(rf"({NAME})\s*(?:!|\bas\s+[\w.<>\[\]]+\s*)?$")  # a bare name, ``name!`` or ``name as T``
+WRITE = re.compile(r"\s*(?:['\"]\s*\]\s*)?=(?![=>])\s*")  # what follows the key of ``request.key = `` / ``request['key'] = ``
 
 
 class Clients:
@@ -160,16 +162,47 @@ def request_fields(src: Source, span: tuple[int, int], bindings: jsroots.Binding
     if text[i] == "{":
         src.object_fields(i + 1, "", out)
         return out
-    m = re.compile(rf"({NAME})\s*(?:!|\bas\s+[\w.<>\[\]]+\s*)?$").match(text[i:b].rstrip())
+    m = VARIABLE.match(text[i:b].rstrip())
     reaching = bindings.reaching(m.group(1), i) if m else []
     if not reaching:
         out.hide("")
     for binding in reaching:
         if binding.literal is None:
             out.hide("")
-            continue
-        sub = jsparse.variable_fields(src, bindings, binding, i)
-        out.paths |= sub.paths
-        out.hidden |= sub.hidden
-        out.complete = out.complete and sub.complete
+        else:
+            _variable(src, bindings, binding, i, out)
     return out
+
+
+def _variable(src: Source, bindings: jsroots.Bindings, binding: jsroots.Binding, at: int, out: Fields) -> None:
+    """The literal a request variable was bound to, plus what is written into it before the call. Requests
+    are commonly built up key by key (``request.cursor = cursor``), so a write with a visible key adds that
+    key and the object assigned to it; only a computed key, a merge of something unseen, or handing the
+    variable to other code leaves the request open."""
+    text = src.text
+    src.object_fields(binding.literal + 1, "", out)
+    mutations = bindings.mutations(binding.name, binding.literal, at)
+    for mutation in mutations:
+        if mutation.literal is not None:  # Object.assign(request, { ... })
+            src.object_fields(mutation.literal + 1, "", out)
+        elif mutation.key is None:  # request[name] = value, Object.assign(request, other)
+            out.hide("")
+        else:
+            out.add(mutation.key)
+            write = WRITE.match(text, mutation.key_end)
+            if write is None:  # request.user.name = value: deeper than the key
+                out.hide(mutation.key + ".")
+            else:
+                src.value(write.end(), mutation.key, out)
+    scopes, here = bindings.scopes, bindings.scopes.innermost(at)
+    if scopes.innermost(binding.pos) != here:  # bound in an outer scope: another function may write into it first
+        writes = jsroots._mutation_re(binding.name).finditer(text)
+        if any(not bindings.mask.covers(w.start()) and scopes.innermost(w.start()) != here for w in writes):
+            out.hide("")
+    whole = re.compile(rf"(?<![\w$.]){re.escape(binding.name)}(?![\w$])")
+    for use in whole.finditer(text, binding.literal, at):
+        if bindings.mask.covers(use.start()) or any(w.start <= use.start() < w.end for w in mutations):
+            continue
+        if text[src.skip_space(use.end()):][:1] not in (".", "[", "=", ":"):
+            out.hide("")  # passed to a function, spread into another object or returned before the call
+            break
