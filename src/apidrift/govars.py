@@ -75,6 +75,7 @@ class Vars:
         self.src, self.roots = src, roots
         self._decls: dict[str, list[Decl]] = {}
         self._params: dict[int, set[str]] = {}  # function body -> names its signature declares
+        self._for: dict[tuple[str, int], Decl | None] = {}
         for body, func in src.funcs.items():
             self._params[body] = {
                 src.tok[j] for j in range(func + 1, body)
@@ -167,14 +168,14 @@ class Vars:
 
     def decl_for(self, name: str, t: int) -> Decl | None:
         """The declaration of ``name`` that an identifier at token ``t`` refers to."""
-        best = None
-        for d in self.decls(name):
-            if not d.declares or d.tok > t:
-                continue
-            if d.tok == t or (d.end <= t and d.lo < t < d.hi):
-                if best is None or d.tok > best.tok:
-                    best = d
-        return best
+        key = (name, t)
+        if key not in self._for:
+            self._for[key] = next(  # the nearest one before ``t`` whose scope holds it
+                (d for d in reversed(self.decls(name))
+                 if d.declares and d.tok <= t and (d.tok == t or (d.end <= t and d.lo < t < d.hi))),
+                None,
+            )
+        return self._for[key]
 
     def shadowed(self, name: str, t: int) -> bool:
         """A local variable or parameter called ``name`` is in scope at ``t`` (so it is not the package)."""

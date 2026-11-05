@@ -16,6 +16,7 @@ stripe-go only for ``stripe.Event`` has no such call and yields nothing.
 
 from __future__ import annotations
 
+import bisect
 import re
 from dataclasses import dataclass
 
@@ -135,7 +136,8 @@ class GoFile:
             out.hidden.add("")
             return
         events = [decl] + [
-            d for d in vars_.decls(name) if not d.declares and d.tok < use and vars_.decl_for(name, d.tok) is decl
+            d for d in vars_.decls(name)
+            if not d.declares and decl.lo < d.tok < use and vars_.decl_for(name, d.tok) is decl
         ]
         fn = src.func_of(use)
         if fn >= 0 and any(fn < g < src.match[fn] for g in src.ids("goto")):
@@ -161,8 +163,9 @@ class GoFile:
                 self._event(e, reader, out)
         skip = {e.tok for e in events} | {use}
         after: list[int] = []
-        for t in src.ids(name):
-            if t <= dom.tok or t in skip or src.tok[t - 1] == "." or vars_.decl_for(name, t) is not decl:
+        mentions = src.ids(name)
+        for t in mentions[bisect.bisect_right(mentions, dom.tok) : bisect.bisect_left(mentions, decl.hi)]:
+            if t in skip or src.tok[t - 1] == "." or vars_.decl_for(name, t) is not decl:
                 continue
             if t < use:
                 self._use(t, use, struct or "", reader, out)
@@ -278,7 +281,9 @@ def calls(text: str, go: GoIndex) -> tuple[list[GoCall], list[tuple[int, str]], 
             if f.vars.shadowed(parts[0], first) or sub.rsplit("/", 1)[-1] in QUIET_PACKAGES:
                 continue
             resolved = go.resolve(PACKAGE, sub, verb)
-        elif len(parts) >= 3 and go.owns(SERVICE, parts[-2]):
+        elif len(parts) < 3 or not parts[-2][0].isupper():
+            continue  # client fields are exported; a two-name chain has no client
+        elif go.owns(SERVICE, parts[-2]):
             resolved = go.resolve(SERVICE, parts[-2], verb)
         elif len(parts) >= 3 and go.owns(API, parts[-2]):
             args = src.split(paren + 1, src.match[paren])

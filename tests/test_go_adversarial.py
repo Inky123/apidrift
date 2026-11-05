@@ -183,6 +183,19 @@ def test_truncated_or_broken_source_never_raises(text):
     usages(text)  # no exception: what is found in a file that does not parse is best effort
 
 
+def test_a_file_the_reader_gives_up_on_is_reported_as_not_read_never_as_clean(monkeypatch):
+    from apidrift import goparse
+    from apidrift.scanner import scan_text
+    from gospec import specs
+
+    def boom(text, index):
+        raise IndexError("token stream ended inside a call")
+
+    monkeypatch.setattr(goparse, "extract", boom)
+    found, missing, unread = scan_text(go("func f() {\n\tcustomer.New(nil)\n}\n", "customer"), "pay.go", specs()[0])
+    assert (found, missing, unread) == ([], [], "Go")
+
+
 @pytest.mark.parametrize("snippet, kinds", [
     ("func f() { if x == (T{}) { g() } }", [BLOCK, LIT, BLOCK]),
     ("func f() { for _, v := range []string{\"a\"} { g(v) } }", [BLOCK, LIT, BLOCK]),
