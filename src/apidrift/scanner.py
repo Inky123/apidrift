@@ -1,7 +1,7 @@
 """Find the Stripe calls in a checkout: which endpoint, which request fields, where.
 
 Python files go through :mod:`pyparse` (``ast``), JavaScript, TypeScript and
-Ruby through :mod:`jsparse`. Every text file is also
+Ruby through :mod:`jsparse`, Go (stripe-go) through :mod:`goparse`. Every text file is also
 searched for literal ``api.stripe.com/v1/...`` URLs, which identify the
 endpoint but not the fields; in documentation, fixtures and tests (mostly
 HTTP stubs) those are tagged ``language="doc"`` and reported separately.
@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import jsparse, pyparse
+from . import goparse, jsparse, pyparse
 from .sdkmap import Resolved, SdkIndex
 
 SKIP_DIRS = {"node_modules", "vendor", "site-packages", "__pycache__"}  # skipped anywhere
@@ -30,6 +30,7 @@ LANGUAGES = {
     ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
     ".ts": "typescript", ".tsx": "typescript", ".mts": "typescript", ".cts": "typescript",
     ".rb": "ruby",
+    ".go": "go",
 }
 TEXT_EXT = set(LANGUAGES) | {
     ".go", ".php", ".java", ".kt", ".cs", ".sh", ".bash", ".zsh", ".yaml", ".yml", ".json", ".toml", ".env",
@@ -41,13 +42,13 @@ TEXT_EXT = set(LANGUAGES) | {
 # found. Swift, Kotlin and Dart are left out: those are Stripe's mobile SDKs, which talk to a different,
 # publishable-key surface rather than the server endpoints this diff covers.
 UNREAD_LANGUAGES = {
-    ".go": "Go", ".php": "PHP", ".java": "Java", ".cs": "C#", ".rs": "Rust", ".ex": "Elixir", ".exs": "Elixir",
+    ".php": "PHP", ".java": "Java", ".cs": "C#", ".rs": "Rust", ".ex": "Elixir", ".exs": "Elixir",
     ".scala": "Scala",
 }
 DOC_EXT = {".md", ".txt", ".yml", ".yaml", ".json", ".env"}
 DOC_DIRS = {"docs", "doc", "fixtures", "__fixtures__", "cassettes"}
 TEST_DIRS = {"spec", "specs", "test", "tests", "__tests__", "__mocks__", "e2e", "cypress"}
-TEST_FILE = re.compile(r"(?:^test_.*\.py|.*_test\.py|.*_spec\.rb|.*_test\.rb|.*\.(?:test|spec)\.[cm]?[jt]sx?)$")
+TEST_FILE = re.compile(r"(?:^test_.*\.py|.*_test\.py|.*_spec\.rb|.*_test\.rb|.*_test\.go|.*\.(?:test|spec)\.[cm]?[jt]sx?)$")
 MAX_BYTES = 1_500_000
 STRIPE_HINT = re.compile(r"stripe", re.I)
 URL_RE = re.compile(r"api\.stripe\.com(/v\d+(?:/[^\s'\"`<>)\],;?]+)+)")
@@ -181,6 +182,8 @@ def scan_text(text: str, rel: str, index: SdkIndex) -> tuple[list[Usage], list[t
     unread_name: str | None = None
     if language == "python":
         found, missing = _scan_python(text, rel, index, reads)
+    elif language == "go":
+        found, missing, unread_name = _scan_go(text, rel, index)
     elif language:
         found, missing = _scan_dynamic(text, rel, index, reads, language)
     else:
@@ -286,6 +289,23 @@ def _scan_python(text: str, rel: str, index: SdkIndex, reads: frozenset[str]):
         for f in found
     ]
     return usages, [(rel, line, call) for line, call in missing]
+
+
+# --- Go -----------------------------------------------------------------------
+
+
+def _scan_go(text: str, rel: str, index: SdkIndex):
+    if index.go is None:
+        return [], [], None
+    try:
+        found, missing, reads = goparse.extract(text, index.go)
+    except (IndexError, RecursionError):  # source the tokeniser's assumptions do not hold for: say it was not read
+        return [], [], "Go"
+    usages = [
+        Usage(rel, f.line, f.resolved.method, f.resolved.path, f.call, frozenset(f.fields), f.complete, "go", reads, f.hidden)
+        for f in found
+    ]
+    return usages, [(rel, line, call) for line, call in missing], None
 
 
 # --- JavaScript / TypeScript / Ruby -------------------------------------------

@@ -32,11 +32,18 @@ UNFIXABLE_WHY = {
     "too_large": "the file is larger than apidrift rewrites",
     "cap": "the repository has more files to fix than one pull request carries",
     "unsupported_key_form": "the key is written in a form apidrift does not rewrite",
+    "sdk_no_rewrite": "stripe-go models this field its own way and apidrift has no verified rewrite for it",
 }
 NOT_ATTEMPTED_WHY = {"arguments_not_visible": "arguments are not fully visible"}
 UNKNOWN_UNFIXABLE = "apidrift could not rewrite this site safely"
 UNKNOWN_NOT_ATTEMPTED = "apidrift did not try this site"
 POSSIBLY_REMAINING = "possibly still sent through a spread or a variable apidrift cannot see"
+# Go is typed: the new field names do not exist in an older stripe-go, so the note says what merging needs.
+GO_NOTE = (
+    "The Go files use struct fields that exist from stripe-go v87 on (its first release for Stripe 2026-09-30.endive), "
+    "so they compile only once `github.com/stripe/stripe-go` is upgraded in the same change. apidrift cannot run the Go "
+    "toolchain: run `gofmt` and `go build` on them before merging."
+)
 
 
 def pr_marker(fingerprint: str) -> str:
@@ -174,6 +181,8 @@ def render_pr(
         lede = ("Merge this together with your API-version and SDK upgrade; on your current pinned version Stripe "
                 "rejects the new shape.")
     lines = [f"Ready for Stripe {safe_version(version)}. {lede}"]
+    if not deletes_only and any(str(fix.get("file")).endswith(".go") for fix in fixes):
+        lines += ["", GO_NOTE]
     explained_once: set[str] = set()
     for key in sorted(groups, key=_order):
         path, old, action, new = key

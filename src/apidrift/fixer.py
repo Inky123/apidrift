@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import migrations, scanner
+from . import gofix, migrations, scanner
 from .diff import BREAKING, Change
 from .fixedit import Edit, Locator, apply
 from .fixtokens import accessed, tokens, variable_uses
@@ -28,11 +28,12 @@ from .migrations import Migration
 from .scanner import LANGUAGES, ScanResult, Usage, scan_text
 from .sdkmap import SdkIndex
 
-FIX_LANGUAGES = {"python", "javascript", "typescript", "ruby"}
+FIX_LANGUAGES = {"python", "javascript", "typescript", "ruby", "go"}
 WHY = (
     "nested", "not_found", "incomplete_binding", "unsupported_key_form", "oracle_changed_other_calls",
     "oracle_finding_remains", "oracle_new_finding", "leftover_tokens", "not_utf8", "too_large", "cap",
     "nested_array", "unsupported_value", "would_empty_literal", "syntax",
+    gofix.NO_REWRITE,
 )
 NOT_VISIBLE = "arguments are not fully visible at this call"  # impact.py's reason at an incomplete call
 NOT_ATTEMPTED = "arguments_not_visible"  # a possible hit: the call may send the field through arguments we cannot read
@@ -207,6 +208,9 @@ def _plan_file(
     if language == "python" and not _parses(content):
         _drop(plan, pairs, "syntax")  # checked by the real parser, not the reader that placed the edits
         return None, []
+    if language == "go" and not gofix.balanced(text, content):
+        _drop(plan, pairs, "syntax")  # no Go compiler here: at least every bracket still closes
+        return None, []
     why, leftovers, possibly = _oracle(file, text, content, language, planned, edits, index, changes)
     if why:
         _drop(plan, pairs, why)
@@ -304,6 +308,8 @@ def _oracle_impacts(
 def _oracle_tokens(before: str, after: str, language: str, planned: list[Planned], edits: list[Edit]) -> tuple[str | None, list[int]]:
     """Every edit removes exactly the leaf-key tokens it covers (minus those its new text carries), the
     text outside the edits is byte-identical, and no token of a renamed or deleted key is left behind."""
+    if language == "go":
+        return gofix.oracle_tokens(before, after, planned, edits)
     identical, placed = _layout(before, after, edits)
     stray = not identical
     leftovers: list[int] = []

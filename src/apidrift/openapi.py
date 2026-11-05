@@ -88,6 +88,7 @@ class SdkOp:
     method_type: str
     method: str
     path: str
+    on: str = "service"  # "collection": a method of the parent's nested collection, not a service method
 
 
 @dataclass
@@ -326,5 +327,8 @@ def _sdk_ops(name: str, schema: dict, spec: Spec) -> list[SdkOp]:
         method, path = str(raw.get("operation", "")).lower(), str(raw.get("path", ""))
         if (method, path) not in spec.operations or not raw.get("method_name"):
             continue
-        out.append(SdkOp(class_name, package, str(raw["method_name"]), str(raw.get("method_type", "custom")), method, path))
+        out.append(SdkOp(
+            class_name, package, str(raw["method_name"]), str(raw.get("method_type", "custom")), method, path,
+            str(raw.get("method_on", "service")),
+        ))
     return out

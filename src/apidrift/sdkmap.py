@@ -107,6 +107,7 @@ class SdkIndex:
         self._owners: dict[tuple[str, ...], tuple[str, str]] = {}
         self._patterns: list[tuple[str, int, re.Pattern[str]]] = []
         self.operations: set[tuple[str, str]] = set()
+        self.go = None  # gomap.GoIndex: stripe-go call aliases and request fields (set by build)
 
     @classmethod
     def build(cls, *specs: Spec) -> SdkIndex:
@@ -121,6 +122,9 @@ class SdkIndex:
             index._add(op)
         paths = sorted({path for _, path in index.operations})
         index._patterns = sorted(((p, p.count("{"), _path_pattern(p)) for p in paths), key=lambda t: (t[1], t[0]))
+        from .gomap import GoIndex  # imported here: gomap builds on this module
+
+        index.go = GoIndex.build(specs)
         return index
 
     @property

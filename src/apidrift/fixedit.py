@@ -70,7 +70,11 @@ class Locator:
         self.quote = '"' if text.count('"') > text.count("'") else "'"  # the file's usual string quote
         resolve = lambda chain: scanner._resolve(index, chain)  # noqa: E731
         self._tokens: fixvalue.PyTokens | None | bool = False
-        if language == "python":
+        if language == "go":
+            from .gofix import GoLocator  # gofix builds on this module's Sites
+
+            self.go = GoLocator(text, index)
+        elif language == "python":
             self.py_calls, _ = pyparse.calls(text, resolve)
             self.offsets = _Offsets(text)
         else:
@@ -78,6 +82,8 @@ class Locator:
             self.bindings = self.js_calls[0].bindings if self.js_calls else None
 
     def sites(self, usage: Usage, migration: Migration) -> Sites:
+        if self.language == "go":
+            return self.go.sites(usage, migration)
         if self.language == "python":
             return self._py(usage, migration)
         return self._js(usage, migration)
