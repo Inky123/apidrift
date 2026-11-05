@@ -13,7 +13,7 @@ from apidrift.app import db
 from apidrift.app.poller import poll_stripe, snapshots
 from apidrift.app.worker import drain
 
-TREES = {"plain": REPO, "possible": FIXTURES / "repo_possible", "docs": FIXTURES / "repo_docs"}
+TREES = {"plain": REPO, "possible": FIXTURES / "repo_possible", "docs": FIXTURES / "repo_docs", "fixes": FIXTURES / "repo_fixes"}
 FOURTH_VERSION, FIFTH_VERSION = "2026-04-01.test", "2026-05-01.test"
 _OP = {"method_on": "service", "operation": "post"}
 
@@ -87,11 +87,11 @@ def save_release(doc: dict, month: int = 3):
     return save_snapshot(doc, datetime(2026, month, 1, tzinfo=timezone.utc))
 
 
-def poll(settings, conn, doc: dict):
+def poll(settings, conn, gh, doc: dict):
     """Let the poller fetch ``doc`` as Stripe's current spec; returns the new snapshot path (or None)."""
     body = json.dumps(doc).encode()
     client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=body)))
-    return poll_stripe(settings, conn, client)
+    return poll_stripe(settings, conn, client, gh)
 
 
 def checked(conn, gh, settings) -> int:

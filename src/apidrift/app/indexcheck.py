@@ -158,7 +158,8 @@ def record(
         if any(mine[key] != payload.get(key) for key in ("impacts", "call_sites", "old_version", "new_version")):
             raise inventory.Invalid("the index does not reproduce the impacts of its own check")
         inventory.store(
-            conn, repo_id, sha, job_id, index, answers(pr.index, index.chains, index.urls, index.paths), unread, latest.name
+            conn, repo_id, sha, job_id, index, answers(pr.index, index.chains, index.urls, index.paths), unread,
+            inventory.impacts_digest(mine["impacts"]), latest.name,
         )
     except Exception as exc:  # noqa: BLE001 - whatever went wrong, the repo just has no index
         why = str(exc) if isinstance(exc, inventory.Invalid) else type(exc).__name__

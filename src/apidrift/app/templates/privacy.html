@@ -8,17 +8,23 @@
 
 <p>The code is never executed. It is parsed for Stripe calls, and any fix is computed, in a separate process that holds no credentials; the snapshot is then deleted.</p>
 
+<p>When Stripe publishes a release, apidrift does not download the code again. It asks GitHub which commit the default branch is at and compares the release with the index described below; a new download happens only when that commit has changed or the release changes what the repository's issue says.</p>
+
 <h2>What is stored</h2>
 
-<p>The repository's id and name, the number of Stripe call sites scanned, the number affected, a hash of the finding set, the issue number and, when a pull request was opened, its number, branch name, head commit and a hash of the fix set. Never file paths, never source code, never tokens: an installation token is held in memory for one check, is never written to disk, and is not logged. Logs contain repository ids only, not names, paths or code.</p>
+<p>The repository's id and name, the number of Stripe call sites scanned, the number affected, a hash of the finding set, the issue number and, when a pull request was opened, its number, branch name, head commit and a hash of the fix set.</p>
+
+<p>Also an index of the repository's Stripe call sites at the last commit checked, so that a new Stripe release can be checked without downloading the code again. For each call site it holds the file path and line number, the SDK call or Stripe URL as it is written there, the endpoint it reaches, and the names of the request fields it sends (names only, not values). With it are kept the commit id, the Stripe-looking calls and Stripe URLs in the code that match no endpoint, and, for each file that has a call site, one-way hashes of the property names read in that file (they tell whether a response field Stripe removes is used).</p>
+
+<p>Never source files, never the values your code sends to Stripe, never secrets or tokens: an installation token is held in memory for one check or one lookup, is never written to disk, and is not logged. Logs contain repository ids only, not names, paths or code.</p>
 
 <h2>Where it runs</h2>
 
-<p>The server at {{ host }} is a single DigitalOcean droplet. Snapshots of repositories live on its disk only for the duration of a check.</p>
+<p>The server at {{ host }} is a single DigitalOcean droplet. Snapshots of repositories live on its disk only for the duration of a check; the index lives in its database.</p>
 
 <h2>When it is deleted</h2>
 
-<p>The snapshot is deleted at the end of every check, whether the check succeeded or failed. Everything the server at {{ host }} holds for an installation is deleted when the App is uninstalled.</p>
+<p>The snapshot is deleted at the end of every check, whether the check succeeded or failed. A repository's index is replaced each time the repository is checked and deleted when the repository is removed from the installation. Everything the server at {{ host }} holds for an installation, the index included, is deleted when the App is uninstalled.</p>
 
 <h2>How to uninstall</h2>
 

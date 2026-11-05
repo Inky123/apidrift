@@ -378,4 +378,4 @@ def test_the_index_command_prints_one_repo_grouped_by_endpoint_and_status_counts
     conn.close()
     assert main(["status"]) == 0
     assert "last release pass: 2026-03-01.test at 2" in (out := capsys.readouterr().out)
-    assert "1 repos checked from the index in " in out and " ms, 1 needed a full check, 0 had no index, 0 already had a check queued" in out
+    assert "1 repos checked from the index in " in out and " ms, 1 needed a full check, 0 had no usable index, 0 already had a check queued" in out

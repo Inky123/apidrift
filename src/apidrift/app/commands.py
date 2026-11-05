@@ -106,7 +106,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     if args.stale:
         from .worker import sweep
 
-        print(f"queued {sweep(settings, conn)} checks for stale repositories")
+        print(f"queued {sweep(settings, conn, GitHubClient(settings))} checks for stale repositories")
         return 0
     if args.job is not None:
         job = db.claim_job(conn, job_id=args.job)
@@ -207,7 +207,7 @@ def _release_pass(raw: object) -> str:
         p = json.loads(raw if isinstance(raw, str) else "")
         return (
             f"{p['release']} at {p['at']}: {p['same'] + p['differ']} repos checked from the index in {p['ms']} ms,"
-            f" {p['differ']} needed a full check, {p['none']} had no index, {p['queued']} already had a check queued"
+            f" {p['differ']} needed a full check, {p['none']} had no usable index, {p['queued']} already had a check queued"
         )
     except (ValueError, KeyError, TypeError):
         return "never"

@@ -24,6 +24,7 @@ from ..providers import get_provider
 from ..sdkmap import SdkIndex
 from . import db
 from .config import Settings
+from .github import GitHubClient
 
 ETAG_NAME = ".etag"
 STAGGER_SECONDS = 2
@@ -138,11 +139,12 @@ def _record(conn: sqlite3.Connection, status: str, snaps: list[Path]) -> None:
     db.set_meta(conn, last_poll_at=db.now(), last_poll_status=status[:500], latest_snapshot=snaps[-1].name if snaps else None)
 
 
-def poll_stripe(settings: Settings, conn: sqlite3.Connection, http: httpx.Client) -> Path | None:
+def poll_stripe(settings: Settings, conn: sqlite3.Connection, http: httpx.Client, gh: GitHubClient | None = None) -> Path | None:
     """Fetch the spec if it changed; store it when it validates; run the release pass when the version is new.
 
-    Returns the new snapshot path, or None (304, duplicate content or a rejected body). HTTP and transport
-    errors propagate after being recorded in ``meta``.
+    ``gh`` lets the pass confirm each branch head before it answers a repo from its index; without it every
+    repo gets the full check. Returns the new snapshot path, or None (304, duplicate content or a rejected
+    body). HTTP and transport errors propagate after being recorded in ``meta``.
     """
     provider = get_provider("stripe")
     etag_file = settings.snapshot_dir / ETAG_NAME
@@ -181,7 +183,7 @@ def poll_stripe(settings: Settings, conn: sqlite3.Connection, http: httpx.Client
     _record(conn, f"saved {path.name}", snapshots(settings.data))
     from . import releasepass  # here, not at the top: releasepass builds on checker, which imports this module
 
-    counts = releasepass.run(settings, conn)
+    counts = releasepass.run(settings, conn, gh)
     queued = counts[releasepass.DIFFER] + counts[releasepass.NONE]
     logger.info("Stripe poll: saved %s (version %s -> %s); %d release checks queued", path.name, previous_version, version, queued)
     return path

@@ -85,11 +85,12 @@ def scanner_digest() -> str:
 
 
 class Recorder:
-    """Stands in for the SdkIndex during a scan and notes every question the scanner asks it.
+    """Stands in for the SdkIndex during a check and notes every question the scanner and the fixer ask it.
 
-    A scan is a function of the code and of these answers, so an SdkIndex that answers them all the same way
-    would find the same call sites. Anything else the scanner reaches for is passed through and noted in
-    ``untracked``; such a scan is exported as unusable.
+    The scan is a function of the code and of these answers, and the fix plan of the code, the impacts and
+    these answers. An SdkIndex that answers them all the same way would therefore find the same call sites
+    and, for the same impacts, plan the same fixes. Anything else that is reached for is passed through and
+    noted in ``untracked``; such a check is exported as unusable.
     """
 
     def __init__(self, index: SdkIndex) -> None:
@@ -277,15 +278,22 @@ class Stored:
     usages: tuple[Usage, ...]
     answers: dict  # {"chains": [[parts, "post /v1/x" | None]], "urls": [[url, path | None]], "paths": [[path, methods]]}
     unread: dict[str, int]
+    impacts: str  # ``impacts_digest`` of the check that wrote the index: what the repo's issue was last written from
+
+
+def impacts_digest(impacts: list[dict]) -> str:
+    """A hash of a check's whole impact list (every certainty, documentation matches included)."""
+    return hashlib.sha256(json.dumps(impacts, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def store(
     conn: sqlite3.Connection, repo_id: int, sha: str, job_id: int | None, index: Index, answers: dict,
-    unread: dict[str, int], checked: str,
+    unread: dict[str, int], impacts: str, checked: str,
 ) -> None:
     """Replace the repo's index with ``index`` (validated), marked as checked against snapshot ``checked``."""
     extras = json.dumps(
-        {"reads": {file: "".join(hashes) for file, hashes in index.reads.items()}, "answers": answers, "unread": unread},
+        {"reads": {file: "".join(hashes) for file, hashes in index.reads.items()}, "answers": answers, "unread": unread,
+         "impacts": impacts},
         separators=(",", ":"),
     )
     rows = [
@@ -330,7 +338,7 @@ def load(conn: sqlite3.Connection, header: db.Row) -> Stored | None:
             )
             for row in sites(conn, header["repo_id"])
         )
-        return Stored(usages, extras["answers"], extras["unread"])
+        return Stored(usages, extras["answers"], extras["unread"], str(extras["impacts"]))
     except (ValueError, KeyError, TypeError, AttributeError):
         logger.warning("repo %s: the stored index does not read back", header["repo_id"])
         return None

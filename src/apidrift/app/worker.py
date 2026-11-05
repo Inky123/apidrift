@@ -63,7 +63,7 @@ def drain(conn: sqlite3.Connection, gh: GitHubClient, settings: Settings) -> int
     return count
 
 
-def sweep(settings: Settings, conn: sqlite3.Connection) -> int:
+def sweep(settings: Settings, conn: sqlite3.Connection, gh: GitHubClient | None = None) -> int:
     """Put every stale repo through the release pass and prune old jobs; returns how many checks were queued.
 
     This is also what finishes a release pass that a crash interrupted: the repos it had not reached are stale."""
@@ -73,7 +73,7 @@ def sweep(settings: Settings, conn: sqlite3.Connection) -> int:
     if not snaps:
         logger.info("sweep: no snapshot yet; pruned %d old jobs", pruned)
         return 0
-    counts = releasepass.run(settings, conn, db.stale_repos(conn, snapshot_stamp(snaps[-1])))
+    counts = releasepass.run(settings, conn, gh, db.stale_repos(conn, snapshot_stamp(snaps[-1])))
     queued = counts[releasepass.DIFFER] + counts[releasepass.NONE]
     logger.info("sweep: %d stale repos queued behind %s, %d answered from the index; pruned %d old jobs",
                 queued, snaps[-1].name, counts[releasepass.SAME], pruned)
@@ -84,7 +84,7 @@ def tick(settings: Settings, conn: sqlite3.Connection, gh: GitHubClient, http: h
     """One worker iteration: optionally poll Stripe, then drain the queue."""
     if poll:
         try:
-            poll_stripe(settings, conn, http)
+            poll_stripe(settings, conn, http, gh)
         except Exception as exc:
             logger.error("Stripe poll failed: %s", scrub(str(exc) or type(exc).__name__))
     return drain(conn, gh, settings)
@@ -122,7 +122,7 @@ def loop(settings: Settings, once: bool = False) -> None:
             if now >= next_sweep:
                 next_sweep = now + SWEEP_SECONDS
                 try:
-                    sweep(settings, conn)
+                    sweep(settings, conn, gh)
                 except Exception as exc:  # noqa: BLE001 - a broken sweep must not stop the queue
                     logger.error("sweep failed: %s", scrub(str(exc) or type(exc).__name__))
             tick(settings, conn, gh, http, poll=due)

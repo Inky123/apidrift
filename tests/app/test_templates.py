@@ -306,8 +306,19 @@ def test_installed_page_says_a_pull_request_may_follow_and_is_safe_to_close(page
 
 def test_privacy_page_covers_the_required_points(pages):
     html = pages["privacy.html"]
-    for phrase in ("default branch", "Never file paths", "never tokens", "uninstall", "zachzap2@gmail.com"):
+    for phrase in ("default branch", "Never source files", "never secrets or tokens", "uninstall", "zachzap2@gmail.com"):
         assert phrase in html
+    # the index of call sites is stored: the page says what it holds, why, and when it goes
+    assert "Never file paths" not in html and "never source code" not in html
+    assert (
+        "For each call site it holds the file path and line number, the SDK call or Stripe URL as it is written there, "
+        "the endpoint it reaches, and the names of the request fields it sends (names only, not values)." in html
+    )
+    assert "so that a new Stripe release can be checked without downloading the code again" in html
+    assert "one-way hashes of the property names read in that file" in html
+    assert "deleted when the repository is removed from the installation" in html
+    assert "the index included, is deleted when the App is uninstalled" in html
+    assert "It asks GitHub which commit the default branch is at" in html
     assert "four permissions" in html and "three permissions" not in html
     for permission in ("Metadata: read", "Contents: read and write", "Pull requests: read and write", "Issues: read and write"):
         assert html.count(permission) == 1

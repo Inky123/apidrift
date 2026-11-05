@@ -6,12 +6,12 @@ from conftest import NEW_VERSION, OLD_VERSION, SHA, THIRD_VERSION
 from indexing import MUTATIONS, TREES, child_is_this_checkout, release, save_release
 
 from apidrift.app import db, indexcheck, inventory, issue
-from apidrift.app.checker import issue_view, run_local, scan_subprocess
+from apidrift.app.checker import run_local, scan_subprocess
 from apidrift.app.poller import snapshots
 
 # The releases after which a fixture's calls resolve to other operations than its index recorded. The index
 # must then refuse to answer (the full check runs); everywhere else it must answer, and answer identically.
-RESOLVES_DIFFERENTLY = {("plain", "repick"), ("possible", "repick"), ("docs", "repick"), ("possible", "refunds")}
+RESOLVES_DIFFERENTLY = {("plain", "repick"), ("possible", "repick"), ("docs", "repick"), ("fixes", "repick"), ("possible", "refunds")}
 
 
 @pytest.fixture
@@ -36,8 +36,14 @@ def from_index(conn, repo_id, baseline, latest) -> dict | None:
 
 
 def view(payload):
-    items, fp, hashes, render = issue_view(payload, "octo/shop", SHA, str(payload["new_version"]))
-    return items, fp, hashes, issue.render_issue(items, **render)
+    """What a payload puts in the issue, built as ``checker._reconcile`` builds it."""
+    found = issue.breaking(payload)
+    items, fp = issue.findings(payload, "octo/shop", SHA), issue.fingerprint(found)
+    rendered = issue.render_issue(
+        items, full_name="octo/shop", sha=SHA, old_version=str(payload["old_version"]), new_version=str(payload["new_version"]),
+        call_sites=int(payload["call_sites"]), fingerprint=fp, unread=issue.unread_note(payload),
+    )
+    return items, fp, issue.finding_hashes(found), rendered
 
 
 COMPARED = ("impacts", "call_sites", "documentation_matches", "unread", "old_version", "new_version", "versions")
