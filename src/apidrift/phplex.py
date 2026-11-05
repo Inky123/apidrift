@@ -35,9 +35,10 @@ class Lex:
         self.spans: list[tuple[int, int, str]] = []  # (start, end, kind), in order, never overlapping
         self.pairs: dict[int, int] = {}  # opening bracket -> its closer
         self.back: dict[int, int] = {}  # closing bracket -> its opener
-        self.parent: dict[int, int] = {}  # opening bracket -> the bracket around it (-1 at top level)
+        self.parent: dict[int, int] = {}  # paired opening bracket -> the paired bracket around it (-1 at top level)
         self.balanced = True
         self.uncertain = False
+        self._old_closers: dict[str, int] = {}  # heredoc marker -> start of its last pre-7.3 closing line
         self._run()
         self.starts = [s[0] for s in self.spans]
         self.opens = sorted(self.pairs)
@@ -54,6 +55,7 @@ class Lex:
     def _run(self) -> None:
         text, n = self.text, self.n
         stack: list[int] = []
+        around: dict[int, int] = {}  # every opening bracket -> the one open when it was read
         i = 0 if self.fragment else self._html(0)
         while i < n:
             m = INTERESTING.search(text, i)
@@ -74,13 +76,13 @@ class Lex:
                 h = HEREDOC.match(text, i)
                 i = self._add(i, self._heredoc(h), HEREDOC_KIND) if h else i + 1
             elif c in OPENERS:
+                around[i] = stack[-1] if stack else -1
                 stack.append(i)
                 i += 1
             elif c in CLOSERS:
                 if stack and OPENERS[text[stack[-1]]] == c:
                     opener = stack.pop()
                     self.pairs[opener], self.back[i] = i, opener
-                    self.parent[opener] = stack[-1] if stack else -1
                 else:
                     self.balanced = False
                 i += 1
@@ -88,6 +90,11 @@ class Lex:
                 i += 1
         if stack:
             self.balanced = False
+        for opener in self.pairs:  # in an unbalanced file a bracket that never closes is not anyone's parent
+            up = around[opener]
+            while up >= 0 and up not in self.pairs:
+                up = around[up]
+            self.parent[opener] = up
 
     def _add(self, start: int, end: int, kind: str) -> int:
         self.spans.append((start, end, kind))
@@ -151,7 +158,9 @@ class Lex:
         # Before PHP 7.3 the closing marker had to start its line and end it (``EOT;``). When the line found
         # here is not of that form and a later one is, the two rules end the heredoc in different places.
         old = re.compile(rf"^{marker};?\r?$", re.M)
-        if not old.match(self.text, close.start()) and old.search(self.text, close.end()):
+        if marker not in self._old_closers:  # found once per marker, so many heredocs do not rescan the file
+            self._old_closers[marker] = max((m.start() for m in old.finditer(self.text, close.start())), default=-1)
+        if not old.match(self.text, close.start()) and self._old_closers[marker] > close.end():
             self.uncertain = True
         return close.end()
 

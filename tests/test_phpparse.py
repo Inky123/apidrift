@@ -387,3 +387,55 @@ def test_response_reads_are_properties_and_subscripts_not_methods_or_the_request
     )
     usages, _, _ = scan_text(text, "a.php", index)
     assert usages[0].reads == {"receipt_url", "status"}
+
+
+# --- damaged and hostile files --------------------------------------------------------
+
+SAMPLE = H + (
+    "use Stripe\\{Charge, Refund as R};\n"
+    "#[Route('/pay')]\n"
+    "class Pay {\n"
+    "    public function __construct(private \\Stripe\\StripeClient $client) {}\n"
+    "    function go(array $o, $rows) {\n"
+    "        $p = ['amount' => 1, 'metadata' => ['a' => \"x {$o['k']}\"], ...$o]; // note\n"
+    "        foreach ($rows as [$a, $b]) { $p['currency'] = $a ?: 'usd'; }\n"
+    "        $doc = <<<EOT\n  text (\n  EOT;\n"
+    "        $svc = $this->client->charges;\n"
+    "        return [$svc->create($p), Charge::all(array('limit' => 3)), fn ($x) => $svc->capture($x, [])];\n"
+    "    }\n"
+    "}\n"
+    "?><p>tail</p>\n"
+)
+
+
+def test_the_sample_itself_is_read(index):
+    found, _ = read(SAMPLE, index)
+    assert [(call, label) for _, call, label, _, _ in found] == [
+        ("$svc->create", "POST /v1/charges"), ("Charge::all", "GET /v1/charges"),
+        ("$svc->capture", "POST /v1/charges/{charge}/capture"),
+    ]
+
+
+def test_a_file_cut_or_damaged_anywhere_is_read_without_an_error(index):
+    """Repositories hold half-written and generated files; the reader must answer for every one of them."""
+    from apidrift import phpfix
+
+    for cut in range(len(SAMPLE) + 1):
+        for text in (SAMPLE[:cut], SAMPLE[:cut] + SAMPLE[cut + 5:], SAMPLE[:cut] + "'" + SAMPLE[cut:], SAMPLE[:cut] + ")" + SAMPLE[cut:]):
+            scan_text(text, "a.php", index)
+            phpfix.Locator(text, "php", index)
+
+
+@pytest.mark.parametrize("head", ["function", "fn", "use ", "class X", "$a = new", "\\Stripe\\Charge::create", "$stripe->charges->"])
+def test_a_long_blank_stretch_does_not_cost_its_length_squared(index, head):
+    """A pattern with two runs of whitespace that can trade characters is quadratic on a long gap, and an
+    unterminated string or comment blanks the rest of a file. 300 KB must still be read at once."""
+    import time
+
+    for gap in (" " * 300_000, "\n" * 300_000, "/*" + "x" * 300_000, "'" + "y " * 150_000):
+        started = time.monotonic()
+        scan_text(H + head + gap + "\n$stripe->charges->create(['amount' => 1]);\n", "a.php", index)
+        assert time.monotonic() - started < 5
+    started = time.monotonic()
+    scan_text(H + "x" * 300_000 + " $y;\n" + "use " * 20_000 + "class " * 20_000 + "function " * 20_000, "a.php", index)
+    assert time.monotonic() - started < 5

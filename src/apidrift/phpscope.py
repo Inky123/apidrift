@@ -15,10 +15,14 @@ from dataclasses import dataclass
 
 from .phplex import STRING, Lex
 
-FUNC = re.compile(r"(?<![\w$>:\\])function\b\s*&?\s*(?:[A-Za-z_]\w*)?\s*\(")
-ARROW = re.compile(r"(?<![\w$>:\\])fn\s*&?\s*\(")
+# These run over whole files, some of them damaged: no pattern may hold two runs of whitespace that can
+# trade characters with each other, or a long blank stretch costs its length squared.
+FUNC = re.compile(r"(?<![\w$>:\\])function\b\s*(?:&\s*)?(?:[A-Za-z_]\w*\s*)?\(")
+ARROW = re.compile(r"(?<![\w$>:\\])fn\s*(?:&\s*)?\(")
 USE = re.compile(r"use\s*\(")
-CLASS = re.compile(r"(?<![\w$>:\\])(?:class|trait|interface|enum)\b[^{;(]*(?:\([^{;]*\))?[^{;]*\{")
+CLASS = re.compile(r"(?<![\w$>:\\])(?:class|trait|interface|enum)\b")
+BRACE_OR_END = re.compile(r"[{;]")
+HEADER_REACH = 4000  # how far past ``class`` its ``{`` is looked for
 VAR = re.compile(r"\$([A-Za-z_]\w*)")
 WORD_BEFORE = re.compile(r"([A-Za-z_]\w*)$")
 OP_ASSIGN = re.compile(r"(?:\*\*|<<|>>|\?\?|[-+*/.%&|^])=|\+\+|--")
@@ -61,17 +65,21 @@ class Scopes:
 
     def __init__(self, src: Lex) -> None:
         self.src = src
-        self.bodies: list[tuple[int, int, frozenset[str]]] = []  # (open brace, close brace, names)
+        self.bodies: dict[int, tuple[int, int, frozenset[str]]] = {}  # open brace -> (open, close, names)
         self.arrows: list[tuple[int, int, frozenset[str]]] = []  # (``fn``, end of its expression, names)
-        self.headers: list[tuple[int, int]] = []  # parameter lists: ``$x = []`` there is a default, not code
+        self.headers: set[int] = set()  # ``(`` of parameter lists: ``$x = []`` there is a default, not code
+        self.classes: set[int] = set()  # class body braces
         text = src.code
-        self.classes = {m.end() - 1 for m in CLASS.finditer(text)}  # class body braces
+        for m in CLASS.finditer(text):
+            brace = BRACE_OR_END.search(text, m.end(), m.end() + HEADER_REACH)
+            if brace and brace.group(0) == "{":
+                self.classes.add(brace.start())
         for m in FUNC.finditer(text):
             close = src.pairs.get(m.end() - 1)
             if close is None:
                 continue
             names = set(VAR.findall(text, m.end(), close))
-            self.headers.append((m.end() - 1, close))
+            self.headers.add(m.end() - 1)
             j = src.skip_space(close + 1)
             use = USE.match(text, j)
             if use and (use.end() - 1) in src.pairs:
@@ -79,20 +87,20 @@ class Scopes:
                 j = src.pairs[use.end() - 1] + 1
             j = src.skip_scalar(j, "{;")  # past a return type; an abstract method ends in ``;``
             if j < src.n and text[j] == "{" and j in src.pairs:
-                self.bodies.append((j, src.pairs[j], frozenset(names)))
+                self.bodies[j] = (j, src.pairs[j], frozenset(names))
         for m in ARROW.finditer(text):
             close = src.pairs.get(m.end() - 1)
             if close is None:
                 continue
-            self.headers.append((m.end() - 1, close))
+            self.headers.add(m.end() - 1)
             self.arrows.append((m.start(), src.skip_scalar(close + 1, ",;"), frozenset(VAR.findall(text, m.end(), close))))
 
     def innermost(self, pos: int) -> tuple[int, int, frozenset[str]] | None:
-        best = None
-        for body in self.bodies:
-            if body[0] < pos < body[1] and (best is None or body[0] > best[0]):
-                best = body
-        return best
+        """The function body that holds ``pos``, found by climbing the brackets around it."""
+        block = self.src.enclosing(pos)
+        while block >= 0 and (block not in self.bodies or self.src.pairs[block] == pos):
+            block = self.src.parent[block]
+        return self.bodies[block] if block >= 0 else None
 
     def extent(self, pos: int) -> tuple[int, int]:
         """The span of the scope that holds ``pos``: its function body, or the whole file."""
@@ -109,10 +117,10 @@ class Scopes:
 
     def declaration(self, pos: int) -> bool:
         """``pos`` is in a parameter list or directly in a class body: a default or a property, not a variable."""
-        if any(a < pos < b for a, b in self.headers):
-            return True
         block = self.src.enclosing(pos)
         while block >= 0 and self.src.text[block] != "{":
+            if block in self.headers:
+                return True
             block = self.src.parent[block]
         return block in self.classes
 

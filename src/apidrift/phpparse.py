@@ -23,10 +23,12 @@ from .sdkmap import Resolved
 
 VERB = re.compile(r"(\?->|->|::)\s*([A-Za-z_]\w*)\s*\(")
 NEW = re.compile(r"new\s+(\\?[A-Za-z_][\w\\]*)")
-USE_STMT = re.compile(r"(?<![\w$>:\\])use\s+(?!function\b|const\b)([^;(){}]*(?:\{[^{}]*\})?)\s*;")
+USE_HEAD = re.compile(r"(?<![\w$>:\\])use\s+(?!function\b|const\b)")
+USE_STOP = re.compile(r"[;(){}]")
+USE_REACH = 4000  # an import statement longer than this is not read
 CLIENT = re.compile(
     r"(?:\$this\s*->\s*|\$)([A-Za-z_]\w*)\s*=\s*new\s+(\\?[A-Za-z_][\w\\]*)"  # $stripe = new StripeClient(
-    r"|(\\?[A-Za-z_][\w\\]*)\s+\$([A-Za-z_]\w*)"  # a typed property or parameter: StripeClient $stripe
+    r"|(?<![\w\\])(\\?[A-Za-z_][\w\\]*)\s+\$([A-Za-z_]\w*)"  # a typed property or parameter: StripeClient $stripe
 )
 MERGE = re.compile(r"(?:array_merge|array_replace|array_merge_recursive|array_replace_recursive|array_filter)\s*\(")
 VARIABLE = re.compile(r"\$([A-Za-z_]\w*)")
@@ -192,10 +194,17 @@ def walk_back(src: Lex, end: int) -> tuple[int, list[Seg], str] | None:
 def _uses(src: Lex) -> dict[str, list[str]]:
     """``use Stripe\\Checkout\\Session;`` / ``use Stripe\\{A, B as C};``: local name -> namespace parts."""
     out: dict[str, list[str]] = {}
-    for m in USE_STMT.finditer(src.code):
-        body = m.group(1)
-        group = re.fullmatch(r"\s*([\w\\]+)\\\{([^{}]*)\}\s*", body)
-        items = [group.group(1) + "\\" + part.strip() for part in group.group(2).split(",")] if group else body.split(",")
+    code = src.code
+    for m in USE_HEAD.finditer(code):
+        stop = USE_STOP.search(code, m.end(), m.end() + USE_REACH)
+        if stop is None or stop.group(0) not in ";{":
+            continue  # a closure's ``use (...)``, or not a statement this reader follows
+        items = code[m.end() : stop.start()].split(",")
+        if stop.group(0) == "{":  # use Stripe\{Customer, PaymentIntent as PI};
+            close = USE_STOP.search(code, stop.end(), stop.end() + USE_REACH)
+            if close is None or close.group(0) != "}" or code[src.skip_space(close.end()) : src.skip_space(close.end()) + 1] != ";":
+                continue
+            items = [items[0].strip() + part.strip() for part in code[stop.end() : close.start()].split(",")] if len(items) == 1 else []
         for item in items:
             name, _, alias = item.strip().partition(" as ")
             parts = [p for p in name.strip().split("\\") if p]
