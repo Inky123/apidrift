@@ -104,6 +104,7 @@ class GoSource:
 
     def _classify(self, i: int, top: int, st: list) -> None:
         pk, pt = (self.kind[i - 1], self.tok[i - 1]) if i else ("", "")
+        after_type = pt == "}" and self.brace.get(self.match[i - 1]) == TYPE  # ``struct{...}{...}``
         head = None
         if pt in ("struct", "interface"):
             what = TYPE
@@ -112,14 +113,14 @@ class GoSource:
             self.funcs[i] = st[0]
             st[0] = None
         elif st[1] is not None:
-            if (pk == ID and pt not in HEADS and self._type_before(i - 1)) or pt == "}":
+            if (pk == ID and pt not in HEADS and self._type_before(i - 1)) or after_type:
                 what = LIT  # ``range []T{...}`` / ``map[K]V{...}``: not the TypeName form, so allowed in a header
             else:
                 what, head = BLOCK, st[1]
                 st[1] = None
         elif top >= 0 and self.brace.get(top) == LIT:
             what = LIT
-        elif (pk == ID and pt != "else") or pt in ("]", "}"):
+        elif (pk == ID and pt != "else") or pt == "]" or after_type:
             what = LIT
         else:
             what, head = BLOCK, ("else" if pt == "else" else "")
