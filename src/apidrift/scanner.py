@@ -29,7 +29,7 @@ LANGUAGES = {
     ".py": "python",
     ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
     ".ts": "typescript", ".tsx": "typescript", ".mts": "typescript", ".cts": "typescript",
-    ".rb": "ruby",
+    ".rb": "ruby", ".rake": "ruby",
 }
 TEXT_EXT = set(LANGUAGES) | {
     ".go", ".php", ".java", ".kt", ".cs", ".sh", ".bash", ".zsh", ".yaml", ".yml", ".json", ".toml", ".env",
