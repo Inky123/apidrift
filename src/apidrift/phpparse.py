@@ -83,12 +83,15 @@ class Parsed:
 
 def extract(text: str, resolve) -> tuple[list[Found], list[tuple[int, str]]]:
     """Stripe SDK calls in a PHP source, plus (line, call) pairs that look like Stripe but match no endpoint."""
+    from .phphelpers import PhpHelpers, Via  # builds on this module
+
     parsed = parse(text, resolve)
-    found = []
+    found, helpers = [], PhpHelpers(parsed)
     for c in parsed.calls:
-        fields = Fields()
-        collect(parsed, c, fields)
-        found.append(Found(c.line, c.call, c.resolved, fields))
+        fields, via = Fields(), Via(helpers)
+        collect(parsed, c, fields, via)
+        found.append(Found(c.line, c.call + via.suffix, c.resolved, fields))
+        found += helpers.callers_of(c)  # calls of a same-file wrapper that forwards its parameter here
     return found, parsed.unresolved
 
 
@@ -409,7 +412,7 @@ def _hide(out: Fields, path: str) -> None:
         out.hide(path + "[].")
 
 
-def collect(parsed: Parsed, call: Call, out: Fields) -> None:
+def collect(parsed: Parsed, call: Call, out: Fields, helper=None) -> None:
     """Read the request fields of ``call`` into ``out``."""
     src, text = parsed.src, parsed.src.text
     if call.params is None:
@@ -436,6 +439,8 @@ def collect(parsed: Parsed, call: Call, out: Fields) -> None:
                 out.hidden |= sub.hidden
         out.hide("")
         return
+    if helper is not None and helper(i, b, out):
+        return  # a same-file helper's array (phphelpers)
     m = VARIABLE.match(text, i)
     if m is None or m.group(1) == "this" or src.skip_space(m.end()) < b:
         out.hide("")

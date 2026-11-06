@@ -15,7 +15,7 @@ import re
 import tokenize
 from dataclasses import dataclass, field
 
-from . import fixvalue, jsparse, jsspread, pyparse, scanner
+from . import fixhelpers, fixvalue, jsparse, jsspread, pyparse, scanner
 from .fixtokens import _Offsets
 from .fixvalue import Edit, Entry
 from .jsparse import IDENT, QUOTES, RUBY_KEYWORD, Fields, Source
@@ -93,7 +93,7 @@ class Locator:
     def _js(self, usage: Usage, m: Migration) -> Sites:
         matches = [
             c for c in self.js_calls
-            if c.line == usage.line and c.call == usage.call and c.resolved.path == usage.path
+            if c.line == usage.line and c.call == fixhelpers.plain_call(usage.call) and c.resolved.path == usage.path
             and c.resolved.method == usage.method
         ]
         if not matches:
@@ -117,6 +117,8 @@ class Locator:
                 break
             elif ch in QUOTES or ch.isdigit():
                 continue
+            elif "[fields from " in usage.call and fixhelpers.js_sites(self, c, i, b, m, out):
+                continue  # the literal a same-file helper returns
             else:
                 match = IDENT.match(text, i)
                 name = match.group(0) if match else ""
@@ -227,7 +229,7 @@ class Locator:
     def _py(self, usage: Usage, m: Migration) -> Sites:
         matches = [
             c for c in self.py_calls
-            if c.node.lineno == usage.line and c.call == usage.call and c.resolved.path == usage.path
+            if c.node.lineno == usage.line and c.call == fixhelpers.plain_call(usage.call) and c.resolved.path == usage.path
             and c.resolved.method == usage.method
         ]
         if not matches:
@@ -237,7 +239,8 @@ class Locator:
         self._py_walk(c.node, segs, m, out)
         for kw in c.node.keywords:
             if kw.arg is None or kw.arg == "params":
-                self._py_value(c, kw.value, segs, m, out)
+                if not ("[fields from " in usage.call and fixhelpers.py_sites(self, c, kw.value, segs, m, out)):
+                    self._py_value(c, kw.value, segs, m, out)
         for arg in c.node.args:
             if isinstance(arg, ast.Starred):
                 out.incomplete = True

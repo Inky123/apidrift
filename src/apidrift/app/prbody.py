@@ -35,6 +35,11 @@ UNFIXABLE_WHY = {
     "sdk_no_rewrite": "stripe-go models this field its own way and apidrift has no verified rewrite for it",
     "unbounded": "the code around this call can change variables in ways apidrift cannot follow, or the file "
     "cannot be read with certainty",
+    "helper_shared": "the parameters come from a helper whose result is also used for something other than this "
+    "Stripe call",
+    "helper_feeds_other_calls": "the parameters come from a helper that also feeds another Stripe call this "
+    "change does not cover",
+    "helper_used_elsewhere": "the parameters come from a helper that another file also uses or overrides",
 }
 NOT_ATTEMPTED_WHY = {"arguments_not_visible": "arguments are not fully visible"}
 UNKNOWN_UNFIXABLE = "apidrift could not rewrite this site safely"

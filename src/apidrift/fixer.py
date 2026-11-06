@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import gofix, goowned, migrations, phpfix, phplex, scanner
+from . import fixhelpers, gofix, goowned, migrations, phpfix, phplex, scanner
 from .diff import BREAKING, Change
 from .fixedit import Edit, Locator, apply
 from .fixtokens import accessed, app_names, tokens
@@ -33,7 +33,7 @@ WHY = (
     "nested", "not_found", "incomplete_binding", "unsupported_key_form", "oracle_changed_other_calls",
     "oracle_finding_remains", "oracle_new_finding", "leftover_tokens", "not_utf8", "too_large", "cap",
     "nested_array", "unsupported_value", "would_empty_literal", "syntax", "unbounded",
-    gofix.NO_REWRITE,
+    gofix.NO_REWRITE, *fixhelpers.REASONS,
 )
 NOT_VISIBLE = "arguments are not fully visible at this call"  # impact.py's reason at an incomplete call
 NOT_ATTEMPTED = "arguments_not_visible"  # a possible hit: the call may send the field through arguments we cannot read
@@ -175,7 +175,7 @@ def plan_fixes(result: ScanResult, impacts: list[Impact], index: SdkIndex, root:
         except UnicodeDecodeError:
             _drop(plan, group, "not_utf8")
             continue
-        fix, leftovers = _plan_file(plan, file, text, group, index, changes)
+        fix, leftovers = _plan_file(plan, file, text, group, index, changes, base)
         plan.leftovers += [(file, line) for line in leftovers]
         if fix is not None:
             fix.blob_sha = blob_sha(raw)
@@ -186,10 +186,11 @@ def plan_fixes(result: ScanResult, impacts: list[Impact], index: SdkIndex, root:
 
 
 def _plan_file(
-    plan: FixPlan, file: str, text: str, group: list[Candidate], index: SdkIndex, changes: list[Change]
+    plan: FixPlan, file: str, text: str, group: list[Candidate], index: SdkIndex, changes: list[Change], base: Path | None = None
 ) -> tuple[Fix | None, list[int]]:
     language = group[0][0].usage.language
     locator = (phpfix.Locator if language == "php" else Locator)(text, language, index)
+    locator.context, locator.group = (base, file) if base is not None else None, group  # for fixhelpers
     edits: list[Edit] = []
     planned: list[Planned] = []
     for impact, migration in group:
