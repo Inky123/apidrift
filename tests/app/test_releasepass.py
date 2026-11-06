@@ -228,7 +228,8 @@ def test_the_fixers_questions_to_the_sdk_index_are_recorded_with_the_scans(data_
     with_fix = in_process_child(TREES["fixes"], old.name, new.name, data_dir, fix=True)
     assert with_fix["fixes"] and not with_fix["index"]["unusable"]
     assert with_fix["index"]["sites"] == scan_only["index"]["sites"]
-    assert {tuple(c) for c in scan_only["index"]["asked"]["chains"]} <= {tuple(c) for c in with_fix["index"]["asked"]["chains"]}
+    asked = [json.dumps(q) for q in scan_only["index"]["asked"]]
+    assert set(asked) <= {json.dumps(q) for q in with_fix["index"]["asked"]}
 
 
 # --- failure modes ------------------------------------------------------------------------------

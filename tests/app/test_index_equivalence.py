@@ -33,7 +33,7 @@ def from_index(conn, repo_id, baseline, latest) -> dict | None:
     """What the release pass computes for the stored index; None when the index declines to answer."""
     stored = inventory.load(conn, inventory.get(conn, repo_id))
     pr = indexcheck.pair(snapshots(baseline.parent.parent.parent), baseline, latest)
-    if not indexcheck.same_answers(pr.index, stored.answers):
+    if not indexcheck.same_answers(pr.index, stored.provider, stored.answers):
         return None
     return indexcheck.payload_of(stored.usages, stored.unread, pr)
 

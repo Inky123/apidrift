@@ -146,12 +146,12 @@ def _check_local(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     """Print what an operator asks first: is anything installed, checked, failing, and is Stripe being polled."""
     settings = from_env()
-    from . import db, inventory
+    from . import db, indexview
 
     conn = db.connect(settings.db_path)
     db.migrate(conn)
     try:
-        summary = {**db.status_summary(conn, hours=args.hours), "index": inventory.summary(conn)}
+        summary = {**db.status_summary(conn, hours=args.hours), "index": indexview.summary(conn)}
         print(render_status(summary, hours=args.hours))
     finally:
         conn.close()
@@ -162,7 +162,7 @@ def cmd_index(args: argparse.Namespace) -> int:
     """Print what apidrift knows one repository calls. For the operator's terminal only: repositories can be
     private, and the web process (which has no user authentication) serves none of this."""
     settings = from_env()
-    from . import db, inventory
+    from . import db, indexview, inventory
 
     conn = db.connect(settings.db_path)
     db.migrate(conn)
@@ -170,11 +170,15 @@ def cmd_index(args: argparse.Namespace) -> int:
         repo = db.find_repo(conn, args.repo)
         if repo is None:
             raise SystemExit(f"{args.repo} is not an installed repository")
-        header = inventory.get(conn, repo["id"])
-        if header is None:
+        from ..profiles import PROFILES
+
+        headers = [h for h in (inventory.get(conn, repo["id"], name) for name in sorted(PROFILES)) if h is not None]
+        if not headers:
             print(f"{repo['full_name']} has no index yet; its next full check writes one")
             return 1
-        print(inventory.render(repo["full_name"], header, inventory.sites(conn, repo["id"])))
+        print("\n\n".join(
+            indexview.render(repo["full_name"], h, inventory.sites(conn, repo["id"], h["provider"])) for h in headers
+        ))
     finally:
         conn.close()
     return 0

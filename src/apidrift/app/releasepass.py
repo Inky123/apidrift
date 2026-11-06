@@ -62,7 +62,7 @@ def assess_repo(conn: sqlite3.Connection, repo: sqlite3.Row, snaps: list[Path]) 
     if stored is None:
         return NONE, "the index does not read back"
     pr = indexcheck.pair(snaps, _baseline(repo["baseline"], snaps), snaps[-1])
-    if pr.index.empty or not indexcheck.same_answers(pr.index, stored.answers):
+    if pr.index.empty or not indexcheck.same_answers(pr.index, stored.provider, stored.answers):
         return NONE, "calls resolve differently against this release"
     return _decide(repo, indexcheck.payload_of(stored.usages, stored.unread, pr), stored.impacts)
 

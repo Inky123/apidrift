@@ -9,7 +9,7 @@ import pytest
 from conftest import SECRET, SHA, install_payload, old_doc
 from indexing import TREES, release, save_release
 
-from apidrift.app import db, indexcheck, inventory, releasepass
+from apidrift.app import db, indexcheck, indexview, inventory, releasepass
 from apidrift.app.checker import run_local
 from apidrift.app.poller import snapshots
 from apidrift.app.webhooks import handle_event
@@ -51,20 +51,43 @@ def test_what_the_child_exports_parses_back_to_the_same_call_sites(data_dir, tre
         assert mine.hides("anything") == real.hides("anything")
 
 
+def _asked(recorder):
+    return [[name, args] for name, args in recorder.asked.values()]
+
+
 def test_the_recorder_notes_every_question_and_flags_anything_else(data_dir):
     index = SdkIndex.build(load_spec(old_doc()))
     recorder = inventory.Recorder(index)
     assert recorder.resolve(["app", "billing", "stripe", "charges", "create"]).path == "/v1/charges"
-    assert recorder.resolve(["stripe", "", "nothing", "here"]) is None and recorder.resolve(["alone"]) is None
+    assert recorder.resolve(("stripe", "", "nothing", "here")) is None and recorder.resolve(["alone"]) is None
     assert recorder.match_path("/v1/charges/ch_1") == "/v1/charges/{charge}" and recorder.methods_for("/v1/charges") == ["get", "post"]
-    assert list(recorder.chains) == [("billing", "stripe", "charges", "create"), ("stripe", "nothing", "here")]
-    assert (list(recorder.urls), list(recorder.paths), recorder.untracked, recorder.empty) == (["/v1/charges/ch_1"], ["/v1/charges"], set(), False)
+    recorder.match_path("/v1/charges/ch_1")  # asked twice, noted once
+    assert _asked(recorder) == [
+        ["resolve", [["app", "billing", "stripe", "charges", "create"]]], ["resolve", [["stripe", "", "nothing", "here"]]],
+        ["resolve", [["alone"]]], ["match_path", ["/v1/charges/ch_1"]], ["methods_for", ["/v1/charges"]],
+    ]
+    assert (recorder.untracked, recorder.empty) == (set(), False)
     assert not inventory.export(ScanResult("r", [], 0, []), recorder)["unusable"]
-    assert ("post", "/v1/charges") in recorder.operations  # reaches past the three recorded questions
+    assert ("post", "/v1/charges") in recorder.operations  # reaches past the recorded questions
     exported = inventory.export(ScanResult("r", [], 0, []), recorder)
-    assert recorder.untracked == {"operations"} and exported["unusable"]
+    assert recorder.untracked == {"operations"} and exported["unusable"] and exported["provider"] == "stripe"
     with pytest.raises(inventory.Invalid, match="could not be recorded"):
         inventory.parse(exported)
+
+
+@pytest.mark.parametrize("ask", [
+    lambda r: r.resolve(iter(["stripe", "charges", "create"])),  # an argument that is not plain data
+    lambda r: r.resolve(chain=["stripe", "charges", "create"]),  # a keyword
+    lambda r: r.methods_for("/v1/charges", "post"),  # another number of arguments
+    lambda r: r.resolve([["stripe"], "charges"]),  # a list inside a list
+])
+def test_a_question_asked_another_way_makes_the_check_unusable(ask):
+    recorder = inventory.Recorder(SdkIndex.build(load_spec(old_doc())))
+    try:
+        ask(recorder)
+    except TypeError:
+        pass
+    assert recorder.untracked and inventory.export(ScanResult("r", [], 0, []), recorder)["unusable"]
 
 
 def test_the_recorder_notes_the_go_questions_and_flags_any_other_way_into_the_go_names(data_dir):
@@ -75,19 +98,23 @@ def test_the_recorder_notes_the_go_questions_and_flags_any_other_way_into_the_go
     assert go.owns("api", "Charges") and go.known("api", "Charges", "New") and not go.owns("service", "Nope")
     assert go.field(op, "", "Amount") == "amount" and go.field(op, "", "Nope") is None
     assert go.children(op, "shipping.") and not go.children(op, "amount.") and not go.path_param(op, "Charge")
-    assert list(recorder.go_asked) == [
-        ("resolve", ("package", "charge", "New")), ("resolve", ("api", "Nope", "New")), ("owns", ("api", "Charges")),
-        ("known", ("api", "Charges", "New")), ("owns", ("service", "Nope")), ("field", (op, "", "Amount")),
-        ("field", (op, "", "Nope")), ("children", (op, "shipping.")), ("children", (op, "amount.")), ("path_param", (op, "Charge")),
+    plain = list(op)
+    assert _asked(recorder) == [
+        ["go.resolve", ["package", "charge", "New"]], ["go.resolve", ["api", "Nope", "New"]], ["go.owns", ["api", "Charges"]],
+        ["go.known", ["api", "Charges", "New"]], ["go.owns", ["service", "Nope"]], ["go.field", [plain, "", "Amount"]],
+        ["go.field", [plain, "", "Nope"]], ["go.children", [plain, "shipping."]], ["go.children", [plain, "amount."]],
+        ["go.path_param", [plain, "Charge"]],
     ]
     exported = json.loads(json.dumps(inventory.export(ScanResult("r", [], 0, []), recorder)))
-    assert not exported["unusable"] and inventory.parse(exported).go == tuple(recorder.go_asked)
-    stored = json.loads(json.dumps(indexcheck.answers(index, (), (), (), recorder.go_asked)))
-    assert [answer for _, answer in stored["go"]] == ["post /v1/charges", None, True, True, False, "amount", None, True, False, False]
-    assert indexcheck.same_answers(index, stored)
+    assert not exported["unusable"] and [list(q) for q in inventory.parse(exported).asked] == _asked(recorder)
+    stored = json.loads(json.dumps(indexcheck.answers(index, "stripe", inventory.parse(exported).asked)))
+    assert [answer for *_, answer in stored] == [
+        {"op": ["post", "/v1/charges"], "key": stored[0][2]["key"]}, None, True, True, False, "amount", None, True, False, False,
+    ]
+    assert indexcheck.same_answers(index, "stripe", stored)
     other = old_doc()
     other["paths"]["/v1/charges"]["post"]["requestBody"]["content"]["application/x-www-form-urlencoded"]["schema"]["properties"].pop("amount")
-    assert not indexcheck.same_answers(SdkIndex.build(load_spec(other)), stored)  # Amount no longer names a request field
+    assert not indexcheck.same_answers(SdkIndex.build(load_spec(other)), "stripe", stored)  # Amount no longer names a request field
     for reach in (lambda: go._names(op, ""), lambda: go.field(op, prefix="", go_name="Amount"), lambda: go.owns("api")):
         fresh = inventory.Recorder(index)
         go = fresh.go
@@ -98,13 +125,23 @@ def test_the_recorder_notes_the_go_questions_and_flags_any_other_way_into_the_go
         assert len(fresh.untracked) == 1 and inventory.export(ScanResult("r", [], 0, []), fresh)["unusable"]
 
 
+def test_the_parent_asks_only_the_providers_own_questions(data_dir):
+    index = SdkIndex.build(load_spec(old_doc()))
+    for name, args in (("_add", [None]), ("go._names", [["post", "/v1/charges"], ""]), ("method", ["chargesCreate"]),
+                       ("resolve", []), ("resolve", [["a"], ["b"]])):
+        with pytest.raises(ValueError):
+            indexcheck.ask(index, "stripe", name, args)
+        assert not indexcheck.same_answers(index, "stripe", [[name, args, None]])
+
+
 def _site(export, **changes):
     export["sites"][0].update(changes)
 
 
 BAD = {
-    "another format": lambda e: e.update(format=3),
-    "the format before this one": lambda e: e.update(format=1),
+    "another format": lambda e: e.update(format=4),
+    "the format before this one": lambda e: e.update(format=2),
+    "an older format": lambda e: e.update(format=1),
     "format true": lambda e: e.update(format=True),
     "unusable": lambda e: e.update(unusable=True),
     "sites not a list": lambda e: e.update(sites={}),
@@ -118,7 +155,8 @@ BAD = {
     "line text": lambda e: _site(e, line="6"),
     "method upper": lambda e: _site(e, method="POST"),
     "path with a query": lambda e: _site(e, path="/v1/charges?x=1"),
-    "path not stripe": lambda e: _site(e, path="/etc/passwd"),
+    "path with a space": lambda e: _site(e, path="/v1/char ges"),
+    "path relative": lambda e: _site(e, path="v1/charges"),
     "call with a newline": lambda e: _site(e, call="stripe.charges\n.create"),
     "call with an escape": lambda e: _site(e, call="\x1b[31mstripe.charges.create"),
     "call with a bidi override": lambda e: _site(e, call="stripe‮charges.create"),
@@ -140,19 +178,22 @@ BAD = {
     "site reads out of range": lambda e: _site(e, reads=99),
     "site reads true": lambda e: _site(e, reads=True),
     "asked missing": lambda e: e.pop("asked"),
-    "go questions missing": lambda e: e["asked"].pop("go"),
-    "go question unknown": lambda e: e["asked"]["go"].append(["_aliases", []]),
-    "go question with too few arguments": lambda e: e["asked"]["go"].append(["owns", ["api"]]),
-    "go question without an operation": lambda e: e["asked"]["go"].append(["field", ["post", "", "Amount"]]),
-    "go question with a path that is not stripe": lambda e: e["asked"]["go"].append(["children", [["post", "/etc"], ""]]),
-    "go question with a wildcard method": lambda e: e["asked"]["go"].append(["children", [["?", "/v1/charges"], ""]]),
-    "go question with a newline": lambda e: e["asked"]["go"].append(["owns", ["api", "a\nb"]]),
-    "go question with a number": lambda e: e["asked"]["go"].append(["owns", ["api", 7]]),
-    "chain of one": lambda e: e["asked"]["chains"].append(["stripe"]),
-    "chain of five": lambda e: e["asked"]["chains"].append(["a", "b", "c", "d", "e"]),
-    "chain with a newline": lambda e: e["asked"]["chains"].append(["stripe", "x\ny"]),
-    "url with an escape": lambda e: e["asked"]["urls"].append("/v1/\x1b[0m"),
-    "asked path not stripe": lambda e: e["asked"]["paths"].append("/v9/charges"),
+    "asked not a list": lambda e: e.update(asked={"chains": []}),
+    "provider missing": lambda e: e.pop("provider"),
+    "another provider": lambda e: e.update(provider="plaid"),
+    "question unknown": lambda e: e["asked"].append(["_aliases", []]),
+    "question of another provider": lambda e: e["asked"].append(["method", ["chargesCreate"]]),
+    "question reaching past the go names": lambda e: e["asked"].append(["go._names", [["post", "/v1/charges"], ""]]),
+    "question with too few arguments": lambda e: e["asked"].append(["go.owns", ["api"]]),
+    "question with arguments not a list": lambda e: e["asked"].append(["match_path", "/v1/charges"]),
+    "question not a pair": lambda e: e["asked"].append(["match_path"]),
+    "question with a newline": lambda e: e["asked"].append(["go.owns", ["api", "a\nb"]]),
+    "question with an escape": lambda e: e["asked"].append(["match_path", ["/v1/\x1b[0m"]]),
+    "question with a nested list": lambda e: e["asked"].append(["resolve", [[["stripe"], "charges"]]]),
+    "question with an object": lambda e: e["asked"].append(["match_path", [{"a": 1}]]),
+    "question with a huge number": lambda e: e["asked"].append(["match_path", [10 ** 12]]),
+    "question with a long list": lambda e: e["asked"].append(["resolve", [["x"] * 401]]),
+    "question with a long name": lambda e: e["asked"].append(["match_path", ["/" + "x" * 1000]]),
 }
 
 
@@ -245,9 +286,9 @@ def test_storage_is_one_bounded_set_of_rows_per_repo_replaced_by_each_check(data
     assert record(conn, data_dir, payload, job_id=2) is None
     assert conn.execute("SELECT count(*) FROM index_sites").fetchone()[0] == 6
     header = inventory.get(conn, 501)
-    assert (header["sha"], header["job_id"], header["format"], header["checked"], header["checked_by"]) == (SHA, 2, 2, new.name, "full")
+    assert (header["sha"], header["job_id"], header["format"], header["checked"], header["checked_by"]) == (SHA, 2, 3, new.name, "full")
     assert header["scanner"] == inventory.scanner_digest() and len(header["scanner"]) == 16
-    assert inventory.summary(conn) == {"repos": 1, "by_index": 0, "call_sites": 6, "doc_sites": 0, "endpoints": 2}
+    assert indexview.summary(conn) == {"repos": 1, "by_index": 0, "call_sites": 6, "doc_sites": 0, "endpoints": 2}
     assert "receipt_url" not in header["extras"] and all(set(text) <= set("0123456789abcdef") for text in json.loads(header["extras"])["reads"])
 
 
@@ -286,7 +327,7 @@ def test_a_later_finished_check_that_left_the_index_alone_supersedes_it(data_dir
 
 
 def test_a_database_with_rows_migrates_in_place_and_has_no_index_until_a_check_writes_one(settings):
-    """The live database: version 5, real rows. The migration only adds two empty tables."""
+    """The live database: version 5, real rows. The migrations only add the two index tables, empty."""
     old = db.connect(settings.db_path)
     with db.write(old):
         for script in db.MIGRATIONS[:5]:
@@ -301,9 +342,9 @@ def test_a_database_with_rows_migrates_in_place_and_has_no_index_until_a_check_w
     before = (dict(db.get_repo(old, 501)), dict(db.get_job(old, done)), dict(db.get_installation(old, 77)))
     old.close()
     conn = db.connect(settings.db_path)
-    assert db.migrate(conn) == len(db.MIGRATIONS) == 6 and db.migrate(conn) == 6
+    assert db.migrate(conn) == len(db.MIGRATIONS) == 7 and db.migrate(conn) == 7
     assert (dict(db.get_repo(conn, 501)), dict(db.get_job(conn, done)), dict(db.get_installation(conn, 77))) == before
-    assert inventory.get(conn, 501) is None and inventory.summary(conn)["repos"] == 0
+    assert inventory.get(conn, 501) is None and indexview.summary(conn)["repos"] == 0
     assert db.queued_jobs(conn) == []  # no backfill at migration time
     save_release(release("unrelated"))
     counts = releasepass.run(settings, conn)  # the first release after the deploy: today's path, which writes the index
@@ -311,11 +352,40 @@ def test_a_database_with_rows_migrates_in_place_and_has_no_index_until_a_check_w
     conn.close()
 
 
+def test_a_stripe_only_index_is_dropped_by_the_migration_and_the_next_check_writes_one_per_provider(settings):
+    """A database at version 6 holds format-2 indexes, one per repo and Stripe's: they go, the rest stays."""
+    old = db.connect(settings.db_path)
+    with db.write(old):
+        for script in db.MIGRATIONS[:6]:
+            db._run_script(old, script)
+        old.execute("PRAGMA user_version = 6")
+    db.upsert_installation(old, 77, "octo")
+    db.upsert_repo(old, 501, 77, "octo/shop", None)
+    old.execute("INSERT INTO repo_index (repo_id, sha, format, scanner, extras, written_at) VALUES (501, 'a', 2, 's', '{}', 'now')")
+    old.execute("INSERT INTO index_sites VALUES (501, 0, 'f', 1, 'get', '/v1/x', 'c', 'python', 1, '[]', NULL)")
+    old.commit()
+    old.close()
+    conn = db.connect(settings.db_path)
+    assert db.migrate(conn) == 7 and db.get_repo(conn, 501) is not None
+    assert conn.execute("SELECT count(*) FROM repo_index").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM index_sites").fetchone()[0] == 0
+    conn.close()
+
+
 def test_index_tables_enforce_their_foreign_keys(conn):
     with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("INSERT INTO repo_index (repo_id, sha, format, scanner, extras, written_at) VALUES (9, 'a', 1, 's', '{}', 'now')")
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("INSERT INTO index_sites VALUES (9, 0, 'f', 1, 'get', '/v1/x', 'c', 'python', 1, '[]', NULL)")
+        conn.execute(
+            "INSERT INTO repo_index (repo_id, provider, sha, format, scanner, extras, written_at)"
+            " VALUES (9, 'stripe', 'a', 1, 's', '{}', 'now')"
+        )
+    db.upsert_installation(conn, 77, "octo")
+    db.upsert_repo(conn, 501, 77, "octo/shop", None)
+    conn.execute(
+        "INSERT INTO repo_index (repo_id, provider, sha, format, scanner, extras, written_at)"
+        " VALUES (501, 'stripe', 'a', 3, 's', '{}', 'now')"
+    )
+    with pytest.raises(sqlite3.IntegrityError):  # the repo has a Stripe index, not a Plaid one
+        conn.execute("INSERT INTO index_sites VALUES (501, 'plaid', 0, 'f', 1, 'post', '/x', 'c', 'python', 1, '[]', NULL, NULL)")
 
 
 # --- the scanner digest and the helper process ---------------------------------------------------------------
@@ -356,8 +426,9 @@ def test_a_long_chain_of_specs_is_built_in_a_helper_process_with_the_same_result
     far = indexcheck.pair(snaps, snaps[0], third)
     assert far is not near and (far.old_version, far.new_version, far.versions) == (near.old_version, near.new_version, near.versions)
     assert [c.to_dict() for c in far.changes] == [c.to_dict() for c in near.changes] and far.index.operations == near.index.operations
-    asked = ([["stripe", "Charge", "create"], ["x", "y"]], ["/v1/charges/ch_1"], ["/v1/charges"])
-    assert indexcheck.answers(far.index, *asked) == indexcheck.answers(near.index, *asked)
+    asked = [("resolve", [["stripe", "Charge", "create"]]), ("resolve", [["x", "y"]]), ("match_path", ["/v1/charges/ch_1"]),
+             ("methods_for", ["/v1/charges"]), ("go.owns", ["api", "Charges"])]
+    assert indexcheck.answers(far.index, "stripe", asked) == indexcheck.answers(near.index, "stripe", asked)
     assert indexcheck.pair(snaps, snaps[0], third) is far  # cached: one helper per chain
 
 

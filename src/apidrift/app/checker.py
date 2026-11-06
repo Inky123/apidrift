@@ -24,10 +24,11 @@ from .. import snapshot as snap
 from .. import migrations
 from ..diff import BREAKING, diff_chain
 from ..impact import Impact, assess, render_impact_json
+from ..localize import place, shared_leaves
 from ..openapi import Spec, load_spec
+from ..profiles import get_profile
 from ..report import filter_changes
 from ..scanner import ScanResult, scan_repo
-from ..sdkmap import SdkIndex
 from . import db, fixpr, indexcheck, inventory, issue
 from .checkout import ExtractError, extract_tarball
 from .config import Settings
@@ -112,23 +113,30 @@ class LocalCheck:
         return data
 
 
-def run_local(repo_dir: Path, old: str, new: str, fix: bool = False) -> LocalCheck:
-    """Diff two Stripe snapshots and cross the breaking changes with the call sites in ``repo_dir``.
+def run_local(repo_dir: Path, old: str, new: str, fix: bool = False, provider: str = "stripe") -> LocalCheck:
+    """Diff two of a provider's snapshots (Stripe's by default) and cross the breaking changes with the call
+    sites in ``repo_dir``, as ``apidrift impact`` does; the provider's profile says how its calls are read.
 
-    With ``fix`` the documented renames are planned too (``fixer.plan_fixes``) and land in the payload.
+    With ``fix`` the documented migrations are planned too (``fixer.plan_fixes``) and land in the payload, for a
+    provider that has them.
     """
-    old_path, new_path = snap.resolve("stripe", old), snap.resolve("stripe", new)
+    profile = get_profile(provider)
+    old_path, new_path = snap.resolve(provider, old), snap.resolve(provider, new)
     old_spec, new_spec = load_spec(snap.load(old_path)), load_spec(snap.load(new_path))
-    index = SdkIndex.build(old_spec, new_spec)
+    index = profile.build_index(old_spec, new_spec)
     if index.empty:
-        raise CheckError("the stored Stripe spec has no SDK method metadata")
-    middle = [load_spec(snap.load(p)) for p in snap.between("stripe", old_path, new_path)]
+        raise CheckError(f"the stored {provider} spec has no SDK method metadata")
+    middle = [load_spec(snap.load(p)) for p in snap.between(provider, old_path, new_path)]
     changes, versions = diff_chain([old_spec, *middle, new_spec])
     changes = filter_changes(changes, min_severity=BREAKING)
-    recorder = inventory.Recorder(index)  # the scan and the fixer ask the SDK index through it: their questions are kept
-    result = scan_repo(Path(repo_dir), recorder)
-    check = LocalCheck(result, assess(result.usages, changes), old_path, new_path, old_spec, new_spec, versions)
-    if fix:
+    recorder = inventory.Recorder(index, provider)  # the scan and the fixer ask the index through it: their questions are kept
+    result = scan_repo(Path(repo_dir), recorder, profile.reader)
+    shared = None
+    if profile.nested:  # changes on a named schema: placed on the operations this checkout calls
+        called = {u.path for u in result.usages}
+        changes, shared = place(changes, old_spec, new_spec, called), shared_leaves(old_spec, new_spec, called)
+    check = LocalCheck(result, assess(result.usages, changes, shared), old_path, new_path, old_spec, new_spec, versions)
+    if fix and profile.fixes:
         from ..fixer import plan_fixes  # the child process only; imported here so the parent never loads it
 
         check.extra = dict(plan_fixes(check.result, check.impacts, recorder, Path(repo_dir)).to_dict())
