@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import fixhelpers, gofix, goowned, migrations, phpfix, phplex, scanner
+from . import fixhelpers, fixtests, gofix, goowned, migrations, phpfix, phplex, scanner
 from .diff import BREAKING, Change
 from .fixedit import Edit, Locator, apply
 from .fixtokens import accessed, app_names, tokens
@@ -96,6 +96,7 @@ class FixPlan:
     leftovers: list[tuple[str, int]] = field(default_factory=list)
     not_attempted: list[Unfixable] = field(default_factory=list)  # possible hits, why == NOT_ATTEMPTED
     possibly_remaining: list[dict] = field(default_factory=list)  # deleted keys a spread may still send
+    tests: list[tuple[str, int]] = field(default_factory=list)  # test lines that still name a renamed/removed field
     root: Path | None = field(default=None, repr=False, compare=False)  # the checkout (the oracle reads Go types)
 
     def to_dict(self) -> dict:
@@ -121,6 +122,7 @@ class FixPlan:
                 {"file": u.file, "line": u.line, "path": u.path, "target": u.target, "why": u.why} for u in self.not_attempted
             ],
             "possibly_remaining": [dict(p) for p in self.possibly_remaining],
+            "tests": [{"file": f, "line": line} for f, line in self.tests],
         }
 
 
@@ -182,6 +184,8 @@ def plan_fixes(result: ScanResult, impacts: list[Impact], index: SdkIndex, root:
             plan.fixes.append(fix)
             total += len(raw)
     plan.pins = find_pins(root, [f.file for f in plan.fixes])
+    sites = [(s.action, s.target) for f in plan.fixes for s in f.sites]
+    plan.tests = fixtests.stale_tests(base, sites, {f.file for f in plan.fixes}) if sites else []
     return plan
 
 
@@ -474,6 +478,9 @@ def render_fix_text(plan: FixPlan, root: str) -> str:
     if plan.not_attempted:
         lines += ["", "possibly affected, not attempted (arguments not fully visible):"]
         lines += [f"  {u.file}:{u.line}  {u.target}  {u.path}" for u in plan.not_attempted]
+    if plan.tests:
+        lines += ["", "tests that name the old field (update those that expect the old request):"]
+        lines += [f"  {f}:{line}" for f, line in plan.tests]
     if plan.leftovers:
         lines += ["", "still mentions the old name:"]
         lines += [f"  {f}:{line}" for f, line in plan.leftovers]

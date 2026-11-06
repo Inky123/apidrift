@@ -67,7 +67,7 @@ def test_a_rename_changes_the_struct_field_in_every_call_style_and_keeps_the_blo
         (25, "/v1/payment_intents/{intent}/confirm", "rename"), (33, "/v1/setup_intents", "rename"),
         (34, "/v1/checkout/sessions", "rename"),
     ]
-    assert set(p.to_dict()) == {"fixes", "unfixable", "pins", "migrations", "leftovers", "not_attempted", "possibly_remaining"}
+    assert set(p.to_dict()) == {"fixes", "unfixable", "pins", "migrations", "leftovers", "not_attempted", "possibly_remaining", "tests"}
     assert set(p.to_dict()["fixes"][0]["sites"][0]) == {"line", "path", "target", "replacement", "action"}
 
 

@@ -141,7 +141,7 @@ def test_possibly_remaining_names_the_deletion_behind_a_spread(tmp_path):
     shutil.copy(V2 / "delete.js", tmp_path / "delete.js")
     data = plan_v2(tmp_path).to_dict()
     assert data["possibly_remaining"] == [{"file": "delete.js", "line": 30, "path": PM, "target": "payto"}]
-    assert {"fixes", "unfixable", "pins", "migrations", "leftovers", "not_attempted", "possibly_remaining"} == set(data)
+    assert {"fixes", "unfixable", "pins", "migrations", "leftovers", "not_attempted", "possibly_remaining", "tests"} == set(data)
 
 
 def test_fix_text_uses_action_specific_wording(tmp_path):

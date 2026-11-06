@@ -276,8 +276,9 @@ def _left_for_you(payload: dict, full_name: str, sha: str, possibly: Possibly | 
             reason = NOT_ATTEMPTED_WHY.get(str(item.get("why") or ""), UNKNOWN_NOT_ATTEMPTED)
             not_attempted.setdefault(reason, []).append((str(item["file"]), item.get("line")))
     leftovers = _places(payload.get("leftovers"))
+    tests = _places(payload.get("tests"))
     unread = unread_note(payload)
-    if not (by_why or not_attempted or possibly or leftovers or unread):
+    if not (by_why or not_attempted or possibly or leftovers or tests or unread):
         return []
     lines = ["", "**Left for you**"]
     for sentence, places in sorted(by_why.items()):
@@ -287,6 +288,10 @@ def _left_for_you(payload: dict, full_name: str, sha: str, possibly: Possibly | 
     for field, spots in possibly or []:
         places: list[tuple[str, object]] = [(file, line) for file, line, _ in spots]
         lines.append(f"- {code(field)} {POSSIBLY_REMAINING}: {_links(full_name, sha, places)}")
+    if tests:
+        lines.append(f"- Tests that name the old field: {_links(full_name, sha, tests)}. A test that expects the request "
+                     "this pull request changes fails until it is updated here; one that reads the field from a "
+                     "Stripe response can stay.")
     if leftovers:
         lines.append(f"- Still mentions the old name at {_links(full_name, sha, leftovers)}; check whether those are this field.")
     if unread:
