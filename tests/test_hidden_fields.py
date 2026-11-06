@@ -51,10 +51,11 @@ def test_literal_spreads_are_read_exactly(text, paths):
     assert read(text) == (paths, set(), True)
 
 
-def test_keys_in_a_literal_spread_have_no_spans_so_the_fixer_leaves_them_alone():
+def test_keys_in_a_literal_spread_have_spans_that_name_their_branch():
     src = Source("{ a: 1, ...(c ? { payment_method_types: ['card'] } : {}) }")
     fields = jsparse.parse_object(src, 1)
-    assert "payment_method_types" in fields.paths and set(fields.spans) == {"a"}
+    assert "payment_method_types" in fields.paths and set(fields.spans) == {"a", "payment_method_types"}
+    assert fields.spans["payment_method_types"][0].holder == src.text.index("{ payment") + 1
 
 
 def test_ruby_double_splat_hides_its_own_hash():

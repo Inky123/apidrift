@@ -53,6 +53,7 @@ class Span:
     key_end: int
     entry_end: int
     kind: str
+    holder: int = -1  # just inside the ``{`` of the literal spread branch holding the key (-1: not in one)
 
 
 @dataclass
@@ -283,17 +284,15 @@ class Source:
         return i
 
     def spread(self, i: int, prefix: str, out: Fields) -> None:
-        """``...(cond ? { a: 1 } : {})``: the keys of literal branches are read, without spans so the fixer leaves
-        them alone; any other spread may add any key under ``prefix``."""
+        """``...(cond ? { a: 1 } : {})``: the keys of literal branches are read with their spans (each marked
+        with its branch, :func:`jsspread.absorb`); any other spread may add any key under ``prefix``."""
         opens = jsspread.literal_branches(self, i)
         if opens is None:
             out.hide(prefix)
         for k in opens or ():
             sub = Fields()
             self.object_fields(k + 1, prefix, sub)
-            out.paths |= sub.paths
-            out.hidden |= sub.hidden
-            out.complete = out.complete and sub.complete
+            jsspread.absorb(out, sub, k + 1)
 
     def value(self, i: int, path: str, out: Fields) -> int:
         i = self.skip_space(i)
@@ -452,7 +451,7 @@ def collect(
                 merge(out, variable_fields(src, bindings, binding, i))
             elif k == 0 and has_id and (binding is None or binding.literal is None):
                 continue
-            else:
+            elif not jsspread.options_choice(src, i, b):  # ``key ? { idempotencyKey: key } : undefined``
                 out.hide("")
 
 

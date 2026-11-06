@@ -15,7 +15,7 @@ import re
 import tokenize
 from dataclasses import dataclass, field
 
-from . import fixvalue, jsparse, pyparse, scanner
+from . import fixvalue, jsparse, jsspread, pyparse, scanner
 from .fixtokens import _Offsets
 from .fixvalue import Edit, Entry
 from .jsparse import IDENT, QUOTES, RUBY_KEYWORD, Fields, Source
@@ -123,6 +123,8 @@ class Locator:
                 if not name or text[i:b].strip() != name:
                     if k == 0 and "{" in c.resolved.path:
                         continue  # the id slot of a ``/{id}`` path (``req.params.id``, ``params[:id]``): a value, not params
+                    if jsspread.options_choice(src, i, b):
+                        continue  # ``key ? { idempotencyKey: key } : undefined``: request options, no parameters
                     out.incomplete = True
                     continue
                 self._js_variable(c, name, i, k == 0 and "{" in c.resolved.path, m, out)
@@ -152,6 +154,8 @@ class Locator:
                     continue
                 holder = max(holders, key=lambda p: p.key_start)
                 cont_start, cont_literal = fixvalue.js_value_start(src, holder.key_end) + 1, True
+            if span.holder > cont_start:  # written in a literal spread branch: that branch is its container
+                cont_start, cont_literal = span.holder, True
             out.add(self._js_entry(src, span, m, cont_start, cont_literal))
 
     def _js_entry(self, src: Source, span: jsparse.Span, m: Migration, cont_start: int, cont_literal: bool):
