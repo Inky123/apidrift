@@ -77,7 +77,6 @@ class PhpHelpers:
             method = self.src.enclosing(m.start()) in self.scopes.classes
             d = Definition(m.group(1), m.start(1), j, self.src.pairs[j], params, method)
             self.defs.setdefault(d.name.lower(), []).append(d)
-        self.reads: dict[int, Read] = {}
         self.callers: list[Caller] = []
 
     def line(self, pos: int) -> int:
@@ -155,7 +154,6 @@ class PhpHelpers:
             return None
         if got.local is not None:
             self._writes(got.local, got.call, got.local_at, out)
-        self.reads[i] = got
         return got, out
 
     def helper_fields(self, d: Definition, out: Fields, stack: list, seen: list) -> bool:

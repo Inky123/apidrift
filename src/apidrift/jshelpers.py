@@ -78,7 +78,6 @@ class Helpers:
         self.bindings, self.src, self.mask, self.scopes = bindings, bindings.src, bindings.mask, bindings.scopes
         self.ruby = self.src.ruby
         self._defs: dict[str, list[Definition]] | None = None
-        self.reads: dict[int, Read] = {}  # argument start -> what it resolved to (the fixer walks these)
 
     @property
     def defs(self) -> dict[str, list[Definition]]:
@@ -330,7 +329,6 @@ class Helpers:
             return None
         if got.local is not None:
             self._writes(got.local, got.call, got.local_at, fields, [got.helper], got.seen)
-        self.reads[i] = got
         return got, fields
 
     def helper_fields(self, d: Definition, stack: list[Definition], seen: list[Definition]) -> Fields | None:

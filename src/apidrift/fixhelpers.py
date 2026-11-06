@@ -74,8 +74,6 @@ def _js_reads(loc) -> tuple[jshelpers.Helpers, list]:
 
 def js_sites(loc, c, i: int, b: int, m, out) -> bool:
     """Edit sites for the argument ``text[i:b]`` of ``c`` when it is a helper's result; False otherwise."""
-    from .fixedit import _checked  # noqa: F401  (fixedit imports this module)
-
     helpers, reads = _js_reads(loc)
     read = next((r for cc, r in reads if cc is c and (r.local_at if r.local else r.call) == i), None)
     if read is None:
