@@ -13,11 +13,12 @@ from .app.commands import add_parsers as add_app_parsers
 from .diff import BREAKING, Change, diff_chain
 from .fixer import plan_fixes, render_fix_text
 from .impact import assess, render_impact_json, render_impact_text
+from .localize import place, shared_leaves
 from .openapi import Spec, load_spec
+from .profiles import get_profile
 from .providers import PROVIDERS, get_provider
 from .report import filter_changes, render_json, render_text
 from .scanner import render_scan_json, render_scan_text, scan_repo
-from .sdkmap import SdkIndex
 
 
 def cmd_snapshot(args: argparse.Namespace) -> int:
@@ -81,7 +82,7 @@ def _label(path: Path, spec: Spec) -> str:
     return f"{path.name} (version {spec.version})"
 
 
-def _require_sdk(index: SdkIndex, provider: str) -> None:
+def _require_sdk(index, provider: str) -> None:
     if index.empty:
         raise SystemExit(f"the stored {provider} spec has no SDK method metadata; run: apidrift snapshot {provider}")
 
@@ -93,9 +94,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
             specs.append(_spec(args.provider, "previous")[1])
         except SystemExit:
             pass
-    index = SdkIndex.build(*specs)
+    profile = get_profile(args.provider)
+    index = profile.build_index(*specs)
     _require_sdk(index, args.provider)
-    result = scan_repo(Path(args.repo), index)
+    result = scan_repo(Path(args.repo), index, profile.reader)
     print(render_scan_json(result) if args.json else render_scan_text(result))
     return 0
 
@@ -103,12 +105,17 @@ def cmd_scan(args: argparse.Namespace) -> int:
 def cmd_impact(args: argparse.Namespace) -> int:
     old_path, old_spec = _spec(args.provider, args.old)
     new_path, new_spec = _spec(args.provider, args.new)
-    index = SdkIndex.build(old_spec, new_spec)
+    profile = get_profile(args.provider)
+    index = profile.build_index(old_spec, new_spec)
     _require_sdk(index, args.provider)
     changes, versions = _changes(args.provider, old_path, old_spec, new_path, new_spec)
     changes = filter_changes(changes, min_severity=args.severity)
-    result = scan_repo(Path(args.repo), index)
-    impacts = assess(result.usages, changes)
+    result = scan_repo(Path(args.repo), index, profile.reader)
+    shared: frozenset[str] | None = None
+    if profile.nested:  # changes the diff reports on a schema: put them on the operations this checkout calls
+        called = {u.path for u in result.usages}
+        changes, shared = place(changes, old_spec, new_spec, called), shared_leaves(old_spec, new_spec, called)
+    impacts = assess(result.usages, changes, shared)
     old_label, new_label = _label(old_path, old_spec), _label(new_path, new_spec)
     if args.json:
         print(_with_versions(render_impact_json(result, impacts, old_label, new_label), versions))
@@ -119,9 +126,12 @@ def cmd_impact(args: argparse.Namespace) -> int:
 
 def cmd_fix(args: argparse.Namespace) -> int:
     """Dry run of the documented renames: unified diffs, API-version pins and what is left for a person."""
+    profile = get_profile(args.provider)
+    if not profile.fixes:
+        raise SystemExit(f"apidrift fix has no documented migrations for {args.provider} yet; apidrift impact lists what to change")
     old_path, old_spec = _spec(args.provider, args.old)
     new_path, new_spec = _spec(args.provider, args.new)
-    index = SdkIndex.build(old_spec, new_spec)
+    index = profile.build_index(old_spec, new_spec)
     _require_sdk(index, args.provider)
     changes, _ = _changes(args.provider, old_path, old_spec, new_path, new_spec)
     changes = filter_changes(changes, min_severity=BREAKING)

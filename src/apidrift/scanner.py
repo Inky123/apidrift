@@ -14,6 +14,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from . import goparse, jsparse, phpparse, pyparse
 from .sdkmap import Resolved, SdkIndex
@@ -61,7 +62,7 @@ GENERIC_RECEIVERS = {
     "event", "evt", "req", "request", "res", "response", "body", "params", "options", "opts", "ctx", "this", "self",
     "args", "kwargs", "process", "env",
 }
-NOT_READS = {  # language keywords, library methods and the Stripe client surface: never a response field
+GENERIC_NOT_READS = {  # language keywords and library methods: never a response field
     "then", "catch", "finally", "map", "filter", "reduce", "find", "some", "every", "push", "pop", "slice", "splice",
     "concat", "join", "split", "length", "json", "text", "send", "end", "redirect", "render", "prototype",
     "constructor", "bind", "call", "apply", "log", "error", "warn", "info", "stringify", "parse", "assign", "keys",
@@ -70,6 +71,8 @@ NOT_READS = {  # language keywords, library methods and the Stripe client surfac
     "to_s", "to_json", "to_h", "nil", "new", "require", "exports", "module", "default", "items", "exists", "path",
     "resolve", "reject", "listen", "use", "route", "post", "put", "patch", "all", "static", "raw", "headers",
     "header", "query", "cookies", "include", "includes", "index", "replace", "trim", "match", "test", "exec", "now",
+}
+NOT_READS = GENERIC_NOT_READS | {  # ... and the Stripe client surface
     "create", "retrieve", "update", "modify", "list", "del", "search", "confirm", "capture", "cancel", "attach",
     "detach", "construct_event", "api_key", "api_version", "v1", "v2", "checkout", "sessions", "customers",
     "subscriptions", "invoices", "prices", "products", "charges", "refunds", "accounts", "events", "webhooks",
@@ -89,6 +92,9 @@ class Usage:
     language: str  # python / javascript / typescript / ruby / http, or "doc" for URLs in documentation
     reads: frozenset[str] = frozenset()  # member names read in the same file off a plausible response object
     hidden: frozenset[str] | None = None  # prefixes ("" = top level) where unseen keys may be sent; None: all if not complete
+    # (field, value) for plain values the call sends, value None where it is not a visible literal ("~name": an
+    # SDK enum member). None: the reader does not collect values, and a sent field is judged without them.
+    values: frozenset[tuple[str, str | None]] | None = None
 
     def hides(self, path: str) -> bool:
         """Whether ``path`` could be sent here without being visible (a spread, ``**kwargs`` or variable)."""
@@ -111,6 +117,18 @@ class Usage:
         }
 
 
+@dataclass(frozen=True)
+class Reader:
+    """What is vendor-specific in a scan: which files are worth reading, how one file is read, and what the
+    report calls things. The default reads Stripe; :mod:`profiles` holds the other vendors' readers."""
+
+    vendor: str = "Stripe"
+    hint: re.Pattern[str] = STRIPE_HINT  # a file that does not match is not read
+    scan_text: Callable | None = None  # (text, rel, index) -> (usages, unresolved, unread language); None: scan_text
+    others: str = "Stripe.js, webhooks, SDK helpers"  # what calls that reach no endpoint usually are
+    others_are: str = "not API endpoints"
+
+
 @dataclass
 class ScanResult:
     root: str
@@ -120,6 +138,7 @@ class ScanResult:
     skipped_files: int = 0  # oversize or binary files left unread
     skipped_dirs: int = 0  # dependency and build directories left unread
     unread: dict[str, int] = field(default_factory=dict)  # language -> files mentioning Stripe in languages not parsed
+    reader: Reader = Reader()  # the vendor the scan was for
 
     @property
     def counted(self) -> list[Usage]:
@@ -140,7 +159,10 @@ class ScanResult:
         return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
-def scan_repo(root: Path, index: SdkIndex) -> ScanResult:
+def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> ScanResult:
+    """Scan a checkout for one vendor's calls: Stripe's unless ``reader`` (with an index of its own kind) says otherwise."""
+    reader = reader or Reader()
+    read = reader.scan_text or scan_text
     root = Path(root).resolve()
     if not root.exists():
         raise SystemExit(f"apidrift: {root} does not exist")
@@ -160,16 +182,16 @@ def scan_repo(root: Path, index: SdkIndex) -> ScanResult:
         if text is None:
             skipped_files += 1
             continue
-        if not STRIPE_HINT.search(text):
+        if not reader.hint.search(text):
             continue
         scanned += 1
-        found, missing, unread_name = scan_text(text, path.relative_to(base).as_posix(), index)
+        found, missing, unread_name = read(text, path.relative_to(base).as_posix(), index)
         if unread_name:
             unread[unread_name] = unread.get(unread_name, 0) + 1
         unresolved += missing
         usages += found
     usages.sort(key=lambda u: (u.file, u.line, u.path))
-    return ScanResult(str(root), usages, scanned, unresolved, skipped_files, skipped_dirs, dict(sorted(unread.items())))
+    return ScanResult(str(root), usages, scanned, unresolved, skipped_files, skipped_dirs, dict(sorted(unread.items())), reader)
 
 
 def scan_text(text: str, rel: str, index: SdkIndex) -> tuple[list[Usage], list[tuple[str, int, str]], str | None]:
@@ -196,7 +218,7 @@ def scan_text(text: str, rel: str, index: SdkIndex) -> tuple[list[Usage], list[t
     return found, missing, unread_name
 
 
-def unread_sentence(unread: dict[str, int]) -> str:
+def unread_sentence(unread: dict[str, int], vendor: str = "Stripe") -> str:
     """Plain-language note for languages whose call sites are not parsed, e.g. for Go and PHP files."""
     if not unread:
         return ""
@@ -204,7 +226,7 @@ def unread_sentence(unread: dict[str, int]) -> str:
     listed = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
     langs = list(unread)
     names = langs[0] if len(langs) == 1 else ", ".join(langs[:-1]) + " or " + langs[-1]
-    return f"apidrift does not read {names} call sites yet: {listed} mention Stripe and were not checked."
+    return f"apidrift does not read {names} call sites yet: {listed} mention {vendor} and were not checked."
 
 
 def _iter_files(root: Path) -> tuple[list[Path], int, int]:
@@ -249,12 +271,14 @@ def _doc_like(rel: str, suffix: str) -> bool:
     return suffix in DOC_EXT or any(part in DOC_DIRS or part in TEST_DIRS for part in dirs) or bool(TEST_FILE.match(name))
 
 
-def _reads(text: str, member: re.Pattern[str] = MEMBER_RE) -> frozenset[str]:
+def _reads(
+    text: str, member: re.Pattern[str] = MEMBER_RE, skip: frozenset[str] | set[str] = NOT_READS, vendor: str = "stripe"
+) -> frozenset[str]:
     """Member names read off something that could be an API response (not ``req.body.x`` or ``event.type``)."""
     out: set[str] = set()
     for m in member.finditer(text):
         name = m.group(1) or m.group(2)
-        if name in NOT_READS or name[0].isupper() or "stripe" in name.lower() or re.search(r"[a-z][A-Z]", name):
+        if name in skip or name[0].isupper() or vendor in name.lower() or re.search(r"[a-z][A-Z]", name):
             continue
         receiver = _receiver(text, m.start())
         if (receiver.lstrip("$") if member is PHP_MEMBER_RE else receiver) in GENERIC_RECEIVERS:
@@ -369,10 +393,11 @@ def _method_hint(text: str, start: int, end: int, spec_path: str, index: SdkInde
 
 def render_scan_text(result: ScanResult) -> str:
     counted, docs = result.counted, result.docs
+    words, vendor = result.reader, result.reader.vendor.lower()
     langs = ", ".join(f"{lang} {n}" for lang, n in result.by_language().items()) or "none"
     summary = (
-        f"{len(counted)} Stripe call sites in {result.files_with_usages()} files ({langs}); "
-        f"{result.files_scanned} files mention stripe; {len(result.unresolved)} other stripe calls (not API endpoints)"
+        f"{len(counted)} {words.vendor} call sites in {result.files_with_usages()} files ({langs}); "
+        f"{result.files_scanned} files mention {vendor}; {len(result.unresolved)} other {vendor} calls ({words.others_are})"
     )
     if docs:
         summary += f"; {len(docs)} URLs in documentation, fixtures and tests (not counted)"
@@ -383,7 +408,7 @@ def render_scan_text(result: ScanResult) -> str:
             f"{result.skipped_dirs} dependency or build directories"
         )
     if result.unread:
-        lines.append("not read: " + unread_sentence(result.unread))
+        lines.append("not read: " + unread_sentence(result.unread, words.vendor))
     for u in counted:
         lines.append(f"{u.where}  {u.label}  via {u.call}")
         shown = ", ".join(sorted(u.fields)[:8])
@@ -397,7 +422,7 @@ def render_scan_text(result: ScanResult) -> str:
         lines += ["", "documentation, fixtures and tests (not counted):"]
         lines += [f"  {u.where}  {u.label}  via {u.call}" for u in docs]
     if result.unresolved:
-        lines += ["", "other stripe calls (Stripe.js, webhooks, SDK helpers), not API endpoints:"]
+        lines += ["", f"other {vendor} calls ({words.others}), {words.others_are}:"]
         lines += [f"  {f}:{line}  {call}" for f, line, call in result.unresolved[:15]]
         if len(result.unresolved) > 15:
             lines.append(f"  (+{len(result.unresolved) - 15} more)")

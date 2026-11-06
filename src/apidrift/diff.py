@@ -20,7 +20,10 @@ BREAKING, WARNING, INFO = "breaking", "warning", "info"
 SEVERITY_RANK = {BREAKING: 0, WARNING: 1, INFO: 2}
 MAX_NESTED = 3
 MIN_COLLAPSE = 3  # sibling removals that share a leaf and a shape fold into one ``parent.*.leaf`` change
-COLLAPSIBLE = {"body_removed": "body field", "param_removed": "parameter", "response_field_removed": "field"}
+COLLAPSIBLE = {
+    "body_removed": "body field", "param_removed": "parameter", "request_removed": "request field",
+    "response_field_removed": "field",
+}
 SINGLE_REF_RE = re.compile(r"^(array<)?ref:([^|<>]+)(>)?$")
 OBJECT_RE = re.compile(r"^(array<)?(?:object|ref:[^|<>]+)(>)?$")
 ANY = "unknown"  # a schema that names no type accepts every type, so it is wider than any one of them
@@ -133,6 +136,8 @@ def _merged(members: list[Change], pattern: str, pos: int) -> Change:
     noun = COLLAPSIBLE[first.kind]
     where = f" from {first.schema}" if first.kind == "response_field_removed" else ""
     message = f"{noun} {pattern} was removed{where} ({len(members)} keys: {keys})"
+    if first.kind == "request_removed":
+        message += f" (on {first.schema})"
     return Change(
         first.severity, first.kind, message, first.method, first.path, first.schema, pattern,
         old=first.old, affects=first.affects,
