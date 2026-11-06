@@ -44,11 +44,15 @@ class PyCall:
 
 def extract(text: str, resolve: Callable[[list[str]], Resolved | None]) -> tuple[list[PyFound], list[tuple[int, str]]]:
     """Stripe SDK calls in a Python source, plus (line, call) pairs that matched no endpoint."""
+    from . import pyhelpers  # builds on this module
+
     resolved_calls, unresolved = calls(text, resolve)
     found: list[PyFound] = []
+    helpers =pyhelpers.PyHelpers(resolved_calls[0].scopes) if resolved_calls else None
     for c in resolved_calls:
-        fields, hidden = _py_fields(c.node, c.scopes.lookup(c.node.lineno, c.fn))
-        found.append(PyFound(c.node.lineno, c.call, c.resolved, fields, not hidden, frozenset(hidden)))
+        via = pyhelpers.Via(helpers, c)
+        fields, hidden = _py_fields(c.node, c.scopes.lookup(c.node.lineno, c.fn), via)
+        found.append(PyFound(c.node.lineno, c.call + via.suffix, c.resolved, fields, not hidden, frozenset(hidden)))
     return found, unresolved
 
 
@@ -369,7 +373,7 @@ def _as_dict(node: ast.expr | None, assigned):
     return None
 
 
-def _py_fields(call: ast.Call, assigned) -> tuple[set[str], set[str]]:
+def _py_fields(call: ast.Call, assigned, helper=None) -> tuple[set[str], set[str]]:
     """The call's fields, and the prefixes ("" for the top level) under which keys may be sent unseen."""
     fields: set[str] = set()
     hidden: set[str] = set()
@@ -377,7 +381,8 @@ def _py_fields(call: ast.Call, assigned) -> tuple[set[str], set[str]]:
         if kw.arg is None or kw.arg == "params":
             node = _as_dict(kw.value, assigned)
             if node is None:
-                hidden.add("")
+                if helper is None or not helper(kw.value, fields, hidden):  # a same-file helper's dict (pyhelpers)
+                    hidden.add("")
             else:
                 _dict_fields(node, "", fields, assigned, hidden)
             continue

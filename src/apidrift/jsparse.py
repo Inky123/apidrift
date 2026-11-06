@@ -11,7 +11,7 @@ import bisect
 import re
 from dataclasses import dataclass, field
 
-from . import jsroots, jsspread
+from . import jshelpers, jsroots, jsspread
 from .jsroots import CALL_ARGS, NAME
 from .sdkmap import Resolved, SdkIndex
 
@@ -375,10 +375,11 @@ def extract(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> 
     """
     found: list[Found] = []
     resolved_calls, unresolved = calls(text, index, ruby=ruby, resolve=resolve)
+    helpers = jshelpers.Helpers(resolved_calls[0].bindings) if resolved_calls else None
     for c in resolved_calls:
-        fields = Fields()
-        collect(c.args_src, c.spans, "{" in c.resolved.path, c.bindings, fields, ruby=ruby)
-        found.append(Found(c.line, c.call, c.resolved, fields))
+        fields, via = Fields(), jshelpers.Via(helpers)
+        collect(c.args_src, c.spans, "{" in c.resolved.path, c.bindings, fields, ruby=ruby, helper=via)
+        found.append(Found(c.line, c.call + via.suffix, c.resolved, fields))
     return found, unresolved
 
 
@@ -421,7 +422,8 @@ def calls(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> tu
 
 
 def collect(
-    src: Source, spans: list[tuple[int, int]], has_id: bool, bindings: jsroots.Bindings, out: Fields, *, ruby: bool
+    src: Source, spans: list[tuple[int, int]], has_id: bool, bindings: jsroots.Bindings, out: Fields, *, ruby: bool,
+    helper=None,
 ) -> None:
     """Merge the request fields of each argument into ``out``."""
     text = src.text
@@ -452,7 +454,7 @@ def collect(
                 merge(out, variable_fields(src, bindings, binding, i))
             elif k == 0 and has_id and (binding is None or binding.literal is None):
                 continue
-            else:
+            elif helper is None or not helper(i, b, out):  # a same-file helper's result (jshelpers)
                 out.hide("")
 
 

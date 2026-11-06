@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 
-from . import fixvalue, phpparse
+from . import fixhelpers, fixvalue, phpparse
 from .fixedit import Sites, _checked
 from .fixvalue import UNSUPPORTED, Container, Entry
 from .jsparse import Fields, Span
@@ -50,9 +50,12 @@ class Locator:
 
     def sites(self, usage: Usage, m: Migration) -> Sites:
         src = self.src
+        if "[through " in usage.call:
+            return fixhelpers.php_caller_sites(self, usage, m)  # a call of a same-file wrapper
+        plain = fixhelpers.plain_call(usage.call)
         matches = [
             c for c in self.parsed.calls
-            if (c.line, c.call, c.resolved.path, c.resolved.method) == (usage.line, usage.call, usage.path, usage.method)
+            if (c.line, c.call, c.resolved.path, c.resolved.method) == (usage.line, plain, usage.path, usage.method)
         ]
         if not matches:
             return Sites(found_call=False)
@@ -67,6 +70,8 @@ class Locator:
         i = src.skip_space(a)
         opener = src.array_open(i)
         variable = BARE_VARIABLE.match(src.text, i)
+        if "[fields from " in usage.call and fixhelpers.php_sites(self, c, i, b, m, out):
+            return out  # the array a same-file helper returns
         if opener is not None:
             if src.skip_space(src.pairs[opener] + 1) < b:
                 out.incomplete = True  # ``[...] + $more``: the literal is only part of the argument
