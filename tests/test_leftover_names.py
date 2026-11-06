@@ -189,6 +189,12 @@ def test_go_a_field_name_not_provably_the_apps_own_stays_a_leftover(tmp_path, ca
     assert p.fixes == [] and {u.why for u in p.unfixable} == {"leftover_tokens"}, p.to_dict()
 
 
+def test_go_a_package_in_a_nested_module_is_not_resolved(tmp_path):
+    body = "func f(req *dto.SetupRequest) {\n" + SETUP % "req.PaymentMethodTypes" + "}\n"
+    p = go_plan(tmp_path, go_files(body, extra={"internal/dto/go.mod": "module example.com/other\n"}))
+    assert p.fixes == [] and {u.why for u in p.unfixable} == {"leftover_tokens"}, p.to_dict()
+
+
 def test_go_a_field_declared_directly_wins_over_an_embedded_stripe_struct(tmp_path):
     dto = ('package dto\n\nimport "github.com/stripe/stripe-go/v86"\n\ntype SetupRequest struct {\n'
            '\tstripe.SetupIntentParams\n\tPaymentMethodTypes []string\n}\n')

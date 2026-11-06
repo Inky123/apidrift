@@ -116,7 +116,10 @@ class Repo:
         if not path.startswith(name + "/"):
             return None  # another module: not this repository's code
         target = (root / path[len(name) + 1 :]).resolve()
-        return target if self.base is not None and target.is_relative_to(self.base) else None
+        if self.base is None or not target.is_relative_to(root.resolve()) or not target.is_relative_to(self.base):
+            return None
+        inner = [target, *target.parents][: len(target.relative_to(root.resolve()).parts)]
+        return None if any((d / "go.mod").exists() for d in inner) else target  # a nested module is another module
 
     def _find_module(self) -> tuple[Path, str] | None:
         if self._module is False:
