@@ -282,10 +282,12 @@ def _top_level(src: GoSource) -> list[str]:
     ]
 
 
-def oracle_tokens(before: str, after: str, planned: list, edits: list[Edit]) -> tuple[str | None, list[int]]:
+def oracle_tokens(before: str, after: str, planned: list, edits: list[Edit], repo=None) -> tuple[str | None, list[int]]:
     """Go's half of ``fixer._oracle_tokens``: the text outside the edits is unchanged, each edit removes
     exactly the field tokens it covers, and no use of a removed field is left anywhere in the file
-    (it would no longer compile). A wrapped field keeps its name, so only its other uses count."""
+    (it would no longer compile), except a field the app's own struct declares (``repo``, a
+    :class:`goowned.Repo` factory taking the edited source). A wrapped field keeps its name, so only its
+    other uses count."""
     from .fixer import _layout  # fixer dispatches here
 
     identical, placed = _layout(before, after, edits)
@@ -293,6 +295,7 @@ def oracle_tokens(before: str, after: str, planned: list, edits: list[Edit]) -> 
     landed = {span[0] for span in placed.values()}  # where each edit's new text starts in ``after``
     leftovers: list[int] = []
     src_b, src_a = GoSource(before), GoSource(after)
+    owner = repo(src_a) if repo is not None else None
     names: dict[str, bool] = {}  # Go field name -> it stays in the file (a wrapped field keeps its name)
     for _, m, _ in planned:
         rule = GO_RULES.get((m.path, m.target))
@@ -317,6 +320,6 @@ def oracle_tokens(before: str, after: str, planned: list, edits: list[Edit]) -> 
             ]
             stray = stray or len(ours) != len(remaining)  # read or written through another value
         elif remaining:
-            stray = True
+            stray = stray or owner is None or not all(owner.owned(i) for i in remaining)
             leftovers += [src_a.line(i) for i in remaining]
     return ("leftover_tokens" if stray else None), sorted(set(leftovers))

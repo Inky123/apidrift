@@ -19,6 +19,11 @@ PY_MASK = re.compile(
 NEWLINE = re.compile(r"\r\n|\r|\n")
 KEY_AFTER = re.compile(r"[ \t]*(?:=>|:(?!:))")
 PY_KWARG_AFTER = re.compile(r"[ \t]*=(?!=)")
+NAMESPACE_CALL = re.compile(r"\b(?:locals|vars|globals)\s*\(")  # a function's names become dict keys
+DECLARER = re.compile(
+    r"(?:^|[^\w$.])(?:get|set|static|readonly|public|private|protected|declare|abstract|override|accessor|async"
+    r"|function|class|interface|type|enum|namespace|module|def|alias)$"
+)
 
 
 @dataclass(frozen=True)
@@ -77,15 +82,47 @@ def variable_uses(text: str, language: str, found: list[Token]) -> set[int]:
     return out
 
 
-def _py_names(text: str, positions: set[int]) -> set[int]:
+def app_names(text: str, language: str, found: list[Token]) -> set[int]:
+    """Positions among ``found`` that are provably the app's own names and never a key it sends: a Python
+    variable or parameter (not a class attribute, which ``asdict``/``model_dump`` turn into keys, and nothing
+    in a file that reads ``locals()``/``vars()``), a JS/TS/Ruby variable use that is not a class member,
+    a TS property signature (``k?:``), a call, an instance or private field (``@k``, ``#k``) or a method
+    definition. Keys, members, strings, PHP and Go names are never in it (Go: :mod:`goowned`)."""
+    if language == "python":
+        code = PY_MASK.sub(lambda m: " " * len(m.group()), text)
+        if NAMESPACE_CALL.search(code):
+            return set()
+        return _py_names(text, {t.pos for t in found if not t.quoted}, class_fields=False)
+    uses = variable_uses(text, language, found)
+    openers = _opener_at(text, sorted(uses), ruby=language == "ruby")
+    out = set()
+    for pos in uses:
+        before = text[:pos].rstrip(" \t")
+        after = text[pos + len(_key_at(text, pos)):].lstrip(" \t")
+        if text[pos - 1 : pos] in ("@", "#") or after.startswith(("?", "!:", "(", "<")) or DECLARER.search(before):
+            continue  # an ivar or private field, ``k?: T``, a call or method, ``get k`` / ``def k``
+        statement = before[-1:] in ("", "\n", "{", ";", "}") and openers.get(pos) in ("", "{")
+        if statement and not after.startswith((".", "[")):
+            continue  # starts a statement or a class member: ``k = []`` may be a field the object sends
+        out.add(pos)
+    return out
+
+
+def _py_names(text: str, positions: set[int], *, class_fields: bool = True) -> set[int]:
     try:
         tree = ast.parse(text)
     except (SyntaxError, ValueError):
         return set()
     offsets = _Offsets(text)
+    members: set[int] = set()
+    if not class_fields:  # names assigned in a class body are attributes, and serialisers make them keys
+        for cls in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)):
+            for stmt in cls.body:
+                targets = stmt.targets if isinstance(stmt, ast.Assign) else [getattr(stmt, "target", None)]
+                members |= {offsets.at(t.lineno, t.col_offset) for t in targets if isinstance(t, ast.Name)}
     return {
         p for node in ast.walk(tree) if isinstance(node, (ast.Name, ast.arg))
-        if (p := offsets.at(node.lineno, node.col_offset)) in positions
+        if (p := offsets.at(node.lineno, node.col_offset)) in positions and p not in members
     }
 
 

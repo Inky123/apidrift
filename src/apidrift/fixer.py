@@ -18,10 +18,10 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import gofix, migrations, phpfix, phplex, scanner
+from . import gofix, goowned, migrations, phpfix, phplex, scanner
 from .diff import BREAKING, Change
 from .fixedit import Edit, Locator, apply
-from .fixtokens import accessed, tokens, variable_uses
+from .fixtokens import accessed, app_names, tokens
 from .fixvalue import leaf
 from .impact import AFFECTED, POSSIBLE, Impact, assess
 from .migrations import Migration
@@ -96,6 +96,7 @@ class FixPlan:
     leftovers: list[tuple[str, int]] = field(default_factory=list)
     not_attempted: list[Unfixable] = field(default_factory=list)  # possible hits, why == NOT_ATTEMPTED
     possibly_remaining: list[dict] = field(default_factory=list)  # deleted keys a spread may still send
+    root: Path | None = field(default=None, repr=False, compare=False)  # the checkout (the oracle reads Go types)
 
     def to_dict(self) -> dict:
         """The ``--fix`` payload: a frozen contract with the App's pull-request step."""
@@ -130,7 +131,7 @@ Planned = tuple[Impact, Migration, bool]  # the bool: a wrap_type edit wrote the
 def plan_fixes(result: ScanResult, impacts: list[Impact], index: SdkIndex, root: Path) -> FixPlan:
     root = Path(root).resolve()
     base = root.parent if root.is_file() else root
-    plan = FixPlan()
+    plan = FixPlan(root=base)
     by_file: dict[str, list[Candidate]] = {}
     fixable = [
         (i, m) for i in impacts
@@ -214,7 +215,7 @@ def _plan_file(
     if language == "go" and not gofix.balanced(text, content):
         _drop(plan, pairs, "syntax")  # no Go compiler here: at least every bracket still closes
         return None, []
-    why, leftovers, possibly = _oracle(file, text, content, language, planned, edits, index, changes)
+    why, leftovers, possibly = _oracle(file, text, content, language, planned, edits, index, changes, plan.root)
     if why:
         _drop(plan, pairs, why)
         return None, leftovers
@@ -244,7 +245,7 @@ def _candidate_edits(locator: Locator, usage: Usage, migration: Migration) -> tu
 
 def _oracle(
     file: str, before: str, after: str, language: str, planned: list[Planned], edits: list[Edit],
-    index: SdkIndex, changes: list[Change],
+    index: SdkIndex, changes: list[Change], root: Path | None = None,
 ) -> tuple[str | None, list[int], list[Candidate]]:
     """Why the edited file must not be offered (None when every check holds), the old-name tokens left,
     and the planned deletions a call's hidden arguments may still send."""
@@ -266,7 +267,7 @@ def _oracle(
     why, possibly = _oracle_impacts(u_before, u_after, at, changes)
     if why:
         return why, [], []
-    why, leftovers = _oracle_tokens(before, after, language, planned, edits)
+    why, leftovers = _oracle_tokens(before, after, language, planned, edits, (root, file))
     return why, leftovers, possibly
 
 
@@ -308,11 +309,14 @@ def _oracle_impacts(
     return None, possibly
 
 
-def _oracle_tokens(before: str, after: str, language: str, planned: list[Planned], edits: list[Edit]) -> tuple[str | None, list[int]]:
+def _oracle_tokens(
+    before: str, after: str, language: str, planned: list[Planned], edits: list[Edit], where: tuple[Path | None, str] = (None, ""),
+) -> tuple[str | None, list[int]]:
     """Every edit removes exactly the leaf-key tokens it covers (minus those its new text carries), the
-    text outside the edits is byte-identical, and no token of a renamed or deleted key is left behind."""
+    text outside the edits is byte-identical, and no token of a renamed or deleted key is left behind
+    unless it is provably the app's own name (:func:`fixtokens.app_names`, :mod:`goowned`)."""
     if language == "go":
-        return gofix.oracle_tokens(before, after, planned, edits)
+        return gofix.oracle_tokens(before, after, planned, edits, lambda src: goowned.Repo(where[0], where[1], src))
     identical, placed = _layout(before, after, edits)
     stray = not identical
     leftovers: list[int] = []
@@ -333,12 +337,10 @@ def _oracle_tokens(before: str, after: str, language: str, planned: list[Planned
             stray = stray or any(accessed(after, language, name, t) for t in remaining)
             continue
         # Backstop: any token of the old key left in code means the edit is not known to be complete. The
-        # exceptions: a value carried into the new text (``country: countries[0]``), and a variable that
-        # happens to carry the key's name, which a shorthand entry leaves behind (``new: payment_method_types``)
-        # or which rename_first keeps as the value (``def f(countries)`` ... ``country: countries[0]``).
+        # exceptions: a value carried into the new text (``country: countries[0]``), and the app's own names
+        # that happen to be spelled like the key (a parameter or variable, never a key, member or string).
         carried = {t.pos for t in remaining for e in mine if placed[e][0] <= t.pos < placed[e][1]}
-        loose = m.action == "rename_first" or any(e.shorthand for e in mine)
-        allowed = variable_uses(after, language, remaining) if loose else set()
+        allowed = app_names(after, language, remaining)
         stray = stray or any(t.pos not in allowed and t.pos not in carried for t in remaining)
         if m.action == "rename_first":  # the old value is kept on purpose: its variables are not leftovers
             remaining = [t for t in remaining if t.pos not in allowed and t.pos not in carried]
