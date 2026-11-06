@@ -34,14 +34,22 @@ class PyRead:
 class PyHelpers:
     def __init__(self, scopes: pyparse._PyScopes) -> None:
         self.scopes = scopes
-        self.module_defs: dict[str, list[ast.AST]] = {}
-        self.imported: set[str] = set()
-        for node in scopes.tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                self.module_defs.setdefault(node.name, []).append(node)
-        for node in ast.walk(scopes.tree):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                self.imported |= {(a.asname or a.name).split(".")[0] for a in node.names}
+        self._names: tuple[dict[str, list[ast.AST]], set[str]] | None = None
+
+    @property
+    def names(self) -> tuple[dict[str, list[ast.AST]], set[str]]:
+        """Module-level definitions by name, and every imported name (found on first use)."""
+        if self._names is None:
+            defs: dict[str, list[ast.AST]] = {}
+            for node in self.scopes.tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    defs.setdefault(node.name, []).append(node)
+            imported = {
+                (a.asname or a.name).split(".")[0] for node in ast.walk(self.scopes.tree)
+                if isinstance(node, (ast.Import, ast.ImportFrom)) for a in node.names
+            }
+            self._names = defs, imported
+        return self._names
 
     # --- which helper ----------------------------------------------------------------------
 
@@ -51,9 +59,10 @@ class PyHelpers:
         func, found = node.func, None
         if isinstance(func, ast.Name):
             name = func.id
-            if name in self.imported or self._shadowed(name, fn):
+            defs, imported = self.names
+            if name not in defs or name in imported or self._shadowed(name, fn):
                 return None
-            found = self.module_defs.get(name, [])
+            found = defs[name]
         elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id in ("self", "cls"):
             klass = self._class_of(fn)
             if klass is None:

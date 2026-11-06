@@ -108,6 +108,15 @@ def test_a_merge_of_something_unknown_hides_the_top_level_but_keeps_the_literal(
     assert "intent_payload" in call and "payment_method_types" in fields and "" in hidden
 
 
+def test_request_options_built_by_a_helper_hide_nothing_and_are_not_named(tmp_path):
+    src = (
+        "class Pay\n  def charge\n    Stripe::PaymentIntent.create({amount: 1}, request_options)\n  end\n\n"
+        "  def request_options\n    {api_key: key, stripe_account: account}\n  end\nend\n"
+    )
+    _, call, fields, hidden = one(tmp_path, "pay.rb", src)
+    assert call == "Stripe::PaymentIntent.create" and fields == {"amount"} and hidden == set()
+
+
 def test_a_ruby_helper_defined_after_its_use_and_returning_a_literal(tmp_path):
     src = (
         "class Pay\n  def charge\n    Stripe::PaymentIntent.create(params_for(order))\n  end\n\n"
@@ -176,6 +185,29 @@ def test_a_js_helper_that_cannot_be_followed_stays_hidden(tmp_path, label, old, 
     src = JS.replace(old, new)
     found = [u for u in scan(tmp_path, {"pay.js": src}) if u.path == "/v1/payment_intents"]
     assert found and all("[fields from" not in u.call and "" in (u.hidden or ()) for u in found), label
+
+
+@pytest.mark.parametrize("name,text", [
+    ("svc.ts", STRIPE_JS + "class A {\n  build() { return { amount: 1 }; }\n}\nclass B extends Base {\n"
+               "  pay() { return stripe.paymentIntents.create(this.build()); }\n}\n"),
+    ("pay.rb", "class A\n  def build\n    {amount: 1}\n  end\nend\n\nclass B < Base\n  def pay\n"
+               "    Stripe::PaymentIntent.create(build)\n  end\nend\n"),
+    ("D.php", PHP + "class A {\n    private function build() { return ['amount' => 1]; }\n}\nclass B extends Base {\n"
+              "    public function pay() { return PaymentIntent::create($this->build()); }\n}\n"),
+])
+def test_a_method_of_another_class_in_the_same_file_is_not_the_helper(tmp_path, name, text):
+    assert one(tmp_path, name, text)[2:] == (set(), {""})
+
+
+def test_an_imported_helper_is_not_followed_into_another_file(tmp_path):
+    """One hop across files is not read: a name imported from either of two modules stays hidden."""
+    files = {
+        "a.js": "export function build(o) { return { amount: 1 }; }\n",
+        "b.js": "export function build(o) { return { payment_method_types: ['card'] }; }\n",
+        "pay.js": STRIPE_JS + "import { build } from './b';\nstripe.paymentIntents.create(build(o));\n",
+    }
+    found = [u for u in scan(tmp_path, files) if u.path == "/v1/payment_intents"]
+    assert [(u.file, set(u.fields), set(u.hidden)) for u in found] == [("pay.js", set(), {""})]
 
 
 def test_a_helper_result_written_into_and_passed_on_at_the_call_site(tmp_path):

@@ -19,6 +19,7 @@ re-scans the file with the helper read the same way.
 from __future__ import annotations
 
 import ast
+import json
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -346,12 +347,28 @@ def _files(loc, language: str):
     return out
 
 
+def _library(loc) -> bool:
+    """The repository is a package others install (a composer ``library``, a gem): its public methods have
+    callers and overrides outside it, which no check here can see."""
+    context = getattr(loc, "context", None)
+    if context is None:
+        return True
+    base = Path(context[0])
+    try:
+        composer = json.loads((base / "composer.json").read_text(errors="replace"))
+    except (OSError, ValueError):
+        composer = None
+    if isinstance(composer, dict) and composer.get("type", "library") == "library":
+        return True  # Composer's default type is ``library``; applications say ``project``
+    return any(base.glob("*.gemspec"))
+
+
 def _used_elsewhere(loc, name: str, language: str) -> bool:
     """Another source file names ``name`` without defining its own (None context: no repository, refuse)."""
     _elsewhere = loc.__dict__.setdefault("_elsewhere", {})
     key = (name, language, "use")
     if key not in _elsewhere:
-        files = _files(loc, language)
+        files = None if _library(loc) else _files(loc, language)
         if files is None:
             _elsewhere[key] = True
         else:
@@ -368,7 +385,7 @@ def _defined_elsewhere(loc, name: str) -> bool:
     _elsewhere = loc.__dict__.setdefault("_elsewhere", {})
     key = (name, "php", "def")
     if key not in _elsewhere:
-        files = _files(loc, "php")
+        files = None if _library(loc) else _files(loc, "php")
         own = re.compile(_definition(name, "php"), re.I)
         _elsewhere[key] = files is None or any((t := scanner._read(p)) is not None and own.search(t) for p in files)
     return _elsewhere[key]

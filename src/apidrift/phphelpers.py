@@ -102,9 +102,16 @@ class PhpHelpers:
             return None
         method = text[i] in "$sS" and m.start(1) > i
         d = self.unique(m.group(1), method)
-        if d is None or d.open <= i < d.close:
-            return None
+        if d is None or d.open <= i < d.close or (method and self.container(d.pos) != self.container(i)):
+            return None  # undefined, ambiguous, recursive, or a method of another class in this file
         return d
+
+    def container(self, pos: int) -> int:
+        """The brace of the class (trait, interface, enum) whose body holds ``pos``; -1 at top level."""
+        block = self.src.enclosing(pos)
+        while block >= 0 and block not in self.scopes.classes:
+            block = self.src.parent[block]
+        return block
 
     def argument(self, i: int, b: int) -> Read | None:
         d = self.callee(i, b)
@@ -228,6 +235,8 @@ class PhpHelpers:
         for m in re.finditer(rf"{head}{name}\s*\(", src.code, re.I):
             paren = m.end() - 1
             if d.open <= m.start() < d.close or paren not in src.pairs:
+                continue
+            if d.method and self.container(d.pos) != self.container(m.start()):
                 continue
             args = src.args(paren)
             if k >= len(args) or any(text.startswith("...", src.skip_space(x)) or _named(src, x) for x, _ in args):

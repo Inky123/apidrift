@@ -33,7 +33,9 @@ ARROW_EXPR = re.compile(  # const build = (x) => ({ ... })
     rf"\s*(?::[^=\n]+?)?=>\s*\(\s*\{{"
 )
 RETURN = re.compile(r"(?<![\w$.])return\b")
-RUBY_CLOSERS = {"end", "else", "elsif", "when", "in", "rescue", "ensure", "then"}
+RUBY_CLASS = re.compile(r"^([ \t]*)(class|module)[ \t]+(?!<<)[A-Z]", re.M)
+JS_CLASS = re.compile(rf"(?<![\w$.])class(?:\s+{NAME})?(?:\s+(?:extends|implements)\s+[^{{;]+?)*\s*\{{")
+RUBY_CLOSERS ={"end", "else", "elsif", "when", "in", "rescue", "ensure", "then"}
 REMOVERS = re.compile(r"\s*\.\s*(?:delete|except!|reject!|select!|compact!|delete_if|keep_if)\b")
 
 
@@ -75,10 +77,17 @@ class Helpers:
     def __init__(self, bindings: Bindings) -> None:
         self.bindings, self.src, self.mask, self.scopes = bindings, bindings.src, bindings.mask, bindings.scopes
         self.ruby = self.src.ruby
-        self.defs: dict[str, list[Definition]] = {}
-        for d in (self._ruby_defs() if self.ruby else self._js_defs()):
-            self.defs.setdefault(d.name, []).append(d)
+        self._defs: dict[str, list[Definition]] | None = None
         self.reads: dict[int, Read] = {}  # argument start -> what it resolved to (the fixer walks these)
+
+    @property
+    def defs(self) -> dict[str, list[Definition]]:
+        """Found on first use: most calls pass a literal and never ask."""
+        if self._defs is None:
+            self._defs = {}
+            for d in (self._ruby_defs() if self.ruby else self._js_defs()):
+                self._defs.setdefault(d.name, []).append(d)
+        return self._defs
 
     def line(self, pos: int) -> int:
         return self.src.text.count("\n", 0, pos) + 1
@@ -163,6 +172,8 @@ class Helpers:
             if end != b:
                 return None
             name, explicit = m.group(1), text[i:m.start(1)].strip() != ""
+            if name not in self.defs:
+                return None
             outer = self._ruby_enclosing(i)
             if outer is None:
                 return None
@@ -174,6 +185,8 @@ class Helpers:
             if m is None or self.src.skip_balanced(m.end() - 1) != b:
                 return None
             name = m.group(2)
+            if name not in self.defs:
+                return None
             if m.group(1):
                 d = self.unique(name, "method")
             else:
@@ -182,7 +195,25 @@ class Helpers:
                 d = self.unique(name, "function")
         if d is None or d.open <= i < d.close:
             return None  # undefined, ambiguous, or the helper calling itself
+        if d.kind != "function" and self.container(d.pos) != self.container(i):
+            return None  # a method of another class in this file: ``this`` / ``self`` is not that class
         return d
+
+    def container(self, pos: int) -> tuple[int, int] | None:
+        """The innermost class (Ruby: class or module) whose body holds ``pos``."""
+        if not hasattr(self, "_containers"):
+            text, spans = self.src.text, []
+            if self.ruby:
+                for m in RUBY_CLASS.finditer(text):
+                    end = re.compile(rf"^{re.escape(m.group(1))}end\b", re.M).search(text, m.end())
+                    if end is not None and not self.mask.covers(m.start(2)):
+                        spans.append((m.start(2), end.start()))
+            else:
+                for m in JS_CLASS.finditer(text):
+                    if not self.mask.covers(m.start()):
+                        spans.append((m.end() - 1, self.src.skip_balanced(m.end() - 1)))
+            self._containers = spans
+        return max((s for s in self._containers if s[0] <= pos < s[1]), default=None)
 
     def _ruby_enclosing(self, pos: int) -> Definition | None:
         best = None
@@ -208,17 +239,20 @@ class Helpers:
         if m is None or text[i:b].strip() != m.group(0):
             return None
         name = m.group(0)
-        reaching = self.bindings.reaching(name, i)
-        if len(reaching) != 1 or reaching[0].value < 0 or reaching[0].literal is not None:
+        nearest = self.bindings.at(name, i)  # cheap first: only a binding to a helper call is worth more
+        if nearest is None or nearest.literal is not None or nearest.value < 0:
             return None
-        binding = reaching[0]
+        d = self.callee(nearest.value, _value_end(self.src, nearest.value))
+        if d is None:
+            return None
+        reaching = self.bindings.reaching(name, i)
+        if reaching != [nearest]:
+            return None  # another binding may be the one in force, or a parameter shadows it
         if self.ruby:
             outer = self._ruby_enclosing(i)
-            if outer is None or not outer.open <= binding.pos < i:
+            if outer is None or not outer.open <= nearest.pos < i:
                 return None
-        end = _value_end(self.src, binding.value)
-        d = self.callee(binding.value, end)
-        return Read(d, binding.value, name, i) if d is not None else None
+        return Read(d, nearest.value, name, i)
 
     # --- what a helper returns ---------------------------------------------------------
 
@@ -406,6 +440,8 @@ class Via:
         got = self.helpers.read(i, b) if self.helpers is not None else None
         if got is None:
             return False
+        if not got[1].paths and not got[1].hidden:
+            return True  # request options (``{api_key: ...}``, dropped by ``merge``) or ``{}``: nothing is sent
         merge(out, got[1])
         self.first = self.first or got[0]
         self.reads.append(got[0])

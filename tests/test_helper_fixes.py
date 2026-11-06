@@ -178,5 +178,23 @@ def test_a_php_wrapper_with_no_caller_in_the_repository_is_never_fixed(tmp_path)
     assert plan.fixes == [] and plan.unfixable == [] and [u.line for u in plan.not_attempted] == [11]
 
 
+@pytest.mark.parametrize("marker,text", [
+    ("composer.json", '{"name": "acme/billing", "require": {}}'),  # Composer's default type is library
+    ("composer.json", '{"name": "acme/billing", "type": "library"}'),
+    ("billing.gemspec", "Gem::Specification.new { |s| s.name = 'billing' }\n"),
+])
+def test_a_package_others_install_never_gets_a_helper_fix(tmp_path, marker, text):
+    """Its public methods have callers and overrides outside the repository (cashier is the real case)."""
+    src = PHP_WRAPPER if marker == "composer.json" else RUBY
+    name = "D.php" if marker == "composer.json" else "app/pay.rb"
+    plan = plan_for(tmp_path, {name: src, marker: text})
+    assert plan.fixes == [] and [u.why for u in plan.unfixable] == ["helper_used_elsewhere"]
+
+
+def test_an_application_declared_as_a_composer_project_is_fixed(tmp_path):
+    plan = plan_for(tmp_path, {"D.php": PHP_WRAPPER, "composer.json": '{"type": "project", "repositories": [{"type": "library"}]}'})
+    assert len(plan.fixes) == 1 and plan.unfixable == []
+
+
 def test_every_new_reason_is_listed_and_has_a_sentence():
     assert set(REASONS) <= set(WHY) and set(REASONS) <= set(UNFIXABLE_WHY)
