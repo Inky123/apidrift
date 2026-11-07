@@ -331,6 +331,13 @@ class FakeGitHub:
                 return httpx.Response(200, json={"sha": sha, "truncated": truncated, "tree": entries})
             if sha in self.trees:
                 return httpx.Response(200, json={"sha": sha, "truncated": False, **self.trees[sha]})
+        if (match := re.fullmatch(r"/git/blobs/([0-9a-f]{40})", rel)) and method == "GET":
+            sha = match.group(1)
+            files = (p.read_bytes() for p in sorted(self.tree.rglob("*")) if p.is_file() and not p.is_symlink())
+            data = self.blobs.get(sha) or next((d for d in files if blob_sha(d) == sha), None)
+            if data is None:
+                return httpx.Response(404, json={"message": "Not Found"})
+            return httpx.Response(200, json={"sha": sha, "encoding": "base64", "content": base64.encodebytes(data).decode()})
         if rel == "/git/blobs" and method == "POST":
             data = base64.b64decode(body["content"]) if body.get("encoding") == "base64" else body["content"].encode()
             sha = blob_sha(data)

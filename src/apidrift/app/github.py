@@ -189,6 +189,13 @@ class GitHubClient:
             return {"sha": None, "type": "dir"}
         return {"sha": data.get("sha"), "type": data.get("type")} if isinstance(data, dict) else {"sha": None, "type": None}
 
+    def get_blob(self, token: str, full_name: str, sha: str) -> bytes:
+        """The bytes of blob ``sha`` (the caller checks they hash to it)."""
+        data = self._request("GET", f"/repos/{full_name}/git/blobs/{_sha(sha, 'blob')}", bearer=token).json()
+        if not isinstance(data, dict) or data.get("encoding") != "base64" or not isinstance(data.get("content"), str):
+            raise GitHubError("GitHub returned a blob that is not base64")
+        return base64.b64decode(data["content"])
+
     def get_commit(self, token: str, full_name: str, sha: str) -> dict:
         return self._request("GET", f"/repos/{full_name}/git/commits/{sha}", bearer=token).json()
 

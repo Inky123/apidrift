@@ -164,9 +164,11 @@ def _order(key: tuple[str, str, str, str]) -> tuple[str, ...]:
 
 
 def render_pr(
-    payload: dict, fixes: list[dict], *, full_name: str, sha: str, version: str, issue_number: int, fingerprint: str
+    payload: dict, fixes: list[dict], *, full_name: str, sha: str, version: str, issue_number: int, fingerprint: str,
+    tests: list[dict] | None = None,
 ) -> tuple[str, str]:
-    """(title, body) for the pull request that pushes ``fixes`` (the validated subset of ``payload['fixes']``).
+    """(title, body) for the pull request that pushes ``fixes`` (the validated subset of ``payload['fixes']``)
+    and ``tests`` (the test files :mod:`fixtestcheck` rebuilt; their lines are the parent's own checked ones).
 
     Repo text (paths, call text) is rendered through :func:`permalink` and :func:`code` only. Each group's
     method, note and changelog link come from the parent's migration table by (path, target); the child's own
@@ -217,7 +219,11 @@ def render_pr(
         f"Verified: apidrift re-scanned the changed files; {count} what Stripe {safe_version(version)} expects{maybe}; "
         "every other Stripe call is unchanged.",
     ]
-    lines += _left_for_you(payload, full_name, sha, possibly)
+    updated = sorted({(str(t["file"]), int(e["line"])) for t in tests or [] for e in t["edits"]})
+    if updated:
+        lines += ["", "**Tests updated**", "These tests expected the old request and now expect the new one, changed the "
+                  f"same way as the code: {_links(full_name, sha, list(updated))}."]
+    lines += _left_for_you(payload, full_name, sha, possibly, set(updated))
     lines += ["", f"Addresses #{issue_number}", pr_marker(fingerprint)]
     keys = {(action, old) for _, old, action, _ in groups}
     return pr_title(version, keys, len(placed)), "\n".join(lines) + "\n"
@@ -262,7 +268,9 @@ def _possibly_remaining(payload: dict, placed: set[tuple[str, int, str]]) -> Pos
     return sorted(by_field.items())
 
 
-def _left_for_you(payload: dict, full_name: str, sha: str, possibly: Possibly | None = None) -> list[str]:
+def _left_for_you(
+    payload: dict, full_name: str, sha: str, possibly: Possibly | None = None, updated: set | frozenset = frozenset(),
+) -> list[str]:
     """Fixed sentences only: a reason the child gives that is not in our tables becomes one constant sentence,
     never the child's text, so there is at most one line per known reason plus one, each capped in length."""
     by_why: dict[str, list[tuple[str, object]]] = {}
@@ -276,7 +284,7 @@ def _left_for_you(payload: dict, full_name: str, sha: str, possibly: Possibly | 
             reason = NOT_ATTEMPTED_WHY.get(str(item.get("why") or ""), UNKNOWN_NOT_ATTEMPTED)
             not_attempted.setdefault(reason, []).append((str(item["file"]), item.get("line")))
     leftovers = _places(payload.get("leftovers"))
-    tests = _places(payload.get("tests"))
+    tests = [(f, line) for f, line in _places(payload.get("tests")) if (f, line) not in updated]
     unread = unread_note(payload)
     if not (by_why or not_attempted or possibly or leftovers or tests or unread):
         return []
@@ -289,7 +297,8 @@ def _left_for_you(payload: dict, full_name: str, sha: str, possibly: Possibly | 
         places: list[tuple[str, object]] = [(file, line) for file, line, _ in spots]
         lines.append(f"- {code(field)} {POSSIBLY_REMAINING}: {_links(full_name, sha, places)}")
     if tests:
-        lines.append(f"- Tests that name the old field: {_links(full_name, sha, tests)}. A test that expects the request "
+        label = "Other tests that name the old field" if updated else "Tests that name the old field"
+        lines.append(f"- {label}: {_links(full_name, sha, tests)}. A test that expects the request "
                      "this pull request changes fails until it is updated here; one that reads the field from a "
                      "Stripe response can stay.")
     if leftovers:
