@@ -19,6 +19,8 @@ caller reads the nearest binding only, and hiding every key keeps that honest. R
 
 from __future__ import annotations
 
+import re
+
 
 def reaching_fields(src, bindings, binding, at: int):
     """Fields of a variable argument whose nearest binding ``binding`` is an object literal: the union of every
@@ -45,6 +47,8 @@ def add_writes(src, bindings, binding, at: int, sub) -> None:
     from .jshelpers import _assign_at
     from .jsparse import parse_object
 
+    if not _whole(src, binding.literal):
+        sub.hide("")  # ``args = { amount: 1 }.merge(options)``, ``p = { a } || other``: more than the literal
     only = not src.ruby and bindings.reaching(binding.name, at) == [binding]
     for mutation in bindings.mutations(binding.name, binding.literal, at):
         plain = only and mutation.key and mutation.literal is None
@@ -80,8 +84,6 @@ def merged(src, after: int, end: int, out, helper) -> bool:
 def merged_variable(src, bindings, i: int, end: int, out, helper) -> bool:
     """Ruby: ``attributes.merge(expand_options)`` where ``attributes`` is bound to hash literals (every binding that
     reaches, :func:`reaching_fields`) and every merge is a same-file helper's hash (:func:`merged`)."""
-    import re
-
     from .jsparse import Fields, merge
 
     m = re.compile(r"[A-Za-z_]\w*").match(src.text, i)
@@ -96,3 +98,16 @@ def merged_variable(src, bindings, i: int, end: int, out, helper) -> bool:
     merge(out, reaching_fields(src, bindings, binding, i))
     merge(out, merges)
     return True
+
+
+KEEPS = re.compile(r"\.\s*(?:freeze|compact|dup)\b")  # methods that return the literal's keys, or fewer
+
+
+def _whole(src, literal: int) -> bool:
+    """The value bound is the object literal at ``literal`` itself (``as T`` / ``satisfies T`` after it in TypeScript,
+    ``.freeze`` / ``.compact`` / ``.dup`` after it in Ruby), not an expression it is part of."""
+    text = src.text
+    j = src.skip_space(src.skip_balanced(literal))
+    while (m := KEEPS.match(text, j)) is not None and src.ruby:
+        j = src.skip_space(m.end())
+    return j >= src.n or text[j] not in ".|&?+-*/%[(<>=!^~"

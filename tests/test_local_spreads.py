@@ -178,3 +178,23 @@ def test_a_ruby_literal_merged_with_a_helper_is_never_edited(tmp_path):
     plan = plan_for(tmp_path, {"pay.rb": text})
     assert plan.fixes == []
     assert [(u.target, u.why) for u in plan.unfixable] == [("payment_method_types", "incomplete_binding")]
+
+
+@pytest.mark.parametrize("name, text", [
+    ("pay.rb", "class Pay\n  def charge(options = {})\n    args = {\n      payment_method_types: ['card']\n    }.merge(options)\n"
+               "    Stripe::PaymentIntent.create(args)\n  end\nend\n"),
+    ("pay.js", JS + "function go(extra) {\n  const p = { payment_method_types: ['card'] } || extra;\n"
+               "  return stripe.paymentIntents.create(p);\n}\n"),
+])
+def test_a_bound_literal_that_is_part_of_a_larger_value_hides_the_rest_and_is_never_edited(tmp_path, name, text):
+    found = [u for u in scan(tmp_path / "scan", {name: text}) if u.path == "/v1/payment_intents"]
+    assert [("payment_method_types" in u.fields, "" in (u.hidden or ())) for u in found] == [(True, True)]
+    plan = plan_for(tmp_path / "fix", {name: text})
+    assert plan.fixes == []
+    assert [(u.target, u.why) for u in plan.unfixable] == [("payment_method_types", "incomplete_binding")]
+
+
+def test_a_frozen_or_compacted_ruby_literal_is_still_the_whole_value(tmp_path):
+    text = "class Pay\n  def charge\n    args = {amount: 1}.compact.freeze\n    Stripe::PaymentIntent.create(args)\n  end\nend\n"
+    found = [u for u in scan(tmp_path, {"pay.rb": text}) if u.path == "/v1/payment_intents"]
+    assert [(set(u.fields), set(u.hidden or ())) for u in found] == [({"amount"}, set())]
