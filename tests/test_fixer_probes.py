@@ -67,7 +67,8 @@ def test_a_parameter_shadowing_the_variable_makes_the_site_unfixable(tmp_path):
         "params = {'payment_method_types': ['card'], 'amount': 1}\n"
         "def go(params):\n"
         "    return stripe.PaymentIntent.create(**params)\n")})
-    assert unfixable_why(py) == [(4, "incomplete_binding")]
+    # the parameter is whatever the caller passes, not the module's literal: an unseen dict, so only "possible"
+    assert py.fixes == [] and py.unfixable == [] and [u.line for u in py.not_attempted] == [4]
     rb = plan_for(tmp_path / "rb", {"pay.rb": (
         "require 'stripe'\n"
         "def build\n"

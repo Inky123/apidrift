@@ -354,11 +354,9 @@ def _oracle_tokens(
 
 
 def _parses(text: str) -> bool:
-    try:
-        ast.parse(text)
-    except (SyntaxError, ValueError):
-        return False
-    return True
+    from .pysyntax import parse  # the scanner's parser: Python 3.14's ``except A, B:`` too
+
+    return parse(text) is not None
 
 
 def _layout(before: str, after: str, edits: list[Edit]) -> tuple[bool, dict[Edit, tuple[int, int]]]:

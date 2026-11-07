@@ -51,31 +51,40 @@ def extract(text: str, resolve: Callable[[list[str]], Resolved | None]) -> tuple
     helpers =pyhelpers.PyHelpers(resolved_calls[0].scopes) if resolved_calls else None
     for c in resolved_calls:
         via = pyhelpers.Via(helpers, c)
-        fields, hidden = _py_fields(c.node, c.scopes.lookup(c.node.lineno, c.fn), via)
+        fields, hidden = _py_fields(c.node, c.scopes.lookup(c.node.lineno, c.fn, c.node), via)
         found.append(PyFound(c.node.lineno, c.call + via.suffix, c.resolved, fields, not hidden, frozenset(hidden)))
     return found, unresolved
 
 
 def calls(text: str, resolve: Callable[[list[str]], Resolved | None]) -> tuple[list[PyCall], list[tuple[int, str]]]:
     """Resolved SDK calls (arguments not yet read), plus the (line, call) pairs that matched no endpoint."""
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError, ValueError):
+    from . import pyalias, pysyntax  # pyalias builds on this module
+
+    tree = pysyntax.parse(text)
+    if tree is None:
         return [], []
+
     aliases = _import_aliases(tree)
     scopes = _PyScopes(tree)
+    binders: pyalias.Binders | None = None
     found: list[PyCall] = []
     unresolved: list[tuple[int, str]] = []
     for node, fn in scopes.calls:
         chain = _chain(node.func)
         if not chain:
             continue
+        call = ""
         if chain[0] in aliases:
             chain = aliases[chain[0]].split(".") + chain[1:]
+        elif chain[0] not in ("self", "cls"):
+            binders = binders or pyalias.Binders(tree)
+            expanded = pyalias.expand(binders, node.func, chain, aliases)
+            if expanded is not None:
+                call, chain = ".".join(chain), expanded  # shown as written; resolved through the alias
         if not stripe_like(chain):
             continue
-        call = ".".join(chain)
-        resolved = resolve(chain)
+        call = call or ".".join(chain)
+        resolved = pyalias.resolve(chain, node.func, resolve)
         if resolved is None:
             unresolved.append((node.lineno, call))
             continue
@@ -183,8 +192,9 @@ class _PyScopes:
     def _touch(self, fn: ast.AST | None, name: str, line: int, key: str) -> None:
         self.touches[fn].setdefault(name, []).append((line, key))
 
-    def lookup(self, line: int, fn: ast.AST | None) -> "_PyLookup":
-        return _PyLookup(self, line, fn)
+    def lookup(self, line: int, fn: ast.AST | None, at: ast.AST | None = None) -> "_PyLookup":
+        """Dict literals names hold at ``line``; with ``at`` (the call), every binding that can reach it."""
+        return _PyLookup(self, line, fn, at)
 
     def reaching(self, name: str, call: ast.Call, fn: ast.AST | None) -> tuple[list[Binding], ast.AST | None, bool]:
         """Bindings of ``name`` that can be in force at ``call`` (nearest first), the scope they live in, and
@@ -226,14 +236,18 @@ class _PyScopes:
 
     def rebound_in_loop(self, name: str, call: ast.Call, scope: ast.AST | None) -> bool:
         """``name`` is bound again after the call inside a loop that also holds the call."""
+        return bool(self.loop_rebindings(name, call, scope))
+
+    def loop_rebindings(self, name: str, call: ast.AST, scope: ast.AST | None) -> list[ast.expr]:
+        """Values ``name`` is bound to after the call inside a loop that also holds the call."""
         call_ancestors = self._ancestors(call)
-        for line, _, stmt in self.bindings[scope].get(name, ()):
-            if line <= call.lineno:
-                continue
-            for node in self._ancestors(stmt):
-                if isinstance(node, (ast.For, ast.AsyncFor, ast.While)) and node in call_ancestors:
-                    return True
-        return False
+        out: list[ast.expr] = []
+        for line, value, stmt in self.bindings[scope].get(name, ()):
+            if line > call.lineno and any(
+                isinstance(node, (ast.For, ast.AsyncFor, ast.While)) and node in call_ancestors for node in self._ancestors(stmt)
+            ):
+                out.append(value)
+        return out
 
     def mutation_nodes(self, name: str, scope: ast.AST | None, after: int, before: int) -> list[MutationRec]:
         """Writes into ``name`` recorded in ``scope`` on lines in ``(after, before)``."""
@@ -280,10 +294,12 @@ class _PyScopes:
 class _PyLookup:
     """``get(name)``: the dict literal ``name`` holds at a call site, with later writes folded in; None otherwise."""
 
-    def __init__(self, scopes: _PyScopes, line: int, fn: ast.AST | None) -> None:
-        self.scopes, self.line, self.fn = scopes, line, fn
+    def __init__(self, scopes: _PyScopes, line: int, fn: ast.AST | None, at: ast.AST | None = None) -> None:
+        self.scopes, self.line, self.fn, self.at = scopes, line, fn, at
 
     def get(self, name: str) -> ast.expr | None:
+        if self.at is not None:
+            return self._reaching(name)
         scope = self.fn
         while True:
             found = self._in(scope, name)
@@ -296,6 +312,26 @@ class _PyLookup:
             if scope is None:
                 return None
             scope = self.scopes.parent[scope]
+
+    def _reaching(self, name: str) -> ast.expr | None:
+        """The union of every dict literal that can be bound to ``name`` at the call (``if a: p = {...} else:
+        p = {...}``), with later writes folded in, and an unknown entry when one of the bindings is not a
+        literal; None when none is, or a parameter of an enclosing function shadows the name. A binding after
+        the call in a loop that holds the call reaches it too."""
+        s = self.scopes
+        bindings, scope, dominated = s.reaching(name, self.at, self.fn)
+        if not bindings or s.shadowed_by_parameter(name, self.fn, scope, dominated):
+            return None
+        values = [value for _, value, _ in bindings] + s.loop_rebindings(name, self.at, scope)
+        readable = [v for v in values if _as_dict(v, _NOTHING) is not None]
+        if not readable:
+            return None
+        if len(readable) < len(values):  # read what can be read; the rest may send anything (a ``**`` entry)
+            readable.append(ast.Dict(keys=[None], values=[ast.Constant(None)]))
+        value = readable[0] if len(readable) == 1 else _union(readable)
+        first = min(line for line, _, _ in bindings)
+        mutations = [m for m in s.mutations[scope].get(name, ()) if m[0] > first]
+        return _with_mutations(value, mutations) if mutations else value
 
     def _in(self, scope: ast.AST | None, name: str) -> Binding | None:
         candidates = self.scopes.bindings[scope].get(name, [])
@@ -334,6 +370,20 @@ def _constant_keys(node: ast.expr) -> list[str]:
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "dict":
         return [kw.arg for kw in node.keywords if kw.arg]
     return []
+
+
+def _union(values: list[ast.expr]) -> ast.Dict:
+    """One synthetic dict holding every entry of several literals (read for field names only, never edited)."""
+    keys: list[ast.expr | None] = []
+    vals: list[ast.expr] = []
+    for v in values:
+        if isinstance(v, ast.Dict):
+            keys += v.keys
+            vals += v.values
+        else:  # dict(k=v, **rest)
+            keys += [ast.Constant(kw.arg) if kw.arg else None for kw in v.keywords]
+            vals += [kw.value for kw in v.keywords]
+    return ast.Dict(keys=keys, values=vals)
 
 
 def _with_mutations(value: ast.expr, mutations: list[MutationRec]) -> ast.expr:
