@@ -73,6 +73,8 @@ VISIBLE_HIDDEN = [
     ("the property is assigned from outside", "Card.php", "class Card {", "function f($c) { $c->driver = new X(); }\nclass Card {"),
     ("the wrapper's parameter is also used", "Driver.php", "        return PaymentIntent::create($params,",
      "        log($params);\n        return PaymentIntent::create($params,"),
+    ("the wrapper's parameter is interpolated", "Driver.php", "        return PaymentIntent::create($params,",
+     "        log(\"p {$this->dump($params)}\");\n        return PaymentIntent::create($params,"),
 ]
 
 

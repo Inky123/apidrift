@@ -147,6 +147,13 @@ def test_a_wrapper_whose_parameter_is_also_read_is_not_followed(tmp_path):
     assert any(s[0] == "lib/billing.js" for s in found)
 
 
+def test_a_parameter_also_read_in_a_template_is_not_forwarded_unchanged(tmp_path):
+    """Ghost's createCustomer logs ``${JSON.stringify(options)}``: a use the string mask hides."""
+    func = FUNC.replace("  return stripe", "  debug(`create(${JSON.stringify(params)})`);\n  return stripe")
+    found = sites(tmp_path, {"lib/billing.js": func, "lib/go.js": USER})
+    assert not any("[through " in s[2] for s in found)
+
+
 @pytest.mark.parametrize("export", [
     "export default createIntent;\n", "export { createIntent as default };\n",
 ])

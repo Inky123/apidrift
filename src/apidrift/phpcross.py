@@ -121,6 +121,10 @@ def collect(parsed: phpparse.Parsed, helpers: PhpHelpers, table: Table, rel: str
         if got is None:
             continue
         d, k = got
+        variable = re.compile(rf"\${re.escape(d.params[k])}(?!\w)")
+        named = [m for m in variable.finditer(parsed.src.text, d.open, d.close) if not _comment(parsed.src, m.start())]
+        if len(named) != 1:
+            continue  # also named in a string's interpolation (``"{$params['x']}"``): not forwarded unchanged
         ctx = ctx or Context(parsed, helpers)
         if ctx.ns is None:
             continue
@@ -128,6 +132,11 @@ def collect(parsed: phpparse.Parsed, helpers: PhpHelpers, table: Table, rel: str
         if d.method and (owner is None or owner.kind != "class"):
             continue  # a trait's method belongs to every class that uses it
         table.add(Wrapper(LANG, d.name, rel, c.line, c.call, c.resolved, k, d.method, owner.fqn if owner else "", ctx.ns))
+
+
+def _comment(src, p: int) -> bool:
+    span = src.span_at(p)
+    return span is not None and span[2] == COMMENT
 
 
 # --- pass 2: what is followed, and who calls it --------------------------------------------

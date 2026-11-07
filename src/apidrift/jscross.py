@@ -128,8 +128,8 @@ def collect(calls: list[jsparse.Call], helpers: Helpers, table: Table, rel: str)
             continue
         name = args[0][1]
         word = re.compile(rf"(?<![\w$.]){re.escape(name)}(?![\w$])")
-        if sum(1 for m in word.finditer(text, d.open, d.close) if not helpers.mask.covers(m.start())) != 1:
-            continue  # also read, written or passed on in the wrapper
+        if sum(1 for m in word.finditer(text, d.open, d.close) if not _comment(helpers, m.start())) != 1:
+            continue  # also read, written or passed on in the wrapper (in a template's ``${}`` too)
         if d.kind == "method":
             owner = _class_name(helpers, d.pos)
             if owner is None:
@@ -137,6 +137,13 @@ def collect(calls: list[jsparse.Call], helpers: Helpers, table: Table, rel: str)
             table.add(Wrapper(LANG, d.name, rel, c.line, c.call, c.resolved, names.index(name), True, owner[1], rel))
         elif d.kind == "function" and _exported(text, d.name):
             table.add(Wrapper(LANG, d.name, rel, c.line, c.call, c.resolved, names.index(name), False, "", rel))
+
+
+def _comment(helpers: Helpers, p: int) -> bool:
+    if not helpers.mask.covers(p):
+        return False
+    k = max(a for a, _ in helpers.mask.spans if a <= p)
+    return helpers.src.text.startswith(("//", "/*"), k)
 
 
 def _exported(text: str, name: str) -> bool:
