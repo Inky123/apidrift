@@ -157,3 +157,17 @@ def test_older_than_the_first_endive_release(sdk, version, want):
 
 def test_an_api_version_the_table_does_not_hold_is_unknown():
     assert older("stripe-ruby", "1.0.0", "2027-01-01.fig") is None
+
+
+def test_the_plan_carries_the_lock_and_the_dry_run_prints_it(tmp_path):
+    from test_fixer_v2 import plan_v2
+
+    from apidrift.fixer import render_fix_text
+
+    plan = plan_v2(tmp_path, {
+        "Gemfile.lock": GEMFILE_LOCK,
+        "app/sub.rb": "require 'stripe'\n\nStripe::Subscription.update('sub_1', billing_cycle_anchor: 'now')\n",
+    })
+    assert len(plan.fixes) == 1, plan.to_dict()
+    assert plan.to_dict()["sdks"] == [{"sdk": "stripe-ruby", "version": "19.4.0", "file": "Gemfile.lock", "line": 4}]
+    assert "  Gemfile.lock:4  stripe-ruby 19.4.0" in render_fix_text(plan, str(tmp_path))
