@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import goparse, jsparse, phpparse, pyparse
+from . import goparse, httplit, httpurl, httpwrap, jsparse, phpparse, pyparse
 from .sdkmap import Resolved, SdkIndex
 
 SKIP_DIRS = {"node_modules", "vendor", "site-packages", "__pycache__"}  # skipped anywhere
@@ -177,11 +177,14 @@ def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> Scan
     unresolved: list[tuple[str, int, str]] = []
     unread: dict[str, int] = {}
     scanned = 0
+    registry = httpwrap.Registry() if reader.scan_text is None and root.is_dir() else None  # raw-HTTP wrappers
     for path in files:
         text = _read(path)
         if text is None:
             skipped_files += 1
             continue
+        if registry is not None:
+            registry.collect(text, path.relative_to(base).as_posix())
         if not reader.hint.search(text):
             continue
         scanned += 1
@@ -190,14 +193,22 @@ def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> Scan
             unread[unread_name] = unread.get(unread_name, 0) + 1
         unresolved += missing
         usages += found
+    if registry is not None:  # callers of another file's wrapper: their sites, now that every wrapper is known
+        registry.finish()
+        for rel in sorted(registry.rescan):
+            text = _read(base / rel) or ""
+            usages += _http_sites(text, rel, index, [u for u in usages if u.file == rel], registry)
     usages.sort(key=lambda u: (u.file, u.line, u.path))
     return ScanResult(str(root), usages, scanned, unresolved, skipped_files, skipped_dirs, dict(sorted(unread.items())), reader)
 
 
-def scan_text(text: str, rel: str, index: SdkIndex) -> tuple[list[Usage], list[tuple[str, int, str]], str | None]:
+def scan_text(
+    text: str, rel: str, index: SdkIndex, table=None
+) -> tuple[list[Usage], list[tuple[str, int, str]], str | None]:
     """Usages and unresolved calls of one file's text at repo-relative path ``rel``, with no filesystem.
 
     The third item names the language when the file is in one the scanner cannot parse yet (else None).
+    ``table`` carries what a whole-repo scan learnt about other files (:class:`httpwrap.Registry`).
     """
     suffix = os.path.splitext(rel)[1].lower()
     language = LANGUAGES.get(suffix)
@@ -215,7 +226,18 @@ def scan_text(text: str, rel: str, index: SdkIndex) -> tuple[list[Usage], list[t
         unread_name = UNREAD_LANGUAGES.get(suffix)
     url_language = "doc" if _doc_like(rel, suffix) else "http"
     found += _scan_urls(text, rel, index, reads, {u.line for u in found}, url_language)
+    found += _http_sites(text, rel, index, found, table, reads, url_language)
     return found, missing, unread_name
+
+
+def _http_sites(text, rel, index, found, table, reads=None, language=None) -> list[Usage]:
+    """Calls of raw-HTTP Stripe wrappers (:mod:`httpwrap`) not already found on their line."""
+    if reads is None:
+        suffix = os.path.splitext(rel)[1].lower()
+        reads = _reads(text, PHP_MEMBER_RE if LANGUAGES.get(suffix) == "php" else MEMBER_RE)
+        language = "doc" if _doc_like(rel, suffix) else "http"
+    seen = {(u.line, u.path) for u in found}
+    return [u for u in httpwrap.scan(text, rel, index, reads, language, table) if (u.line, u.path) not in seen]
 
 
 def unread_sentence(unread: dict[str, int], vendor: str = "Stripe") -> str:
@@ -360,13 +382,17 @@ def _scan_urls(
 ) -> list[Usage]:
     usages: list[Usage] = []
     for m in URL_RE.finditer(text):
-        spec_path = index.match_path(m.group(1))
+        better = httplit.site(text, m.start(), rel, index)  # the whole joined template and the call's own method
+        spec_path = better[0] if better else index.match_path(m.group(1))
         if spec_path is None:
             continue
         line = text.count("\n", 0, m.start()) + 1
         if line in taken:
             continue
-        method = _method_hint(text, m.start(), m.end(), spec_path, index)
+        if better and better[1]:
+            method = httpurl.pick(index, spec_path, better[1])
+        else:
+            method = _method_hint(text, m.start(), m.end(), spec_path, index)
         usages.append(
             Usage(rel, line, method, spec_path, "api.stripe.com" + m.group(1), frozenset(), False, language, reads)
         )
