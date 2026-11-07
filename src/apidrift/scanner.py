@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import goparse, jsparse, phpparse, pyparse
+from . import crosstable, goparse, jsparse, phpparse, pyparse
 from .sdkmap import Resolved, SdkIndex
 
 SKIP_DIRS = {"node_modules", "vendor", "site-packages", "__pycache__"}  # skipped anywhere
@@ -139,6 +139,7 @@ class ScanResult:
     skipped_dirs: int = 0  # dependency and build directories left unread
     unread: dict[str, int] = field(default_factory=dict)  # language -> files mentioning Stripe in languages not parsed
     reader: Reader = Reader()  # the vendor the scan was for
+    table: crosstable.Table | None = field(default=None, repr=False, compare=False)  # wrappers followed across files
 
     @property
     def counted(self) -> list[Usage]:
@@ -173,10 +174,13 @@ def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> Scan
     else:
         files, skipped_files, skipped_dirs = _iter_files(root)
         base = root
-    usages: list[Usage] = []
-    unresolved: list[tuple[str, int, str]] = []
+    # Stripe's own reader follows wrappers across files (crosstable): a first pass notes them, then the
+    # files that call them, or define one whose callers are all visible, are read again with the table.
+    table = crosstable.Table() if reader.scan_text is None and root.is_dir() else None
+    if table is not None:
+        read = lambda text, rel, index: scan_text(text, rel, index, table)  # noqa: E731
+    per_file: dict[str, tuple[list[Usage], list[tuple[str, int, str]]]] = {}
     unread: dict[str, int] = {}
-    scanned = 0
     for path in files:
         text = _read(path)
         if text is None:
@@ -184,20 +188,32 @@ def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> Scan
             continue
         if not reader.hint.search(text):
             continue
-        scanned += 1
         found, missing, unread_name = read(text, path.relative_to(base).as_posix(), index)
         if unread_name:
             unread[unread_name] = unread.get(unread_name, 0) + 1
-        unresolved += missing
-        usages += found
+        per_file[path.relative_to(base).as_posix()] = (found, missing)
+    if table is not None:
+        crosstable.finish(table, base, files, lambda chain: _resolve(index, chain))
+        for rel in sorted(table.rescan):
+            text = _read(base / rel)
+            if text is not None:
+                per_file[rel] = scan_text(text, rel, index, table)[:2]
+    usages = [u for found, _ in per_file.values() for u in found]
+    unresolved = [entry for _, missing in per_file.values() for entry in missing]
     usages.sort(key=lambda u: (u.file, u.line, u.path))
-    return ScanResult(str(root), usages, scanned, unresolved, skipped_files, skipped_dirs, dict(sorted(unread.items())), reader)
+    return ScanResult(
+        str(root), usages, len(per_file), unresolved, skipped_files, skipped_dirs, dict(sorted(unread.items())), reader,
+        table,
+    )
 
 
-def scan_text(text: str, rel: str, index: SdkIndex) -> tuple[list[Usage], list[tuple[str, int, str]], str | None]:
+def scan_text(
+    text: str, rel: str, index: SdkIndex, table: crosstable.Table | None = None
+) -> tuple[list[Usage], list[tuple[str, int, str]], str | None]:
     """Usages and unresolved calls of one file's text at repo-relative path ``rel``, with no filesystem.
 
     The third item names the language when the file is in one the scanner cannot parse yet (else None).
+    ``table``: the repository's wrappers followed across files (:mod:`crosstable`), from :func:`scan_repo`.
     """
     suffix = os.path.splitext(rel)[1].lower()
     language = LANGUAGES.get(suffix)
@@ -209,7 +225,7 @@ def scan_text(text: str, rel: str, index: SdkIndex) -> tuple[list[Usage], list[t
     elif language == "go":
         found, missing, unread_name = _scan_go(text, rel, index)
     elif language:
-        found, missing = _scan_dynamic(text, rel, index, reads, language)
+        found, missing = _scan_dynamic(text, rel, index, reads, language, table)
     else:
         missing = []
         unread_name = UNREAD_LANGUAGES.get(suffix)
@@ -338,10 +354,10 @@ def _scan_go(text: str, rel: str, index: SdkIndex):
 # --- JavaScript / TypeScript / Ruby / PHP ---------------------------------------
 
 
-def _scan_dynamic(text: str, rel: str, index: SdkIndex, reads: frozenset[str], language: str):
+def _scan_dynamic(text: str, rel: str, index: SdkIndex, reads: frozenset[str], language: str, table=None):
     resolve = lambda chain: _resolve(index, chain)  # noqa: E731
     if language == "php":
-        found, missing = phpparse.extract(text, resolve)
+        found, missing = phpparse.extract(text, resolve, table, rel)
     else:
         found, missing = jsparse.extract(text, index, ruby=language == "ruby", resolve=resolve)
     usages = [

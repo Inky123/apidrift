@@ -317,11 +317,21 @@ PHP_WRAPPER = PHP + (
 
 
 def test_a_php_wrapper_caller_becomes_a_call_site_and_the_wrapper_stays_hidden(tmp_path):
-    found = sorted((u.line, u.call, set(u.fields), set(u.hidden or ())) for u in scan(tmp_path, {"D.php": PHP_WRAPPER}))
+    """The wrapper's own site stays while some use of it in the repository is not a visible caller."""
+    other = "<?php\nfunction later($d, $p) { return $d->createIntent($p); }\n"
+    found = sorted(
+        (u.file, u.line, u.call, set(u.fields), set(u.hidden or ()))
+        for u in scan(tmp_path, {"D.php": PHP_WRAPPER, "Later.php": other})
+    )
     assert found == [
-        (5, "PaymentIntent::create [through createIntent, line 11]", {"usage", "payment_method_types"}, set()),
-        (11, "PaymentIntent::create", set(), {""}),
+        ("D.php", 5, "PaymentIntent::create [through createIntent, line 11]", {"usage", "payment_method_types"}, set()),
+        ("D.php", 11, "PaymentIntent::create", set(), {""}),
     ]
+
+
+def test_a_php_wrapper_whose_every_use_is_a_visible_caller_is_not_a_site_itself(tmp_path):
+    found = [(u.line, u.call) for u in scan(tmp_path, {"D.php": PHP_WRAPPER})]
+    assert found == [(5, "PaymentIntent::create [through createIntent, line 11]")]
 
 
 @pytest.mark.parametrize("label,old,new", [

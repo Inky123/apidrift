@@ -81,8 +81,10 @@ class Parsed:
     unresolved: list[tuple[int, str]]
 
 
-def extract(text: str, resolve) -> tuple[list[Found], list[tuple[int, str]]]:
-    """Stripe SDK calls in a PHP source, plus (line, call) pairs that look like Stripe but match no endpoint."""
+def extract(text: str, resolve, table=None, rel: str = "") -> tuple[list[Found], list[tuple[int, str]]]:
+    """Stripe SDK calls in a PHP source, plus (line, call) pairs that look like Stripe but match no endpoint.
+    ``table`` (:mod:`crosstable`): wrappers followed across files, for the file at ``rel``."""
+    from . import phpcross
     from .phphelpers import PhpHelpers, Via  # builds on this module
 
     parsed = parse(text, resolve)
@@ -92,7 +94,7 @@ def extract(text: str, resolve) -> tuple[list[Found], list[tuple[int, str]]]:
         collect(parsed, c, fields, via)
         found.append(Found(c.line, c.call + via.suffix, c.resolved, fields))
         found += helpers.callers_of(c)  # calls of a same-file wrapper that forwards its parameter here
-    return found, parsed.unresolved
+    return phpcross.extend(parsed, helpers, table, rel, found), parsed.unresolved
 
 
 def parse(text: str, resolve) -> Parsed:

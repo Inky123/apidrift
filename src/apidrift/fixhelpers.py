@@ -296,8 +296,12 @@ def php_caller_sites(loc, usage, m):
     usage is not one."""
     from .fixedit import Sites
 
+    from . import fixcross
+
     if "[through " not in usage.call:
         return None
+    if fixcross.is_cross(usage.call):
+        return fixcross.php_sites(loc, usage, m)  # a caller of a wrapper in another file
     helpers, _ = _php_reads(loc)
     plain = plain_call(usage.call)
     found = [

@@ -158,8 +158,18 @@ def test_a_php_builder_is_fixed_in_the_statement_that_writes_the_key(tmp_path):
     ]
 
 
-def test_a_php_wrapper_caller_is_fixed_and_the_wrapper_stays_not_attempted(tmp_path):
+def test_a_php_wrapper_caller_is_fixed_and_the_wrapper_with_no_other_use_is_not_a_site(tmp_path):
+    """Every use of the wrapper in the repository is that caller (crosstable): its own site is dropped."""
     plan = plan_for(tmp_path, {"D.php": PHP_WRAPPER})
+    assert [u.why for u in plan.unfixable] == [] and plan.not_attempted == []
+    assert list(only_change(plan, "D.php").values()) == [
+        (f"            '{OLD}' => ['card'],", f"            '{NEW}' => ['card'],")
+    ]
+
+
+def test_a_php_wrapper_caller_is_fixed_and_the_wrapper_with_another_use_stays_not_attempted(tmp_path):
+    other = "<?php\nfunction later($d, $p) { return $d->createIntent($p); }\n"
+    plan = plan_for(tmp_path, {"D.php": PHP_WRAPPER, "Later.php": other})
     assert [u.why for u in plan.unfixable] == [] and [(u.line, u.why) for u in plan.not_attempted] == [(11, "arguments_not_visible")]
     assert list(only_change(plan, "D.php").values()) == [
         (f"            '{OLD}' => ['card'],", f"            '{NEW}' => ['card'],")
