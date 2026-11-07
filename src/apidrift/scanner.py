@@ -198,7 +198,7 @@ def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> Scan
 
 
 def scan_text(
-    text: str, rel: str, index: SdkIndex, repo: pyrepo.Repo | None = None
+    text: str, rel: str, index: SdkIndex, *, repo: pyrepo.Repo | None = None
 ) -> tuple[list[Usage], list[tuple[str, int, str]], str | None]:
     """Usages and unresolved calls of one file's text at repo-relative path ``rel``, with no filesystem
     (``repo`` answers questions about the checkout's other Python files).
@@ -211,7 +211,7 @@ def scan_text(
     found: list[Usage] = []
     unread_name: str | None = None
     if language == "python":
-        found, missing = _scan_python(text, rel, index, reads, repo)
+        found, missing = _scan_python(text, rel, index, reads, repo=repo)
     elif language == "go":
         found, missing, unread_name = _scan_go(text, rel, index)
     elif language:
@@ -315,8 +315,8 @@ def _resolve(index: SdkIndex, chain: list[str]) -> Resolved | None:
 # --- Python -----------------------------------------------------------------
 
 
-def _scan_python(text: str, rel: str, index: SdkIndex, reads: frozenset[str], repo=None):
-    found, missing = pyparse.extract(text, lambda chain: _resolve(index, chain), repo)
+def _scan_python(text: str, rel: str, index: SdkIndex, reads: frozenset[str], *, repo=None):
+    found, missing = pyparse.extract(text, lambda chain: _resolve(index, chain), repo=repo)
     usages = [
         Usage(rel, f.line, f.resolved.method, f.resolved.path, f.call, frozenset(f.fields), f.complete, "python", reads, f.hidden)
         for f in found

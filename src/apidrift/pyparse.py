@@ -43,13 +43,13 @@ class PyCall:
 
 
 def extract(
-    text: str, resolve: Callable[[list[str]], Resolved | None], repo=None
+    text: str, resolve: Callable[[list[str]], Resolved | None], *, repo=None
 ) -> tuple[list[PyFound], list[tuple[int, str]]]:
     """Stripe SDK calls in a Python source, plus (line, call) pairs that matched no endpoint. ``repo`` (a
     :class:`pyrepo.Repo`) lets calls and spreads through ``self`` be followed (:mod:`pyself`)."""
     from . import pyhelpers  # builds on this module
 
-    resolved_calls, unresolved = calls(text, resolve, repo)
+    resolved_calls, unresolved = calls(text, resolve, repo=repo)
     found: list[PyFound] = []
     helpers =pyhelpers.PyHelpers(resolved_calls[0].scopes) if resolved_calls else None
     for c in resolved_calls:
@@ -60,7 +60,7 @@ def extract(
 
 
 def calls(
-    text: str, resolve: Callable[[list[str]], Resolved | None], repo=None
+    text: str, resolve: Callable[[list[str]], Resolved | None], *, repo=None
 ) -> tuple[list[PyCall], list[tuple[int, str]]]:
     """Resolved SDK calls (arguments not yet read), plus the (line, call) pairs that matched no endpoint."""
     from . import pyalias, pyself, pysyntax  # pyalias and pyself build on this module
