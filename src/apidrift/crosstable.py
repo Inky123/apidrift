@@ -118,16 +118,19 @@ def single(table: Table, language: str) -> dict[tuple[str, str], Wrapper]:
     return out
 
 
-def walk(base: Path, suffixes: set[str]):
+def walk(base: Path, suffixes: set[str], skip=None, needles: tuple[bytes, ...] = ()):
     """Every file of the language under ``base``, vendored and test directories included (a definition
-    anywhere makes a name ambiguous), as (path, text). Yields None once a cap is passed: the caller must
-    then follow nothing."""
+    anywhere makes a name ambiguous), as (path, text); ``skip(rel)`` leaves a file unread, and with
+    ``needles`` a file holding none of them is read but not yielded. Yields None once a cap is passed: the
+    caller must then follow nothing."""
     files = size = 0
     for dirpath, dirs, names in os.walk(base):
         dirs[:] = sorted(d for d in dirs if d not in (".git", ".hg", ".svn"))
         for name in sorted(names):
             path = Path(dirpath) / name
             if path.suffix.lower() not in suffixes or path.is_symlink():
+                continue
+            if skip is not None and skip(path.relative_to(base).as_posix()):
                 continue
             files += 1
             try:
@@ -138,7 +141,8 @@ def walk(base: Path, suffixes: set[str]):
             if files > MAX_WALK_FILES or size > MAX_WALK_BYTES:
                 yield None
                 return
-            yield path, raw.decode("utf-8", errors="replace")
+            if not needles or any(n in raw for n in needles):
+                yield path, raw.decode("utf-8", errors="replace")
 
 
 def composer_library(base: Path) -> bool:

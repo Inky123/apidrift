@@ -60,6 +60,7 @@ HIDDEN = [
     ("the caller passes its own parameter", "  async pay() {\n    return this.paymentService.createIntent({\n      amount: 100,\n"
      f"      {OLD}: ['card'],\n    }});\n", "  async pay(p) {\n    return this.paymentService.createIntent(p);\n"),
     ("a receiver that is not this.<property>", "this.paymentService.createIntent(", "getService().createIntent("),
+    ("a public writable property", "private readonly paymentService", "public paymentService"),
 ]
 
 

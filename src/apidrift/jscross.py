@@ -7,9 +7,9 @@ this.stripe.subscriptions.update(id, updateData)``). It is followed into other f
 - a *method* of class ``C``: ``C`` is declared once in the repository's source, nothing ``extends`` it or
   overrides it through dependency injection (``provide: C``) or ``C.prototype``, and the method is
   defined once in ``C``. A caller reaches it only through ``this.NAME(`` inside ``C``, or ``this.P.NAME(``
-  where ``P`` is a property of the caller's class *declared with type* ``C`` (a constructor parameter
-  property ``private readonly p: C`` or a typed field), ``C`` imported from the wrapper's own module, and
-  ``P`` assigned nowhere (other definitions of the same method name in unrelated classes do not matter:
+  where ``P`` is a ``private`` or ``readonly`` property of the caller's class *declared with type* ``C``
+  (a constructor parameter property ``private readonly p: C`` or such a typed field), ``C`` imported from
+  the wrapper's own module, and ``P`` never assigned in the class (other definitions of the same method name in unrelated classes do not matter:
   TypeScript checks the declared type, and no subclass exists);
 - an exported *function*: it is defined once in the repository's source, and a caller imports it by name
   (``import { f }`` / ``import { f as g }`` / ``import * as m``) from a specifier that resolves to the
@@ -160,29 +160,32 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
         return
     owners = {w.owner for w in names.values() if w.method}
     funcs = [w.name for w in names.values() if not w.method]
-    source = {p.resolve() for p in sources}
-    classes, extended, provided, prototyped, assigned = Counter(), set(), set(), set(), set()
+    source = {str(p) for p in sources}
+    classes, extended, provided, prototyped = Counter(), set(), set(), set()
     defined: Counter[str] = Counter()
     mention = re.compile(rf"(?<![\w$])(?:{'|'.join(re.escape(w.name) for w in names.values())})(?![\w$])")
     mentioned: list[Path] = []
-    for item in crosstable.walk(base, SUFFIXES):
+    test = lambda rel: scanner._doc_like(rel, Path(rel).suffix.lower())  # noqa: E731  a test's mocks reach its own calls
+    needles = tuple({n.encode() for n in owners | {w.name for w in names.values()}})
+    for item in crosstable.walk(base, SUFFIXES, skip=test, needles=needles):
         if item is None:
             for w in names.values():
                 table.note(w, "cap: too many JS/TS files")
             return
         path, text = item
-        rel = path.relative_to(base).as_posix()
-        if scanner._doc_like(rel, path.suffix.lower()):
-            continue  # a test's mocks and subclasses only reach the test's own calls
         for o in owners:
-            classes[o] += len(re.findall(rf"\bclass\s+{re.escape(o)}\b", text))
-        extended |= set(re.findall(rf"\bextends\s+(?:{IDENT}\.)*({IDENT})", text))
-        provided |= set(re.findall(rf"\bprovide\s*:\s*({IDENT})", text))
-        prototyped |= set(re.findall(rf"\b({IDENT})\s*\.\s*prototype\b", text))
-        assigned |= {m.group(2) for m in re.finditer(rf"(\w+|\))\s*\.\s*({IDENT})\s*=(?![=>])", text) if m.group(1) != "this"}
+            if o in text:
+                classes[o] += len(re.findall(rf"\bclass\s+{re.escape(o)}\b", text))
+        if "extends" in text:
+            extended |= set(re.findall(rf"\bextends\s+(?:{IDENT}\.)*({IDENT})", text))
+        if "provide" in text:
+            provided |= set(re.findall(rf"\bprovide\s*:\s*({IDENT})", text))
+        if "prototype" in text:
+            prototyped |= set(re.findall(rf"\b({IDENT})\s*\.\s*prototype\b", text))
         for f in funcs:
-            defined[f] += len(re.findall(rf"\bfunction\s*\*?\s*{re.escape(f)}\s*[<(]|\b(?:const|let|var)\s+{re.escape(f)}\b", text))
-        if path.resolve() in source and mention.search(text):
+            if f in text:
+                defined[f] += len(re.findall(rf"\bfunction\s*\*?\s*{re.escape(f)}\s*[<(]|\b(?:const|let|var)\s+{re.escape(f)}\b", text))
+        if str(path) in source and mention.search(text):
             mentioned.append(path)
     for key, w in names.items():
         if w.method and (classes[w.owner] != 1 or w.owner in extended | provided | prototyped):
@@ -191,7 +194,6 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
             table.note(w, f"{defined[w.name]} definitions of the name")
         else:
             table.followed[key] = w
-    table.facts[LANG] = assigned
     followed = table.wrappers(LANG)
     if len(mentioned) > crosstable.MAX_PARSE_FILES:
         for w in followed:
@@ -202,7 +204,7 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
         rel, text = path.relative_to(base).as_posix(), scanner._read(path)
         ctx = Context(text) if text is not None else None
         for w in followed:
-            for line, _, visible in (uses(ctx, w, rel, base, assigned) if ctx else [(0, -1, None)]):
+            for line, _, visible in (uses(ctx, w, rel, base) if ctx else [(0, -1, None)]):
                 crosstable.record(table, w, rel, line, visible is not None)
     crosstable.settle(table, LANG)
 
@@ -225,7 +227,7 @@ def _library(base: Path, rel: str) -> bool:
 # --- uses ----------------------------------------------------------------------------------
 
 
-def uses(ctx: Context, w: Wrapper, rel: str, base: Path, assigned: set[str]):
+def uses(ctx: Context, w: Wrapper, rel: str, base: Path):
     """(line, ``(``, (argument span, fields) or None) for each use of ``w``'s name, or of a local name it is
     imported under, that may reach it; uses that provably reach something else are skipped."""
     src, text = ctx.src, ctx.src.text
@@ -266,7 +268,7 @@ def uses(ctx: Context, w: Wrapper, rel: str, base: Path, assigned: set[str]):
                     reach = here is not None and is_call
                 else:
                     hit = re.search(rf"\bthis\s*\.\s*({IDENT})\s*\.$", before)
-                    reach = is_call and hit is not None and here is not None and _typed(ctx, here, hit.group(1), w, rel, base, assigned)
+                    reach = is_call and hit is not None and here is not None and _typed(ctx, here, hit.group(1), w, rel, base)
                     if not reach and _definition(ctx, p, here, w):
                         continue  # the same name defined in an unrelated class
             elif re.search(r"export\s*\{[^}]*$", before) and rel == w.file:
@@ -289,14 +291,16 @@ def _definition(ctx: Context, p: int, here, w: Wrapper) -> bool:
     return here is not None and here[1] != w.owner and any(d.pos == p and d.kind == "method" for d in ctx.helpers.defs.get(w.name, ()))
 
 
-def _typed(ctx: Context, here, prop: str, w: Wrapper, rel: str, base: Path, assigned: set[str]) -> bool:
+def _typed(ctx: Context, here, prop: str, w: Wrapper, rel: str, base: Path) -> bool:
     """``this.prop`` is declared in the caller's class with the wrapper's class as its type, and never set."""
     (lo, hi), _ = here
     body, p = ctx.src.text[lo:hi], re.escape(prop)
     decl = re.search(rf"(?:(?:private|protected|public|readonly)\s+)+{p}\s*[?!]?\s*:\s*({IDENT})\s*[,)=;\n]"
                      rf"|^\s*(?:(?:private|protected|public|readonly)\s+)*{p}\s*[?!]?\s*:\s*({IDENT})\s*[;=\n]", body, re.M)
-    if decl is None or prop in assigned or re.search(rf"this\s*\.\s*{p}\s*=(?![=>])", body):
+    if decl is None or re.search(rf"this\s*\.\s*{p}\s*=(?![=>])", body):
         return False
+    if not re.search(r"\b(?:private|readonly)\b", decl.group(0)):
+        return False  # only a private or readonly property is one TypeScript lets nothing else set
     local = decl.group(1) or decl.group(2)
     if rel == w.file:
         return local == w.owner
@@ -397,6 +401,6 @@ def sites(ctx: Context, table: Table, rel: str):
     base = getattr(table, "base", None)
     for w in table.wrappers(LANG):
         if w.name in ctx.src.text:
-            for line, paren, visible in uses(ctx, w, rel, base, table.facts.get(LANG, set())):
+            for line, paren, visible in uses(ctx, w, rel, base):
                 if visible is not None:
                     yield w, line, paren, visible
