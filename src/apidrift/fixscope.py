@@ -76,8 +76,10 @@ def _unsafe(src: Source, lo: int, hi: int, *, strict: bool) -> bool:
             else:
                 return True  # a generic, JSX, a heredoc: not a comparison
             prev = "op"
-        elif ruby and c == "%" and prev == "op" and RUBY_PERCENT.match(text, i):
-            return True
+        elif ruby and c == "%" and RUBY_PERCENT.match(text, i) and (
+            prev == "op" or _line_start(text, i) or (prev == "name" and _argument_like(text, i))
+        ):
+            return True  # %q(...), %w[...], %i[...]: their contents are not tokens
         elif ruby and text.startswith("%r", i):
             return True
         elif c in "([{":
@@ -100,15 +102,25 @@ def _unsafe(src: Source, lo: int, hi: int, *, strict: bool) -> bool:
 
 def _division(text: str, i: int, prev: str, word: str, ruby: bool) -> bool:
     """A ``/`` that both JS and Ruby can only read as division at this point."""
+    if ruby and _line_start(text, i):
+        return False  # a Ruby line may start a new expression: ``/x/`` there is a regex
     if prev == "value":
         return True
     if prev != "name" or word in CONTROL:
         return False
-    if ruby:  # ``foo /x/`` is a regex argument to a method; ``foo / x`` and ``foo/x`` divide
-        spaced_before = i > 0 and text[i - 1] in " \t"
-        spaced_after = text[i + 1 : i + 2] in (" ", "\t", "\n")
-        return not spaced_before or spaced_after
-    return True
+    return not ruby or not _argument_like(text, i)
+
+
+def _argument_like(text: str, i: int) -> bool:
+    """Ruby ``foo /x/`` / ``foo %q(x)``: a space before and none after makes it the method's argument."""
+    return i > 0 and text[i - 1] in " \t" and text[i + 1 : i + 2] not in (" ", "\t", "\n", "\r", "")
+
+
+def _line_start(text: str, i: int) -> bool:
+    j = i - 1
+    while j >= 0 and text[j] in " \t":
+        j -= 1
+    return j < 0 or text[j] in "\r\n"
 
 
 def _unsafe_interpolations(src: Source, i: int, end: int, *, strict: bool) -> bool:

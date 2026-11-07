@@ -131,6 +131,13 @@ def test_a_quote_inside_a_regex_never_yields_an_edit(tmp_path, text):
     ("{ a: n % 3, k: 1 }", True, False),
     ("{ a: %w[a b], k: 1 }", True, True),
     ("{ a: when /x/, k: 1 }", True, True),
+    ("{ a: x / 2, k: 1 }", True, False),
+    ("{ a: x/2, k: 1 }", True, False),
+    ("{ a: split /,/, k: 1 }", True, True),
+    ("{ a: x\n  / 2/, k: 1 }", True, True),  # a Ruby line may start a regex
+    ("{ a: x\n  / 2, k: 1 }", False, False),  # JS has no line break before a division
+    ("{ a: fmt %q(it), k: 1 }", True, True),
+    ("{ a: n % q, k: 1 }", True, False),
     ("{ a: \"#{x / 2}\", k: 1 }", True, False),
     ("{ a: \"#{s =~ /'/}\", k: 1 }", True, True),
 ])
