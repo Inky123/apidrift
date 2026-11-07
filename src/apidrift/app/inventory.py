@@ -259,11 +259,10 @@ def _usage(site: object, reads: list[HashedNames], budget: _Budget) -> Usage:
     fields = _names(site.get("fields"), "fields")
     hidden = None if site.get("hidden") is None else _names(site["hidden"], "hidden", empty=True)
     sent = _values(site.get("sent"), budget)
-    switched = _switched(site.get("switched", []), budget)
     budget.take(file, call, *fields, *(hidden or ()))
     return Usage(
         file, line, method, path, call, frozenset(fields), complete, language, reads[which],
-        None if hidden is None else frozenset(hidden), sent, switched,
+        None if hidden is None else frozenset(hidden), sent, _switched(site.get("switched", []), budget),
     )
 
 
