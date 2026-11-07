@@ -187,6 +187,17 @@ def test_every_reaching_dict_literal_is_read(tmp_path, index):
     assert got[23][2:] == ({"amount", "currency"}, True)  # a binding after the call does not reach it
 
 
+def test_a_comprehension_of_dict_literals_names_every_item_key(tmp_path, index):
+    got, _ = scan(tmp_path, index, (
+        "import stripe\n"
+        "item = {'price': 'x', 'quantity': 1}\n"
+        "stripe.checkout.Session.create(success_url='u', line_items=[{'price': p} for p in ids])\n"
+        "stripe.checkout.Session.create(success_url='u', line_items=[item for item in items])\n"
+    ))
+    assert got[3][2] == {"success_url", "line_items", "line_items[].price"}
+    assert got[4][2] == {"success_url", "line_items"}  # the loop variable, not the module's ``item``
+
+
 def test_a_parameter_hides_a_module_literal_of_the_same_name(tmp_path, index):
     got, _ = scan(tmp_path, index, "import stripe\np = {'amount': 1}\ndef go(p):\n    stripe.Charge.create(**p)\n")
     assert got[4][2:] == (set(), False)

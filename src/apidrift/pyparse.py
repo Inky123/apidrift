@@ -485,3 +485,5 @@ def _nested(value: ast.expr, path: str, fields: set[str], assigned, hidden: set[
                 _dict_fields(inner, path + "[].", fields, assigned, hidden)
             elif isinstance(item, ast.Starred):
                 hidden.add(path + "[].")
+    elif isinstance(value, (ast.ListComp, ast.GeneratorExp)) and (inner := _as_dict(value.elt, _NOTHING)) is not None:
+        _dict_fields(inner, path + "[].", fields, assigned, hidden)  # [{"price": p} for p in ids]: every item's keys
