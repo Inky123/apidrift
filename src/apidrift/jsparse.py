@@ -11,7 +11,7 @@ import bisect
 import re
 from dataclasses import dataclass, field
 
-from . import jsbare, jshelpers, jsroots, jsspread
+from . import jsbare, jshelpers, jsroots, jsspread, rbobjects
 from .jsroots import CALL_ARGS, NAME
 from .sdkmap import Resolved, SdkIndex
 
@@ -379,6 +379,7 @@ def extract(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> 
         fields, via = Fields(), jshelpers.Via(helpers)
         collect(c.args_src, c.spans, "{" in c.resolved.path, c.bindings, fields, ruby=ruby, helper=via)
         found.append(Found(c.line, c.call + via.suffix, c.resolved, fields))
+    found += rbobjects.extract(text, resolved_calls, resolve or index.resolve) if ruby else []  # pi.confirm(...)
     return found, unresolved
 
 
