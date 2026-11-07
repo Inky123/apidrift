@@ -29,6 +29,7 @@ from .sdkmap import Resolved, snake
 
 INSTANCE = {"save": ("update", "post"), "delete": ("delete", "delete"), "refresh": ("retrieve", "get")}
 MAKERS = {"retrieve", "create", "update"}  # class methods that return the resource itself
+CLASS_ONLY = {"create", "retrieve", "update", "modify", "list", "search", "del"}  # no instance method of that name
 SCOPE = re.compile(r"^([ \t]*)(?:(?:private|protected|public)[ \t]+)?(?:def\b|\S[^\n]*\bdo(?:[ \t]*\|[^|\n]*\|)?[ \t]*$)", re.M)
 CHAIN_TAIL = re.compile(r"(?:::)?(?:[A-Za-z_]\w*(?:\s*\.|[ \t]*::)\s*)*[A-Za-z_]\w*\s*\Z")
 LEAD = re.compile(r"(?:::)?[A-Za-z_]\w*(?:\s*\.|[ \t]*::)\s*")
@@ -94,10 +95,12 @@ def instance_op(resolve, key: tuple[str, ...], item: str, verb: str) -> Resolved
         return None
     if method is not None:
         return resolved if ITEM.sub("/{}", resolved.path) == item and resolved.method == method else None
-    head, _, action = resolved.path.rpartition("/")
-    if resolved.method == "get" or ITEM.sub("/{}", head) != item or not re.fullmatch(r"[a-z_]+", action):
+    if resolved.method == "get" or name in CLASS_ONLY:
         return None
-    return resolved
+    if ITEM.sub("/{}", resolved.path) == item:  # Subscription#cancel: DELETE on the item itself
+        return resolved
+    head, _, action = resolved.path.rpartition("/")
+    return resolved if ITEM.sub("/{}", head) == item and re.fullmatch(r"[a-z_]+", action) else None
 
 
 def _word(name: str) -> re.Pattern[str]:

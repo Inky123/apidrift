@@ -33,6 +33,13 @@ def test_confirm_on_a_retrieved_intent_sends_its_arguments(index):
     ]
 
 
+def test_an_action_on_the_item_itself(index):
+    text = "def go(id)\n  sub = Stripe::Subscription.retrieve(id)\n  sub.cancel(prorate: true)\nend\n"
+    assert instance(index, text) == [
+        (3, "sub.cancel", "DELETE /v1/subscriptions/{subscription_exposed_id}", ["prorate"], True),
+    ]
+
+
 def test_save_sends_the_attributes_written_before_it(index):
     text = (
         "def go(id)\n"
