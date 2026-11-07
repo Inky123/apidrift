@@ -22,7 +22,6 @@ import ast
 ASYNC = "_async"
 PAGERS = {"auto_paging_iter": "list", "search_auto_paging_iter": "search"}
 MAX_DEPTH = 4
-SCOPES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 
 
 def resolve(chain: list[str], call: ast.Call, resolve_chain):

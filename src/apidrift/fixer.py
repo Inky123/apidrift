@@ -11,7 +11,6 @@ is written here: ``apidrift fix`` prints diffs and the App pushes the content as
 
 from __future__ import annotations
 
-import ast
 import difflib
 import hashlib
 import re
