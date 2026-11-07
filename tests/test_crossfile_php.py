@@ -194,3 +194,15 @@ def test_a_merge_into_the_callers_local_is_not_visible(tmp_path):
     card = WRITES.replace("        $r = $this->driver", "        $p += $this->defaults();\n        $r = $this->driver")
     found = sites(tmp_path, {"Driver.php": DRIVER, "Card.php": card})
     assert not any("[through " in s[2] for s in found)
+
+
+def test_a_generic_method_name_is_never_followed(tmp_path):
+    """GiveWP: ``$gateway->payment_intent->create($args)`` / ``give(PaymentIntent::class)->create($args)``."""
+    driver = DRIVER.replace("createIntent(", "create(")
+    card = CALLER.replace("->createIntent(", "->create(").replace(
+        "    public function pay() {", "    public function other() { return give(StripeDriver::class)->create(['x' => 1]); }\n"
+        "    public function pay() {")
+    found = sites(tmp_path, {"Driver.php": driver, "Card.php": card})
+    assert not any("[through " in s[2] for s in found)
+    plan = plan_for(tmp_path, {"Driver.php": driver, "Card.php": card})
+    assert plan.fixes == [] and [u.file for u in plan.not_attempted] == ["Driver.php"]
