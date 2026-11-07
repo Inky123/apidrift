@@ -149,7 +149,7 @@ class Helpers:
         return out
 
     def unique(self, name: str, kind: str) -> Definition | None:
-        found = self.defs.get(name, [])
+        found = [f for f in self.defs.get(name, []) if not self.ruby or f.kind == kind]  # Ruby: def x, def self.x
         if len(found) != 1 or found[0].kind != kind:
             return None
         if not self.ruby and any(b.pos != found[0].pos for b in self.bindings.by_name.get(name, ())):
@@ -312,7 +312,11 @@ class Helpers:
         tail = text[last:d.close].strip()
         if text.startswith("{", last):
             end = src.skip_balanced(last)
-            return [Value(last, literal=last)] if text[end:d.close].strip() == "" else None
+            return [Value(last, literal=last)] if text[end:d.close].strip() in ("", ".compact") else None  # nils go
+        own = re.fullmatch(r"self\s*\.\s*class\s*\.\s*([A-Za-z_]\w*[?!]?)", tail) if d.kind == "instance" else None
+        if own is not None:  # handed on to the class method of the same name's class: self.class.expand_options
+            helper = self.unique(own.group(1), "class")
+            return [Value(last, helper=helper)] if helper and self.container(helper.pos) == self.container(d.pos) else None
         n = RUBY_CALLEE.match(text, last)
         if n is None or tail != text[last:n.end()]:
             return None

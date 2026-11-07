@@ -57,3 +57,42 @@ def add_writes(src, bindings, binding, at: int, sub) -> None:
             sub.paths.add(mutation.key)
         if mutation.literal is not None:
             sub.paths |= parse_object(src, mutation.literal + 1).paths
+
+
+def merged(src, after: int, end: int, out, helper) -> bool:
+    """Ruby: ``{ a: 1 }.merge(expand_options)``, the hash literal argument ending at ``end`` merged (once or in a
+    chain) with what same-file helpers return. True when every merge was read through ``helper`` (jshelpers.Via)
+    into ``out``; False for anything else (a parameter, a variable, a literal, ``.deep_merge``, JavaScript)."""
+    text = src.text
+    if not src.ruby or helper is None:
+        return False
+    while after < end and text.startswith(".merge(", after):
+        args = src.args(after + len(".merge"))
+        if len(args) != 1:
+            return False
+        a, b = src.skip_space(args[0][0]), args[0][1]
+        if a >= b or text[a] in "{:\"'" or not helper(a, b, out):
+            return False
+        after = src.skip_space(src.skip_balanced(after + len(".merge")))
+    return after >= len(text[:end].rstrip())
+
+
+def merged_variable(src, bindings, i: int, end: int, out, helper) -> bool:
+    """Ruby: ``attributes.merge(expand_options)`` where ``attributes`` is bound to hash literals (every binding that
+    reaches, :func:`reaching_fields`) and every merge is a same-file helper's hash (:func:`merged`)."""
+    import re
+
+    from .jsparse import Fields, merge
+
+    m = re.compile(r"[A-Za-z_]\w*").match(src.text, i)
+    if not src.ruby or m is None or not src.text.startswith(".merge(", m.end()):
+        return False
+    binding = bindings.at(m.group(0), i)
+    if binding is None or binding.literal is None:
+        return False
+    merges = Fields()
+    if not merged(src, m.end(), end, merges, helper):
+        return False
+    merge(out, reaching_fields(src, bindings, binding, i))
+    merge(out, merges)
+    return True

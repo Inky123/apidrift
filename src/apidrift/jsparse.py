@@ -440,8 +440,8 @@ def collect(
         if c == "{":
             merge(out, parse_object(src, i + 1))
             after = src.skip_space(src.skip_balanced(i))
-            if text.startswith(MERGERS, after):  # { amount: 1 }.merge(extra)
-                out.hide("")
+            if text.startswith(MERGERS, after) and not jswrites.merged(src, after, b, out, helper):
+                out.hide("")  # { amount: 1 }.merge(extra), unless every merge is a same-file helper's hash
         elif text.startswith("...", i) or (ruby and text.startswith("**", i)):
             out.hide("")
         elif ruby and RUBY_KEYWORD.match(text, i):
@@ -459,7 +459,8 @@ def collect(
                 merge(out, jswrites.reaching_fields(src, bindings, binding, i))  # every literal that can reach
             elif k == 0 and has_id and (binding is None or binding.literal is None):
                 continue
-            elif not jsspread.options_choice(src, i, b) and (helper is None or not helper(i, b, out)):
+            elif not jsspread.options_choice(src, i, b) and (helper is None or not helper(i, b, out)) \
+                    and not jswrites.merged_variable(src, bindings, i, b, out, helper):
                 # neither ``key ? { idempotencyKey: key } : undefined`` nor a same-file helper's result (jshelpers)
                 out.hide("")
 

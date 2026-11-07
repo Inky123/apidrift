@@ -16,7 +16,10 @@ helper already being read, or anything else leaves the spread hidden, as before.
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
+
+from .jsroots import _statement_end
 
 EMPTY = {"{}", "undefined", "null", "false", "''", '""', "0", "[]"}  # branches that spread no keys
 RETURNED_EMPTY = {"{}", "undefined", "null"}  # branches of a returned choice that send no keys wherever it goes
@@ -72,8 +75,6 @@ def returned_choice(src, j: int) -> tuple[int, int, int | None, int | None] | No
     """``return cond ? { a } : {}`` with the expression at ``j``: (condition start, the ``?``, the ``{`` of the
     then-branch, the ``{`` of the else-branch; None for ``{}`` / ``undefined`` / ``null``). One choice between
     whole literals, parenthesised at most once, that ends the statement; None for anything else."""
-    from .jsroots import _statement_end
-
     if src.ruby:
         return None
     end = asi_end(src, j, _statement_end(src, j))
@@ -126,8 +127,6 @@ def asi_end(src, i: int, end: int) -> int:
 def merged_argument(src, start: int, end: int) -> tuple[int, int] | None:
     """The object merged in by the statement at ``start``: the one argument of ``p.merge!(x)`` / ``p.update(x)``,
     or the second of ``Object.assign(p, x)`` (exactly two)."""
-    import re
-
     text = src.text
     m = re.compile(r"[^(\n]*?(merge!|deep_merge!|update|Object\s*\.\s*assign)\s*\(").match(text, start)
     if m is None:
@@ -204,16 +203,26 @@ def _operators(src, i: int, end: int) -> list[tuple[str, int]]:
 
 
 class Reader:
-    """Reads ``...this.build(x)``, ``...build(x)`` and ``...built`` (a local bound only to such a call) through
-    the file's same-file helpers (:class:`jshelpers.Helpers`): the spread adds what the helper returns, under
-    the spread's prefix, without spans. Returns False (the caller hides the spread) when the helper cannot be
-    read, is already being read through a spread, or helpers nest deeper than MAX_DEPTH."""
+    """Reads spreads the scanner can follow in the same file, adding the keys without spans (the fixer reads the
+    call without this reader and never edits through a spread):
+
+    - ``...this.build(x)``, ``...build(x)``, ``...built`` (a local bound only to such a call): what a same-file
+      helper returns (:class:`jshelpers.Helpers`);
+    - ``...urls`` where every binding of ``urls`` that reaches the spread, in the same function, is an object
+      literal (with the writes into it before the spread, :func:`jswrites.add_writes`) or a choice of two
+      literals (``const p = c ? { a } : { b }``); ``params = { ...params, mode }`` reads the earlier ``params``.
+      ``urls`` must not be used in between other than spread, rebound or written by a plain statement: passed
+      to a function, aliased, or touched in a callback, it may have gained keys.
+
+    Returns False (the caller hides the spread) for anything else, for a helper or binding already being read
+    through a spread, and beyond MAX_DEPTH."""
 
     def __init__(self, helpers) -> None:
         self.helpers, self.active = helpers, []
 
     def __call__(self, src, i: int, prefix: str, out) -> bool:
         from . import jsswitch
+        from .jsroots import NAME
 
         helpers = self.helpers
         if src.ruby or src is not helpers.src:
@@ -222,19 +231,75 @@ class Reader:
         b = src.skip_scalar(i)
         got = helpers.argument(i, b)
         if got is None:
-            return not prefix and jsswitch.rest_excludes(helpers, src.text[i:b].strip(), i)
-        if got.helper in self.active or len(self.active) >= MAX_DEPTH:
+            name = src.text[i:b].strip()
+            if not re.fullmatch(NAME, name):
+                return False
+            sub = self._local(src, name, i)
+            if sub is None:
+                return not prefix and jsswitch.rest_excludes(helpers, name, i)
+        else:
+            sub = self._enter(got.helper, lambda: (helpers.read(i, b) or (None, None))[1])
+        if sub is None:
             return False
-        self.active.append(got.helper)
-        try:
-            read = helpers.read(i, b)
-        finally:
-            self.active.pop()
-        if read is None:
-            return False
-        sub = read[1]
         out.paths |= {prefix + p for p in sub.paths}
         out.hidden |= {prefix + h for h in sub.hidden}
         out.switched |= {(prefix + old, prefix + new, since) for old, new, since in sub.switched}
         out.complete = out.complete and sub.complete
+        return True
+
+    def _enter(self, key, read):
+        if key in self.active or len(self.active) >= MAX_DEPTH:
+            return None
+        self.active.append(key)
+        try:
+            return read()
+        finally:
+            self.active.pop()
+
+    def _local(self, src, name: str, at: int):
+        """The fields of the local ``name`` spread at ``at``, or None when they are not all visible."""
+        from .jsparse import Fields, merge, parse_object, variable_fields
+
+        bindings, scopes, text = self.helpers.bindings, self.helpers.scopes, src.text
+        fn = scopes.innermost(at)
+        reaching = bindings.reaching(name, at)
+        inside = [b for b in reaching if b.literal is not None and b.literal < at < src.skip_balanced(b.literal)]
+        if inside:  # ``p = { ...p }`` spreads the value p had before this assignment
+            reaching = [b for b in bindings.reaching(name, inside[0].pos) if b not in inside]
+        if not reaching or any(b.value < 0 or scopes.innermost(b.pos) != fn for b in reaching):
+            return None  # a parameter, a rebinding in a loop, or a binding outside this function
+        if not self._only_spread(src, name, min(b.pos for b in reaching), at, fn):
+            return None
+        out = Fields()
+        for b in reaching:
+            if b.literal is not None:
+                sub = self._enter(("binding", b.pos), lambda b=b: variable_fields(src, bindings, b, at))
+            else:
+                opens = _branches(src, b.value, asi_end(src, b.value, _statement_end(src, b.value)))
+                if opens is None or bindings.mutations(name, b.pos, at):
+                    return None
+                sub = Fields()
+                for k in opens:
+                    merge(sub, parse_object(src, k + 1))
+            if sub is None:
+                return None
+            merge(out, sub)
+        return out
+
+    def _only_spread(self, src, name: str, after: int, at: int, fn) -> bool:
+        """Between ``after`` and ``at``, ``name`` is only rebound, spread, or written by a statement in ``fn``."""
+        from .jsroots import _mutation_re
+
+        helpers, text = self.helpers, src.text
+        own = {b.pos for b in helpers.bindings.by_name.get(name, ())}
+        writes = {m.start() for m in _mutation_re(name).finditer(text, after, at)}
+        for m in re.compile(rf"(?<![\w$.]){re.escape(name)}(?![\w$])").finditer(text, after, at):
+            p = m.start()
+            if helpers.mask.covers(p) or p in own or text[max(0, p - 3):p] == "...":
+                continue
+            if p in writes and helpers.scopes.innermost(p) == fn:
+                continue
+            if re.match(r"\s*:(?!:)", text[m.end():m.end() + 3]) and text[:p].rstrip()[-1:] in "{,":
+                continue  # a key that shares the name
+            return False
         return True
