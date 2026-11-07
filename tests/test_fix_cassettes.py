@@ -62,10 +62,14 @@ def test_request_bodies_with_the_old_key_on_a_changed_endpoint_are_listed(tmp_pa
         (tmp_path / rel).write_text(text)
     (tmp_path / "spec/fixtures").mkdir(parents=True)
     (tmp_path / "spec/fixtures/notes.yml").write_text("text: payment_method_types[0]=card on /v1/payment_intents\n")
-    # The create and the confirm (percent-encoded); not the GET query, the other endpoint, the new key or responses.
-    assert recorded(tmp_path, CHANGES) == [("spec/cassettes/pay.yml", 8), ("spec/cassettes/pay.yml", 21),
-                                           ("tests/cassettes/fc.yaml", 3)]
+    # One line per cassette; not the GET query, the other endpoint, the new key, responses or a plain YAML file.
+    assert recorded(tmp_path, CHANGES) == [("spec/cassettes/pay.yml", 8), ("tests/cassettes/fc.yaml", 3)]
     assert recorded(tmp_path, []) == []
+    confirm = CHANGES[1:2]  # only the percent-encoded confirm request matches
+    assert recorded(tmp_path, confirm) == [("spec/cassettes/pay.yml", 21)]
+    other = VCR.replace("v1/payment_intents\n", "v1/customers\n").replace("pi_1/confirm", "pi_1/capture")
+    (tmp_path / "spec/cassettes/pay.yml").write_text(other)
+    assert recorded(tmp_path, CHANGES) == [("tests/cassettes/fc.yaml", 3)]
 
 
 def test_the_fix_plan_carries_the_cassettes_and_leaves_them_alone(tmp_path):

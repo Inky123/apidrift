@@ -26,7 +26,8 @@ URI = re.compile(r"^[ \t]+uri:[ \t]*['\"]?https?://[^/\s'\"]+(/[^?\s'\"]*)", re.
 
 
 def recorded(root: Path, changes: list[tuple[str, str, str]]) -> list[tuple[str, int]]:
-    """``(file, line)`` of recorded request bodies that send ``target`` to ``(method, path)`` for each change."""
+    """``(file, line)`` of the first recorded request body in each cassette that sends ``target`` to
+    ``(method, path)`` for one of the changes; at most MAX_CASSETTES files."""
     if not changes:
         return []
     root = Path(root).resolve()
@@ -49,10 +50,12 @@ def recorded(root: Path, changes: list[tuple[str, str, str]]) -> list[tuple[str,
                 hit = key_re.search(block) if method.group(1).lower() == want and path_re.fullmatch(uri.group(1)) else None
                 if hit:
                     out.append((rel, text.count("\n", 0, lo + hit.start()) + 1))
-                    if len(out) >= MAX_CASSETTES:
-                        return out
                     break
-    return sorted(set(out))
+            if out and out[-1][0] == rel:
+                break  # one line per cassette: it is re-recorded as a whole
+        if len(out) >= MAX_CASSETTES:
+            break
+    return out
 
 
 def _requests(text: str) -> list[tuple[int, int]]:

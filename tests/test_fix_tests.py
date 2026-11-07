@@ -66,6 +66,7 @@ def test_only_request_spellings_in_code_of_the_fixed_language_are_listed(tmp_pat
         "# payment_method_types is going away\n"
         "it 'sends payment_method_types' do\n"
         "  expect(params[:payment_method_types]).to eq(['card'])\n"
+        "  allow(intent).to receive(:payment_method_types).and_return(%w[card])\n"
         "end\n"))
     write(tmp_path, "app/javascript/pay.test.tsx", "const options = { payment_method_types: ['card'] };\n")
     write(tmp_path, "tests/test_pay.py", "PaymentMethodTypes = 1\nassert x['payment_method_types']\n")

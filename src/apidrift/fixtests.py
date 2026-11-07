@@ -14,7 +14,8 @@ is listed only when it can be about the request the fix changed:
 - the test is in the language of a file the fix changed (JS and TS count as one): a browser test cannot run
   the server's Ruby;
 - it is not inside a literal Stripe object (a hash with an ``id`` and an ``object`` string at its own level),
-  which is a recorded response, not a request.
+  which is a recorded response, not a request, nor an RSpec stub of a method of that name
+  (``receive(:payment_method_types)``), which reads a response.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ GONE_ACTIONS = ("rename", "rename_first", "delete")  # wrap_type keeps the field
 FAMILY = {"typescript": "javascript"}
 OBJECT_KEY = re.compile(r"""['"]?(id|object)['"]?\s*(?:=>|:|=)\s*(['"])[\w.]+\2""")
 OPEN, CLOSE = "{[(", "}])"
+STUBBED = re.compile(r"\b(?:receive|have_received|respond_to)\(\s*:\Z")
 
 
 def _spellings(field: str, language: str) -> set[str]:
@@ -70,6 +72,8 @@ def stale_tests(root: Path, sites: list[tuple[str, str]], edited: set[str]) -> l
             continue
         found = [t for name in fields for spelling in _spellings(name, language) for t in tokens(text, language, spelling)]
         objects = _stripe_objects(text, language, {t.pos for t in found})
+        if language == "ruby":  # ``receive(:payment_method_types)`` stubs the response's reader, not a request key
+            objects |= {t.pos for t in found if STUBBED.search(text, max(0, t.pos - 40), t.pos)}
         for number in sorted({t.line for t in found if t.pos not in objects}):
             out.append((rel, number))
             if len(out) >= MAX_MENTIONS:
