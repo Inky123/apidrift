@@ -25,20 +25,33 @@ MAX_DEPTH = 4
 SCOPES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 
 
-def resolve(chain: list[str], func: ast.expr, resolve_chain):
-    """``resolve_chain(chain)``, else the sync twin of an ``_async`` method, else a class-level pager's request."""
-    resolved = resolve_chain(chain)
-    if resolved is not None:
-        return resolved
+def resolve(chain: list[str], call: ast.Call, resolve_chain):
+    """``resolve_chain(chain)``, else the sync twin of an ``_async`` method, else a class-level pager's request;
+    then the two account endpoints stripe-python tells apart by the id (:func:`_account`)."""
     name = chain[-1]
-    if name.endswith(ASYNC) and len(name) > len(ASYNC) and not name.startswith("_"):
-        name = name[: -len(ASYNC)]
-        resolved = resolve_chain(chain[:-1] + [name])
-        if resolved is not None:
-            return resolved
-    if name in PAGERS and len(chain) >= 3 and _plain(func):
-        return resolve_chain(chain[:-1] + [PAGERS[name]])  # stripe.Customer.auto_paging_iter: a class, not a list
-    return None
+    if name.endswith(ASYNC) and len(name) > len(ASYNC) and not name.startswith("_") and resolve_chain(chain) is None:
+        chain = chain[:-1] + [name[: -len(ASYNC)]]
+    resolved = resolve_chain(chain)
+    if resolved is None and chain[-1] in PAGERS and len(chain) >= 3 and _plain(call.func):
+        resolved = resolve_chain(chain[:-1] + [PAGERS[chain[-1]]])  # stripe.Customer.auto_paging_iter: a class
+    return _account(chain, call, resolved, resolve_chain)
+
+
+def _account(chain: list[str], call: ast.Call, resolved, resolve_chain):
+    """``stripe.Account.retrieve(id)`` / ``modify(id, ...)`` reach ``/v1/accounts/{account}`` (with no id,
+    ``/v1/account``); StripeClient's ``accounts.retrieve_current()`` is ``GET /v1/account``."""
+    if len(chain) >= 2 and chain[-2:] == ["accounts", "retrieve_current"] and resolved is None:
+        current = resolve_chain(chain[:-2] + ["Account", "retrieve"])
+        return current if current is not None and current.path == "/v1/account" else None
+    if resolved is None or resolved.path != "/v1/account" or len(chain) < 2 or chain[-2] != "Account":
+        return resolved
+    first = call.args[0] if call.args else next((kw.value for kw in call.keywords if kw.arg == "id"), None)
+    if first is None or (isinstance(first, ast.Constant) and first.value is None):
+        return resolved
+    by_id = resolve_chain(chain[:-2] + ["accounts", chain[-1] if chain[-1] != "modify" else "update"])
+    if by_id is not None and by_id.path == "/v1/accounts/{account}" and by_id.method == resolved.method:
+        return by_id
+    return None  # an id, but no such endpoint by id: not this call
 
 
 def _plain(func: ast.expr) -> bool:

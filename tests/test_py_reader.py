@@ -277,3 +277,33 @@ def test_an_unreadable_reaching_binding_blocks_the_fix(tmp_path):
         "    stripe.PaymentIntent.create(**p)\n"
     )})
     assert plan.fixes == [] and [u.line for u in plan.unfixable + plan.not_attempted] == [7]
+
+
+# --- stripe-python's two account endpoints ---------------------------------------------------------
+
+
+def test_account_retrieve_with_an_id_is_the_account_by_id(tmp_path):
+    doc = sdk_doc()
+    acct = {"name": "account", "in": "path", "required": True, "schema": {"type": "string"}}
+    doc["paths"]["/v1/account"] = {"get": {"responses": {"200": {}}}}
+    doc["paths"]["/v1/accounts/{account}"] = {"get": {"parameters": [acct], "responses": {"200": {}}}}
+    doc["components"]["schemas"]["account"] = {
+        "type": "object", "properties": {"id": {"type": "string"}},
+        "x-stripeResource": {"class_name": "Account", "in_package": ""},
+        "x-stripeOperations": [_op("retrieve", "retrieve", "get", "/v1/account"),
+                               _op("retrieve", "retrieve", "get", "/v1/accounts/{account}")],
+    }
+    index = SdkIndex.build(load_spec(doc))
+    got, _ = scan(tmp_path, index, (
+        "import stripe\n"
+        "stripe.Account.retrieve()\n"
+        "stripe.Account.retrieve(api_key='sk')\n"
+        "stripe.Account.retrieve('acct_1', api_key='sk')\n"
+        "stripe.Account.retrieve(id=uid)\n"
+        "async def go(client):\n"
+        "    await stripe.Account.retrieve_async(uid)\n"
+        "    await client.v1.accounts.retrieve_current_async()\n"
+        "    await client.v1.accounts.retrieve('acct_1')\n"
+    ))
+    assert got[2][0] == got[3][0] == got[8][0] == "GET /v1/account"
+    assert got[4][0] == got[5][0] == got[7][0] == got[9][0] == "GET /v1/accounts/{account}"

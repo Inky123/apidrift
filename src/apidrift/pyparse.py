@@ -85,14 +85,14 @@ def calls(
             expanded = (
                 pyalias.expand(binders, node.func, chain, aliases) if chain[0] not in ("self", "cls") else pyself.expand(
                     node.func, chain, binders, scopes.parents, aliases, repo,
-                    lambda ch, f=node.func: pyalias.resolve(ch, f, resolve) is not None)
+                    lambda ch, n=node: pyalias.resolve(ch, n, resolve) is not None)
             )
             if expanded is not None:
                 call, chain = ".".join(chain), expanded  # shown as written; resolved through the alias
         if not stripe_like(chain):
             continue
         call = call or ".".join(chain)
-        resolved = pyalias.resolve(chain, node.func, resolve)
+        resolved = pyalias.resolve(chain, node, resolve)
         if resolved is None:
             unresolved.append((node.lineno, call))
             continue
