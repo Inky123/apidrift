@@ -285,8 +285,9 @@ def _left_for_you(
             not_attempted.setdefault(reason, []).append((str(item["file"]), item.get("line")))
     leftovers = _places(payload.get("leftovers"))
     tests = [(f, line) for f, line in _places(payload.get("tests")) if (f, line) not in updated]
+    cassettes = [(f, line) for f, line in _places(payload.get("cassettes")) if f.lower().endswith((".yml", ".yaml"))]
     unread = unread_note(payload)
-    if not (by_why or not_attempted or possibly or leftovers or tests or unread):
+    if not (by_why or not_attempted or possibly or leftovers or tests or cassettes or unread):
         return []
     lines = ["", "**Left for you**"]
     for sentence, places in sorted(by_why.items()):
@@ -301,6 +302,9 @@ def _left_for_you(
         lines.append(f"- {label}: {_links(full_name, sha, tests)}. A test that expects the request "
                      "this pull request changes fails until it is updated here; one that reads the field from a "
                      "Stripe response can stay.")
+    if cassettes:
+        lines.append(f"- Recorded responses to re-record: {_links(full_name, sha, cassettes)}. Their recorded requests send "
+                     "the old field; a cassette matched on the request body stops replaying until it is re-recorded.")
     if leftovers:
         lines.append(f"- Still mentions the old name at {_links(full_name, sha, leftovers)}; check whether those are this field.")
     if unread:

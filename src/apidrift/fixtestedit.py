@@ -23,7 +23,7 @@ import difflib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import fixtestbuild, fixtestfind, migrations, phpfix, phplex
+from . import fixcassettes, fixtestbuild, fixtestfind, fixtests, migrations, phpfix, phplex
 from .fixedit import Locator, apply
 from .fixhelpers import plain_call
 from .fixtokens import tokens
@@ -72,13 +72,19 @@ class TestFix:
         return "".join(ln if ln.endswith("\n") else ln + "\n\\ No newline at end of file\n" for ln in lines)
 
 
-def plan_tests(plan, impacts, index, base: Path) -> tuple[list[TestFix], list[tuple[str, int]]]:
-    """The test files to update for ``plan`` (a :class:`fixer.FixPlan`), and the plan's test lines with the
-    edited ones included (a wrap_type key is listed only where it is edited)."""
+def plan_tests(plan, impacts, index, base: Path) -> tuple[list[TestFix], list[tuple[str, int]], list[tuple[str, int]]]:
+    """The test files to update for ``plan`` (a :class:`fixer.FixPlan`), the plan's test lines with the edited
+    ones included (a wrap_type key is listed only where it is edited), and the recorded cassettes whose
+    requests send a changed field (:mod:`fixcassettes`)."""
+    changed = sorted({(m.method, m.path, m.target) for f in plan.fixes for s in f.sites
+                      if (m := migrations.for_site(s.path, s.target)) is not None})
+    cassettes = fixcassettes.recorded(base, changed) if changed else []
     eligible = _eligible(plan)
-    files = list(dict.fromkeys(f for f, _ in plan.tests))
+    wraps = [("rename", m.target) for m in eligible.values() if m.action == "wrap_type"]  # a kept key is not listed
+    named = fixtests.stale_tests(base, wraps, {f.file for f in plan.fixes}) if wraps else []
+    files = list(dict.fromkeys(f for f, _ in [*plan.tests, *named]))
     if not eligible or not files:
-        return [], plan.tests
+        return [], plan.tests, cassettes
     sources = _builders(plan, impacts, eligible)
     out: list[TestFix] = []
     for file in files:
@@ -88,7 +94,7 @@ def plan_tests(plan, impacts, index, base: Path) -> tuple[list[TestFix], list[tu
         if fix is not None:
             out.append(fix)
     edited = {(f.file, e.line) for f in out for e in f.edits}
-    return out, sorted(set(plan.tests) | edited)
+    return out, sorted(set(plan.tests) | edited), cassettes
 
 
 def _eligible(plan) -> dict[tuple[str, str], Migration]:
@@ -173,8 +179,8 @@ def _sends(m: Migration, fields: frozenset[str]) -> bool:
 def _expect_edits(ex, text: str, file: str, language: str, eligible, index) -> list[tuple[Edit, Migration]] | None:
     """The edits of one expectation, in test offsets; None when it names a qualifying field it cannot edit."""
     virtual, u = _usage(ex, text, file, index)
-    if u is None:
-        return None
+    if u is None or not u.complete:
+        return None  # a spread or splat in the expected arguments: the old key may come from it
     wanted = [m for key, m in eligible.items() if (key[0], m.method) == (u.path, u.method) and ex.only in (None, key)]
     wanted = [m for m in wanted if _sends(m, u.fields)]
     if not wanted:
@@ -233,8 +239,9 @@ def _verify(text: str, content: str, file: str, language: str, expects, edits, i
     return True
 
 
-def render_text(fixes: list[TestFix], tests: list[tuple[str, int]]) -> list[str]:
-    """The ``apidrift fix`` lines for tests: the diffs, the updated lines, then the lines left for a person."""
+def render_text(fixes: list[TestFix], tests: list[tuple[str, int]], cassettes: list[tuple[str, int]] = ()) -> list[str]:
+    """The ``apidrift fix`` lines for tests: the diffs, the updated lines, the lines left for a person, and
+    the recorded cassettes to re-record."""
     lines: list[str] = []
     for fix in fixes:
         lines += ["", fix.diff().rstrip("\n")]
@@ -246,4 +253,7 @@ def render_text(fixes: list[TestFix], tests: list[tuple[str, int]]) -> list[str]
     if rest:
         lines += ["", "tests that still name the old field (update those that expect the old request):"]
         lines += [f"  {f}:{line}" for f, line in rest]
+    if cassettes:
+        lines += ["", "recorded responses to re-record (their requests send the old field; not changed):"]
+        lines += [f"  {f}:{line}" for f, line in cassettes]
     return lines

@@ -142,7 +142,7 @@ def test_possibly_remaining_names_the_deletion_behind_a_spread(tmp_path):
     data = plan_v2(tmp_path).to_dict()
     assert data["possibly_remaining"] == [{"file": "delete.js", "line": 30, "path": PM, "target": "payto"}]
     assert {"fixes", "unfixable", "pins", "migrations", "leftovers", "not_attempted", "possibly_remaining", "tests",
-        "test_fixes"} == set(data)
+        "test_fixes", "cassettes"} == set(data)
 
 
 def test_fix_text_uses_action_specific_wording(tmp_path):

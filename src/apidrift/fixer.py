@@ -98,6 +98,7 @@ class FixPlan:
     possibly_remaining: list[dict] = field(default_factory=list)  # deleted keys a spread may still send
     tests: list[tuple[str, int]] = field(default_factory=list)  # test lines that still name a renamed/removed field
     test_fixes: list[fixtestedit.TestFix] = field(default_factory=list)  # tests that expect the changed request
+    cassettes: list[tuple[str, int]] = field(default_factory=list)  # recorded requests that send a changed field
     root: Path | None = field(default=None, repr=False, compare=False)  # the checkout (the oracle reads Go types)
 
     def to_dict(self) -> dict:
@@ -125,6 +126,7 @@ class FixPlan:
             "possibly_remaining": [dict(p) for p in self.possibly_remaining],
             "tests": [{"file": f, "line": line} for f, line in self.tests],
             "test_fixes": [t.to_dict() for t in self.test_fixes],
+            "cassettes": [{"file": f, "line": line} for f, line in self.cassettes],
         }
 
 
@@ -188,7 +190,7 @@ def plan_fixes(result: ScanResult, impacts: list[Impact], index: SdkIndex, root:
     plan.pins = find_pins(root, [f.file for f in plan.fixes])
     sites = [(s.action, s.target) for f in plan.fixes for s in f.sites]
     plan.tests = fixtests.stale_tests(base, sites, {f.file for f in plan.fixes}) if sites else []
-    plan.test_fixes, plan.tests = fixtestedit.plan_tests(plan, impacts, index, base)
+    plan.test_fixes, plan.tests, plan.cassettes = fixtestedit.plan_tests(plan, impacts, index, base)
     return plan
 
 
@@ -481,7 +483,7 @@ def render_fix_text(plan: FixPlan, root: str) -> str:
     if plan.not_attempted:
         lines += ["", "possibly affected, not attempted (arguments not fully visible):"]
         lines += [f"  {u.file}:{u.line}  {u.target}  {u.path}" for u in plan.not_attempted]
-    lines += fixtestedit.render_text(plan.test_fixes, plan.tests)
+    lines += fixtestedit.render_text(plan.test_fixes, plan.tests, plan.cassettes)
     if plan.leftovers:
         lines += ["", "still mentions the old name:"]
         lines += [f"  {f}:{line}" for f, line in plan.leftovers]
