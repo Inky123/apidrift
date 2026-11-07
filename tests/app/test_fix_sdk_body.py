@@ -40,7 +40,7 @@ def test_go_says_the_import_path_changes_and_node_typescript_may_not_compile():
     text = body([fix(PMT, "pay.go")], [lock("stripe-go", "76.25.0", "go.mod", 6)])
     assert "`github.com/stripe/stripe-go/v87`" in text and "apidrift does not change import paths" in text
     text = body([fix(PMT, "pay.ts")], [lock("stripe-node", "14.25.0", "package-lock.json", 9)])
-    assert "older than [stripe-node 23.0.0]" in text and "TypeScript types may not list the new fields" in text
+    assert "older than [stripe-node 23.0.0]" in text and "TypeScript types may not have the new field names or shapes" in text
     assert "TypeScript" not in body([fix(PMT, "pay.js")], [lock("stripe-node", "14.25.0", "package-lock.json", 9)])
 
 

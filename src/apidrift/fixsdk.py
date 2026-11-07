@@ -96,7 +96,8 @@ def _read_dir(root: Path, d: Path, sdk: str) -> list[SdkLock]:
             hits = [(v, line) for v, line in reader(text) if VERSION_SHAPE.fullmatch(v) and len(v) <= 40]
             if hits:
                 rel = path.relative_to(root).as_posix()
-                return [SdkLock(sdk, v, rel, line) for v, line in dict.fromkeys(hits)]
+                first = {v: line for v, line in reversed(hits)}  # one line per version (yarn patch entries repeat it)
+                return [SdkLock(sdk, v, rel, first[v]) for v in dict.fromkeys(v for v, _ in hits)]
     return []
 
 

@@ -275,7 +275,7 @@ def _sdks(payload: dict, fixes: list[dict], full_name: str, sha: str) -> list[st
                 line += (f" stripe-go v{major} is imported as {code(f'{fixsdk.GO_MODULE}/v{major}')}, so go.mod and "
                          "the import paths change with it; apidrift does not change import paths.")
             if sdk == "stripe-node" and typed:
-                line += " Its TypeScript types may not list the new fields, so the type check can fail until then."
+                line += " Its TypeScript types may not have the new field names or shapes, so the type check can fail until then."
         elif older is None:
             line = (f"- {where} locks {code(sdk)} {code(version)}; it must be a release built for Stripe API version "
                     f"{safe_version(api)} or later" + (f" ({sdk} {first} or later)." if first else "."))

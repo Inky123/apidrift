@@ -137,6 +137,13 @@ def test_no_lockfile_no_language_and_no_escape_from_the_root(tmp_path):
     (tmp_path.parent / "requirements.txt").unlink()
 
 
+def test_one_version_twice_in_a_lockfile_is_one_lock(tmp_path):
+    """fxa's yarn.lock lists stripe@npm:22.3.1 and its patched copy stripe@patch:...22.3.1."""
+    text = YARN_BERRY.replace("17.7.0", "22.3.1") + '\n"stripe@patch:stripe@npm%3A22.3.1#~/p.patch":\n  version: 22.3.1\n'
+    write(tmp_path, {"yarn.lock": text, "a.ts": ""})
+    assert [(s.version, s.line) for s in find_sdks(tmp_path, ["a.ts"])] == [("22.3.1", 4)]
+
+
 def test_a_lockfile_with_two_versions_reports_both(tmp_path):
     text = json.dumps({"packages": {"node_modules/stripe": {"version": "8.222.0"},
                                     "node_modules/x/node_modules/stripe": {"version": "14.25.0"}}}, indent=1)
