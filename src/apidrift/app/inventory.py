@@ -44,6 +44,7 @@ _METHOD_RE = re.compile(r"[a-z]{1,10}|\?")
 _SPEC_PATH_RE = re.compile(r"(?:/[A-Za-z0-9_{}.-]{1,100}){1,16}")
 _LANGUAGE_RE = re.compile(r"[a-z][a-z0-9+#-]{0,19}")
 _HASH_RE = re.compile(r"[0-9a-f]{%d}" % HASH_CHARS)
+_SINCE_RE = re.compile(r">=?\d{4}-\d{2}-\d{2}(?:\.[a-z]+)?")
 _SENT_RE = re.compile(r"#[0-9a-f]{%d}" % HASH_CHARS)
 # Modules of the core package that cannot change what a scan finds; every other one (the scanner, the parsers,
 # and any parser added later) is part of ``scanner_digest``.
@@ -181,7 +182,7 @@ def export(result: ScanResult, recorder: Recorder) -> dict:
         {
             "file": u.file, "line": u.line, "method": u.method, "path": u.path, "call": u.call, "language": u.language,
             "complete": u.complete, "fields": sorted(u.fields), "hidden": None if u.hidden is None else sorted(u.hidden),
-            "reads": reads.setdefault(u.reads, len(reads)), "sent": _sent(u),
+            "reads": reads.setdefault(u.reads, len(reads)), "sent": _sent(u), "switched": sorted(map(list, u.switched)),
         }
         for u in result.usages
     ]
@@ -258,11 +259,24 @@ def _usage(site: object, reads: list[HashedNames], budget: _Budget) -> Usage:
     fields = _names(site.get("fields"), "fields")
     hidden = None if site.get("hidden") is None else _names(site["hidden"], "hidden", empty=True)
     sent = _values(site.get("sent"), budget)
+    switched = _switched(site.get("switched", []), budget)
     budget.take(file, call, *fields, *(hidden or ()))
     return Usage(
         file, line, method, path, call, frozenset(fields), complete, language, reads[which],
-        None if hidden is None else frozenset(hidden), sent,
+        None if hidden is None else frozenset(hidden), sent, switched,
     )
+
+
+def _switched(raw: object, budget: _Budget) -> frozenset[tuple[str, str, str, bool]]:
+    """``switched``: distinct [old field, new field, since (``>=`` or ``>`` a release date), hidden]."""
+    if not isinstance(raw, list) or len(raw) > MAX_FIELDS or not all(map(_switch, raw)) or len(set(map(tuple, raw))) != len(raw):
+        raise Invalid("switched: not a list of distinct switches within the cap")
+    budget.take(*(_text(part, MAX_FIELD, "a switched field") for item in raw for part in item[:3]))
+    return frozenset(map(tuple, raw))
+
+
+def _switch(item: object) -> bool:
+    return isinstance(item, list) and len(item) == 4 and all(isinstance(x, str) for x in item[:3]) and bool(_SINCE_RE.fullmatch(item[2])) and isinstance(item[3], bool)
 
 
 def _values(raw: object, budget: _Budget) -> frozenset[tuple[str, str | None]] | None:
@@ -390,7 +404,7 @@ def store(
     snapshot ``checked``."""
     extras = json.dumps(
         {"reads": ["".join(hashes) for hashes in index.reads], "site_reads": list(index.site_reads), "answers": answers,
-         "unread": unread, "impacts": impacts},
+         "unread": unread, "impacts": impacts, "switched": {str(seq): sorted(map(list, u.switched)) for seq, u in enumerate(index.usages) if u.switched}},
         separators=(",", ":"),
     )
     rows = [
@@ -433,6 +447,7 @@ def load(conn: sqlite3.Connection, header: db.Row) -> Stored | None:
                 bool(row["complete"]), row["language"], reads[which[row["seq"]]],
                 None if row["hidden"] is None else frozenset(json.loads(row["hidden"])),
                 None if row["sent"] is None else frozenset(tuple(pair) for pair in json.loads(row["sent"])),
+                frozenset(tuple(item) for item in extras.get("switched", {}).get(str(row["seq"]), ())),
             )
             for row in sites(conn, header["repo_id"], header["provider"])
         )

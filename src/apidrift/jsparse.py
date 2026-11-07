@@ -11,7 +11,7 @@ import bisect
 import re
 from dataclasses import dataclass, field
 
-from . import jshelpers, jsroots, jsspread
+from . import jshelpers, jsroots, jsspread, jsswitch, jswrites
 from .jsroots import CALL_ARGS, NAME
 from .sdkmap import Resolved, SdkIndex
 
@@ -62,6 +62,7 @@ class Fields:
     complete: bool = True
     spans: dict[str, list[Span]] = field(default_factory=dict)
     hidden: set[str] = field(default_factory=set)  # prefixes ("" = top level) under which unseen keys may be sent
+    switched: set[tuple] = field(default_factory=set)  # version choices between a key and its replacement (jsswitch)
 
     def add(self, path: str, span: Span | None = None) -> None:
         self.paths.add(path)
@@ -88,6 +89,7 @@ class Source:
         self.text = text if ruby else NON_NULL.sub(" .", text.replace("?.", " ."))  # same length, keeps offsets
         self.n = len(self.text)
         self.ruby = ruby
+        self.spreads = None  # reads ``...helper(x)`` (jsspread.Reader), installed by :func:`extract`
 
     def skip_space(self, i: int) -> int:
         text = self.text
@@ -287,8 +289,8 @@ class Source:
         """``...(cond ? { a: 1 } : {})``: the keys of literal branches are read with their spans (each marked
         with its branch, :func:`jsspread.absorb`); any other spread may add any key under ``prefix``."""
         opens = jsspread.literal_branches(self, i)
-        if opens is None:
-            out.hide(prefix)
+        if opens is None and not (self.spreads is not None and self.spreads(self, i, prefix, out)):
+            out.hide(prefix)  # neither literal branches nor a same-file helper's object (jsspread.Reader)
         for k in opens or ():
             sub = Fields()
             self.object_fields(k + 1, prefix, sub)
@@ -375,9 +377,13 @@ def extract(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> 
     found: list[Found] = []
     resolved_calls, unresolved = calls(text, index, ruby=ruby, resolve=resolve)
     helpers = jshelpers.Helpers(resolved_calls[0].bindings) if resolved_calls else None
+    if helpers is not None and not ruby:
+        helpers.src.spreads = jsspread.Reader(helpers)
     for c in resolved_calls:
         fields, via = Fields(), jshelpers.Via(helpers)
         collect(c.args_src, c.spans, "{" in c.resolved.path, c.bindings, fields, ruby=ruby, helper=via)
+        jsswitch.settle(helpers, fields, lambda out, c=c: collect(
+            c.args_src, c.spans, "{" in c.resolved.path, c.bindings, out, ruby=ruby, helper=jshelpers.Via(helpers)))
         found.append(Found(c.line, c.call + via.suffix, c.resolved, fields))
     return found, unresolved
 
@@ -463,12 +469,7 @@ def variable_fields(src: Source, bindings: jsroots.Bindings, binding: jsroots.Bi
     sub = parse_object(src, binding.literal + 1)
     if not sub.paths:  # ``const params = {}`` is filled in elsewhere
         sub.hide("")
-    for mutation in bindings.mutations(binding.name, binding.literal, at):
-        sub.hide("")
-        if mutation.key:
-            sub.paths.add(mutation.key)
-        if mutation.literal is not None:
-            sub.paths |= parse_object(src, mutation.literal + 1).paths
+    jswrites.add_writes(src, bindings, binding, at, sub)  # params.k = v adds k; any other write hides every key
     return sub
 
 
@@ -487,4 +488,5 @@ def merge(out: Fields, sub: Fields) -> None:
     for path, spans in sub.spans.items():
         out.spans.setdefault(path, []).extend(spans)
     out.hidden |= sub.hidden
+    out.switched |= sub.switched
     out.complete = out.complete and sub.complete

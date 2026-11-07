@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from . import jsspread, jsswitch
 from .jsroots import NAME
 
 if TYPE_CHECKING:
@@ -280,7 +281,11 @@ class Helpers:
                 continue
             n = re.compile(NAME).match(text, j)
             if n is None or not _statement_ends(src, n.end()):
-                return None
+                choice = jsspread.returned_choice(src, j)  # return cond ? { a } : {}: each literal branch
+                if choice is None:
+                    return None
+                out += [Value(m.start(), literal=k) for k in choice[2:] if k is not None]
+                continue
             out.append(Value(j, name=n.group(0)))
         return out or None
 
@@ -351,6 +356,7 @@ class Helpers:
                 merge(out, sub)
             elif not self._local(v.name, v.at, out, stack, seen):
                 return None
+        jsswitch.mark(self, d, values, out)  # a choice by API version between the old key and its replacement
         return out
 
     def _local(self, name: str, at: int, out: Fields, stack: list[Definition], seen: list[Definition]) -> bool:
@@ -459,7 +465,7 @@ def _value_end(src: Source, i: int) -> int:
     """End of an assigned value starting at ``i`` (``;``, a closer, or in Ruby the end of the line)."""
     from .jsroots import _statement_end
 
-    end = _statement_end(src, i)
+    end = _statement_end(src, i) if src.ruby else jsspread.asi_end(src, i, _statement_end(src, i))
     while end > i and src.text[end - 1] in " \t\r":
         end -= 1
     return end
@@ -485,14 +491,4 @@ def _assign_at(src: Source, key_end: int, end: int) -> int | None:
     return j if j < end and text[j] == "=" and not text.startswith("==", j) else None
 
 
-def _merged_argument(src: Source, start: int, end: int) -> tuple[int, int] | None:
-    """The one argument of ``p.merge!(x)`` / ``p.update(x)`` written at ``start``."""
-    text = src.text
-    m = re.compile(r"[^(\n]*?(?:merge!|deep_merge!|update)\s*\(").match(text, start)
-    if m is None:
-        return None
-    args = src.args(m.end() - 1)
-    if len(args) != 1:
-        return None
-    a = src.skip_space(args[0][0])
-    return a, args[0][1]
+_merged_argument = jsspread.merged_argument  # ``p.merge!(x)``, ``p.update(x)``, ``Object.assign(p, x)``
