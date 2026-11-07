@@ -145,3 +145,15 @@ def test_a_wrapper_whose_parameter_is_also_read_is_not_followed(tmp_path):
                         "  if (!params) return createIntent({ amount: 1 });\n  return stripe.paymentIntents.create(params);\n")
     found = sites(tmp_path, {"lib/billing.js": func, "lib/go.js": USER})
     assert any(s[0] == "lib/billing.js" for s in found)
+
+
+@pytest.mark.parametrize("export", [
+    "export default createIntent;\n", "export { createIntent as default };\n",
+])
+def test_a_default_export_is_not_followed(tmp_path, export):
+    """A default import binds any name: its calls cannot be found by the function's own name."""
+    func = FUNC.replace("export async function", "async function") + export
+    other = f"import make from './billing';\nexport const go2 = () => make({{ amount: 2, {OLD}: [] }});\n"
+    found = sites(tmp_path, {"lib/billing.js": func, "lib/go.js": USER, "lib/go2.js": other})
+    assert not any("[through " in s[2] for s in found)
+    assert any(s[0] == "lib/billing.js" for s in found)

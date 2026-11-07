@@ -140,7 +140,11 @@ def collect(calls: list[jsparse.Call], helpers: Helpers, table: Table, rel: str)
 
 
 def _exported(text: str, name: str) -> bool:
+    """Exported under its own name, and not as the module's default (a default import may bind any name,
+    so its callers could not be found by this one)."""
     n = re.escape(name)
+    if re.search(rf"\bexport\s+default\s+(?:async\s+)?(?:function\s*\*?\s*)?{n}\b|\b{n}\s+as\s+default\b", text):
+        return False
     return re.search(rf"\bexport\s+(?:default\s+)?(?:async\s+)?(?:function\s*\*?\s*{n}\b|(?:const|let|var)\s+{n}\b)"
                      rf"|\bexport\s*\{{[^}}]*\b{n}\b[^}}]*\}}(?!\s*from)", text) is not None
 
