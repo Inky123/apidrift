@@ -136,9 +136,6 @@ def test_aliases_that_are_not_proven_are_not_followed(tmp_path, index, text):
 
 
 @pytest.mark.parametrize("text", [
-    # self / cls: a subclass in another file may rebind the attribute
-    "import stripe\nclass M:\n    stripe_class = stripe.Charge\n    def f(self):\n        return self.stripe_class.create(amount=1)\n",
-    "import stripe\nclass M:\n    stripe_class = stripe.Charge\n    @classmethod\n    def f(cls):\n        return cls.stripe_class.create(amount=1)\n",
     # written elsewhere, decorated, metaclass, two bases, bound twice, setattr
     "import stripe\nclass M:\n    stripe_class = stripe.Charge\nM.stripe_class = stripe.checkout.Session\nM.stripe_class.create(amount=1)\n",
     "import stripe\n@deco\nclass M:\n    stripe_class = stripe.Charge\nM.stripe_class.create(amount=1)\n",

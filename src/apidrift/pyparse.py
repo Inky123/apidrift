@@ -42,11 +42,14 @@ class PyCall:
     scopes: "_PyScopes"
 
 
-def extract(text: str, resolve: Callable[[list[str]], Resolved | None]) -> tuple[list[PyFound], list[tuple[int, str]]]:
-    """Stripe SDK calls in a Python source, plus (line, call) pairs that matched no endpoint."""
+def extract(
+    text: str, resolve: Callable[[list[str]], Resolved | None], repo=None
+) -> tuple[list[PyFound], list[tuple[int, str]]]:
+    """Stripe SDK calls in a Python source, plus (line, call) pairs that matched no endpoint. ``repo`` (a
+    :class:`pyrepo.Repo`) lets calls and spreads through ``self`` be followed (:mod:`pyself`)."""
     from . import pyhelpers  # builds on this module
 
-    resolved_calls, unresolved = calls(text, resolve)
+    resolved_calls, unresolved = calls(text, resolve, repo)
     found: list[PyFound] = []
     helpers =pyhelpers.PyHelpers(resolved_calls[0].scopes) if resolved_calls else None
     for c in resolved_calls:
@@ -56,17 +59,19 @@ def extract(text: str, resolve: Callable[[list[str]], Resolved | None]) -> tuple
     return found, unresolved
 
 
-def calls(text: str, resolve: Callable[[list[str]], Resolved | None]) -> tuple[list[PyCall], list[tuple[int, str]]]:
+def calls(
+    text: str, resolve: Callable[[list[str]], Resolved | None], repo=None
+) -> tuple[list[PyCall], list[tuple[int, str]]]:
     """Resolved SDK calls (arguments not yet read), plus the (line, call) pairs that matched no endpoint."""
-    from . import pyalias, pysyntax  # pyalias builds on this module
+    from . import pyalias, pyself, pysyntax  # pyalias and pyself build on this module
 
     tree = pysyntax.parse(text)
     if tree is None:
         return [], []
-
     aliases = _import_aliases(tree)
     scopes = _PyScopes(tree)
-    binders: pyalias.Binders | None = None
+    binders = pyalias.Binders(tree)
+    scopes.options = lambda value: pyself.options_only(value, binders, scopes.parents, repo, OPTION_KWARGS)
     found: list[PyCall] = []
     unresolved: list[tuple[int, str]] = []
     for node, fn in scopes.calls:
@@ -76,9 +81,12 @@ def calls(text: str, resolve: Callable[[list[str]], Resolved | None]) -> tuple[l
         call = ""
         if chain[0] in aliases:
             chain = aliases[chain[0]].split(".") + chain[1:]
-        elif chain[0] not in ("self", "cls"):
-            binders = binders or pyalias.Binders(tree)
-            expanded = pyalias.expand(binders, node.func, chain, aliases)
+        else:
+            expanded = (
+                pyalias.expand(binders, node.func, chain, aliases) if chain[0] not in ("self", "cls") else pyself.expand(
+                    node.func, chain, binders, scopes.parents, aliases, repo,
+                    lambda ch, f=node.func: pyalias.resolve(ch, f, resolve) is not None)
+            )
             if expanded is not None:
                 call, chain = ".".join(chain), expanded  # shown as written; resolved through the alias
         if not stripe_like(chain):
@@ -126,6 +134,7 @@ class _PyScopes:
         self.touches: dict[ast.AST | None, dict[str, list[tuple[int, str]]]] = {None: {}}  # reads/deletes of a key
         self.calls: list[tuple[ast.Call, ast.AST | None]] = []
         self.tree = tree
+        self.options: Callable[[ast.expr], bool] = lambda value: False  # set by calls(): **self.<request options>
         self._visit(tree, None)
 
     def _visit(self, node: ast.AST, fn: ast.AST | None) -> None:
@@ -296,6 +305,7 @@ class _PyLookup:
 
     def __init__(self, scopes: _PyScopes, line: int, fn: ast.AST | None, at: ast.AST | None = None) -> None:
         self.scopes, self.line, self.fn, self.at = scopes, line, fn, at
+        self.options = scopes.options
 
     def get(self, name: str) -> ast.expr | None:
         if self.at is not None:
@@ -430,6 +440,8 @@ def _py_fields(call: ast.Call, assigned, helper=None) -> tuple[set[str], set[str
     for kw in call.keywords:
         if kw.arg is None or kw.arg == "params":
             node = _as_dict(kw.value, assigned)
+            if node is None and kw.arg is None and getattr(assigned, "options", lambda v: False)(kw.value):
+                continue  # **self.api_kwargs: a property returning only request options (pyself)
             if node is None:
                 if helper is None or not helper(kw.value, fields, hidden):  # a same-file helper's dict (pyhelpers)
                     hidden.add("")
