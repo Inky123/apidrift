@@ -14,8 +14,8 @@ import re
 from dataclasses import dataclass
 
 from . import migrations
-from .jsswitch import holds as switched_holds
 from .diff import BREAKING, INFO, SEVERITY_RANK, WARNING, Change
+from .jsswitch import holds as switched_holds
 from .scanner import ScanResult, Usage, unread_sentence
 
 AFFECTED, POSSIBLE = "affected", "possible"

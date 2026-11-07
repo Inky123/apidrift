@@ -456,7 +456,7 @@ def collect(
             name = m.group(0) if m else ""
             binding = bindings.at(name, i) if name and text[i:b].strip() == name else None
             if binding is not None and binding.literal is not None:
-                merge(out, variable_fields(src, bindings, binding, i))
+                merge(out, jswrites.reaching_fields(src, bindings, binding, i))  # every literal that can reach
             elif k == 0 and has_id and (binding is None or binding.literal is None):
                 continue
             elif not jsspread.options_choice(src, i, b) and (helper is None or not helper(i, b, out)):

@@ -279,13 +279,13 @@ class Helpers:
                     return None
                 out.append(Value(m.start(), literal=k))
                 continue
-            n = re.compile(NAME).match(text, j)
-            if n is None or not _statement_ends(src, n.end()):
-                choice = jsspread.returned_choice(src, j)  # return cond ? { a } : {}: each literal branch
-                if choice is None:
-                    return None
+            choice = jsspread.returned_choice(src, j)  # return cond ? { a } : {}: each literal branch
+            if choice is not None:
                 out += [Value(m.start(), literal=k) for k in choice[2:] if k is not None]
                 continue
+            n = re.compile(NAME).match(text, j)
+            if n is None or not _statement_ends(src, n.end()):
+                return None
             out.append(Value(j, name=n.group(0)))
         return out or None
 
