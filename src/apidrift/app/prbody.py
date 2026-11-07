@@ -218,6 +218,7 @@ def render_pr(
         "every other Stripe call is unchanged.",
     ]
     lines += _left_for_you(payload, full_name, sha, possibly)
+    lines += _kept(payload, full_name, sha)
     lines += ["", f"Addresses #{issue_number}", pr_marker(fingerprint)]
     keys = {(action, old) for _, old, action, _ in groups}
     return pr_title(version, keys, len(placed)), "\n".join(lines) + "\n"
@@ -297,3 +298,9 @@ def _left_for_you(payload: dict, full_name: str, sha: str, possibly: Possibly | 
     if unread:
         lines.append(f"- {unread}")
     return lines
+
+
+def _kept(payload: dict, full_name: str, sha: str) -> list[str]:
+    """Old-key reads the fix left alone on purpose (``fixreads``): a webhook or response payload is tested there."""
+    kept = _places(payload.get("kept"))
+    return ["", f"Kept on purpose (reads of a webhook or response payload, unchanged): {_links(full_name, sha, kept)}"] if kept else []

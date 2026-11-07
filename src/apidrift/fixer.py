@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import fixhelpers, fixtests, gofix, goowned, migrations, phpfix, phplex, scanner
+from . import fixhelpers, fixreads, fixtests, gofix, goowned, migrations, phpfix, phplex, scanner
 from .diff import BREAKING, Change
 from .fixedit import Edit, Locator, apply
 from .fixtokens import accessed, app_names, tokens
@@ -97,6 +97,7 @@ class FixPlan:
     not_attempted: list[Unfixable] = field(default_factory=list)  # possible hits, why == NOT_ATTEMPTED
     possibly_remaining: list[dict] = field(default_factory=list)  # deleted keys a spread may still send
     tests: list[tuple[str, int]] = field(default_factory=list)  # test lines that still name a renamed/removed field
+    kept: list[tuple[str, int]] = field(default_factory=list)  # old-key reads of a payload, kept on purpose (fixreads)
     root: Path | None = field(default=None, repr=False, compare=False)  # the checkout (the oracle reads Go types)
     table: object = field(default=None, repr=False, compare=False)  # the scan's wrappers followed across files
 
@@ -124,6 +125,7 @@ class FixPlan:
             ],
             "possibly_remaining": [dict(p) for p in self.possibly_remaining],
             "tests": [{"file": f, "line": line} for f, line in self.tests],
+            "kept": [{"file": f, "line": line} for f, line in self.kept],
         }
 
 
@@ -228,6 +230,7 @@ def _plan_file(
     plan.possibly_remaining += [
         {"file": file, "line": i.usage.line, "path": i.usage.path, "target": m.target} for i, m in possibly
     ]
+    plan.kept += fixreads.kept_places(file, content, planned, plan.root) if language == "php" else []
     sites = [FixSite(i.usage.line, i.usage.path, m.target, m.replacement, m.action) for i, m in pairs]
     return Fix(file, "", content, sites, original=text), leftovers
 
@@ -347,11 +350,12 @@ def _oracle_tokens(
         # exceptions: a value carried into the new text (``country: countries[0]``), and the app's own names
         # that happen to be spelled like the key (a parameter or variable, never a key, member or string).
         carried = {t.pos for t in remaining for e in mine if placed[e][0] <= t.pos < placed[e][1]}
-        allowed = app_names(after, language, remaining)
+        kept = fixreads.kept(after, language, m, remaining, where)  # tested reads of a webhook payload
+        allowed = app_names(after, language, remaining) | kept
         stray = stray or any(t.pos not in allowed and t.pos not in carried for t in remaining)
         if m.action == "rename_first":  # the old value is kept on purpose: its variables are not leftovers
             remaining = [t for t in remaining if t.pos not in allowed and t.pos not in carried]
-        leftovers += [t.line for t in remaining]
+        leftovers += [t.line for t in remaining if t.pos not in kept]
     return ("leftover_tokens" if stray else None), sorted(set(leftovers))
 
 
