@@ -104,6 +104,7 @@ AMBIGUOUS = [
     ("a test defines the name", {"tests/FakeDriver.php": "<?php\nclass Fake {\n    function createintent($p) {}\n}\n"}),
     ("a vendored file defines the name", {"vendor/acme/Lib.php": "<?php\nclass Lib {\n    function createIntent($p) {}\n}\n"}),
     ("the repository is a library", {"composer.json": '{"name": "acme/pay"}'}),
+    ("the repository is a WordPress plugin", {"composer.json": '{"name": "acme/pay", "type": "wordpress-plugin"}'}),
 ]
 
 

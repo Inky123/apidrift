@@ -146,12 +146,13 @@ def walk(base: Path, suffixes: set[str], skip=None, needles: tuple[bytes, ...] =
 
 
 def composer_library(base: Path) -> bool:
-    """A Composer package others install (the default type is ``library``): its methods have callers outside."""
+    """A Composer package others install or extend: anything but an application (``"type": "project"``). The
+    default type is ``library``; a ``wordpress-plugin`` (GiveWP) has add-ons that call and subclass it."""
     try:
         composer = json.loads((base / "composer.json").read_text(errors="replace"))
     except (OSError, ValueError):
         return False
-    return isinstance(composer, dict) and composer.get("type", "library") == "library"
+    return isinstance(composer, dict) and composer.get("type", "library") != "project"
 
 
 def record(table: Table, w: Wrapper, file: str, line: int, visible: bool) -> None:
