@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import re
 
-from .. import migrations
+from .. import fixsdk, migrations
+from . import fixcheck
 from .issue import FIELD_PATH_RE, METHOD_RE, VERSION_RE, code, escape, permalink, unread_note
 
 PR_MARKER_RE = re.compile(r"<!-- apidrift:pr=([0-9a-f]{64}) -->")
@@ -208,6 +209,7 @@ def render_pr(
         if len(places) > MAX_PR_LINKS:
             lines.append(f"- and {len(places) - MAX_PR_LINKS} more.")
     lines += _pins(payload, full_name, sha, deletes_only)
+    lines += _sdks(payload, fixes, full_name, sha)
     uncertain = len({place for _, places in possibly for place in places})
     verified = len(placed) - uncertain
     count = f"{verified} call site now sends" if verified == 1 else f"{verified} call sites now send"
@@ -239,6 +241,47 @@ def _pins(payload: dict, full_name: str, sha: str, deletes_only: bool) -> list[s
         lines.append(f"- and {len(pins) - MAX_PR_LINKS} more.")
     if not pins:
         lines.append("No API-version pin was found in the scanned files.")
+    return lines
+
+
+TYPED_NODE = (".ts", ".tsx", ".mts", ".cts")
+
+
+def _sdks(payload: dict, fixes: list[dict], full_name: str, sha: str) -> list[str]:
+    """One sentence per locked SDK version (validated by :func:`fixcheck.sdk_locks`), measured against the
+    parent's own table of first releases for the API version the fixed sites need. Nothing for deletions."""
+    locks = fixcheck.sdk_locks(payload.get("sdks"), fixes)
+    needed = {
+        m.introduced for fix in fixes for s in fix.get("sites") or []
+        if s.get("action") != "delete" and (m := migrations.for_site(str(s.get("path")), str(s.get("target")))) is not None
+    }
+    if not locks or not needed:
+        return []
+    api = max(needed)
+    typed = any(str(fix.get("file")).lower().endswith(TYPED_NODE) for fix in fixes)
+    lines = ["", "**Stripe SDK version**"]
+    for lock in locks:
+        sdk, version = lock["sdk"], lock["version"]
+        where = _where(full_name, sha, lock["file"], lock["line"])
+        first = fixsdk.FIRST_RELEASE.get(api, {}).get(sdk)
+        older = fixsdk.older(sdk, version, api)
+        if older and first:
+            note = f"[{sdk} {first}]({fixsdk.CHANGELOGS[sdk]}#{first.replace('.', '-')})"
+            line = (f"- {where} locks {code(sdk)} {code(version)}, which is older than {note}, its first release for "
+                    f"Stripe {safe_version(api)}. Upgrade it in this change, or make sure every request it sends uses "
+                    f"API version {safe_version(api)} or later.")
+            if sdk == "stripe-go":
+                major = first.split(".")[0]
+                line += (f" stripe-go v{major} is imported as {code(f'{fixsdk.GO_MODULE}/v{major}')}, so go.mod and "
+                         "the import paths change with it; apidrift does not change import paths.")
+            if sdk == "stripe-node" and typed:
+                line += " Its TypeScript types may not list the new fields, so the type check can fail until then."
+        elif older is None:
+            line = (f"- {where} locks {code(sdk)} {code(version)}; it must be a release built for Stripe API version "
+                    f"{safe_version(api)} or later" + (f" ({sdk} {first} or later)." if first else "."))
+        else:
+            line = f"- {where} locks {code(sdk)} {code(version)}, a release built for Stripe {safe_version(api)} or later."
+        lines.append(line)
     return lines
 
 

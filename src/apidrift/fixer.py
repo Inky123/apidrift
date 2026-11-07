@@ -14,18 +14,18 @@ from __future__ import annotations
 import ast
 import difflib
 import hashlib
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import fixhelpers, fixtests, gofix, goowned, migrations, phpfix, phplex, scanner
+from . import fixhelpers, fixsdk, fixtests, gofix, goowned, migrations, phpfix, phplex
 from .diff import BREAKING, Change
 from .fixedit import Edit, Locator, apply
+from .fixpins import Pin, find_pins
 from .fixtokens import accessed, app_names, tokens
 from .fixvalue import leaf
 from .impact import AFFECTED, POSSIBLE, Impact, assess
 from .migrations import Migration
-from .scanner import LANGUAGES, ScanResult, Usage, scan_text
+from .scanner import ScanResult, Usage, scan_text
 from .sdkmap import SdkIndex
 
 FIX_LANGUAGES = {"python", "javascript", "typescript", "ruby", "php", "go"}
@@ -38,12 +38,6 @@ WHY = (
 NOT_VISIBLE = "arguments are not fully visible at this call"  # impact.py's reason at an incomplete call
 NOT_ATTEMPTED = "arguments_not_visible"  # a possible hit: the call may send the field through arguments we cannot read
 CAP_FILES, CAP_FILE_BYTES, CAP_TOTAL_BYTES = 25, 1_000_000, 3_000_000
-MAX_PINS = 100
-PROJECT_MARKERS = scanner.PROJECT_FILES | {"requirements.txt", "Pipfile", "setup.cfg", "Gemfile.lock", "deno.json"}
-PIN_RE = re.compile(
-    r"""(?:(?:\bapiVersion|\bapi_version|['"]?Stripe-Version['"]?)\s*(?:=>|[:=])|['"](?:api|stripe)_version['"]\s*=>"""
-    r"""|\bsetApiVersion\()\s*['"](\d{4}-\d{2}-\d{2}(?:\.[A-Za-z]\w*)?)['"]"""
-)
 
 
 @dataclass(frozen=True)
@@ -80,18 +74,12 @@ class Unfixable:
     why: str
 
 
-@dataclass(frozen=True)
-class Pin:
-    file: str
-    line: int
-    version: str
-
-
 @dataclass
 class FixPlan:
     fixes: list[Fix] = field(default_factory=list)
     unfixable: list[Unfixable] = field(default_factory=list)
     pins: list[Pin] = field(default_factory=list)
+    sdks: list[fixsdk.SdkLock] = field(default_factory=list)  # the locked SDK version per fixed language
     migrations: list[Migration] = field(default_factory=list)
     leftovers: list[tuple[str, int]] = field(default_factory=list)
     not_attempted: list[Unfixable] = field(default_factory=list)  # possible hits, why == NOT_ATTEMPTED
@@ -116,6 +104,7 @@ class FixPlan:
                 {"file": u.file, "line": u.line, "path": u.path, "target": u.target, "why": u.why} for u in self.unfixable
             ],
             "pins": [{"file": p.file, "line": p.line, "version": p.version} for p in self.pins],
+            "sdks": [{"sdk": s.sdk, "version": s.version, "file": s.file, "line": s.line} for s in self.sdks],
             "migrations": [m.to_dict() for m in self.migrations],
             "leftovers": [{"file": f, "line": line} for f, line in self.leftovers],
             "not_attempted": [
@@ -184,6 +173,7 @@ def plan_fixes(result: ScanResult, impacts: list[Impact], index: SdkIndex, root:
             plan.fixes.append(fix)
             total += len(raw)
     plan.pins = find_pins(root, [f.file for f in plan.fixes])
+    plan.sdks = fixsdk.find_sdks(root, [f.file for f in plan.fixes]) if root.is_dir() else []
     sites = [(s.action, s.target) for f in plan.fixes for s in f.sites]
     plan.tests = fixtests.stale_tests(base, sites, {f.file for f in plan.fixes}) if sites else []
     return plan
@@ -394,50 +384,6 @@ def blob_sha(raw: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(raw) + raw).hexdigest()
 
 
-def find_pins(root: Path, fixed: list[str]) -> list[Pin]:
-    """API-version pins (``apiVersion:``, ``api_version =``, ``Stripe-Version``) in the source files of the
-    projects that hold the fixed files: the nearest ancestor directory with a project file (package.json,
-    requirements.txt, Gemfile, ...), else the file's own directory. Reported for the pull request body;
-    never edited. A browser bundle's Stripe.js pin elsewhere in the repository is not the server's pin.
-    """
-    root = Path(root).resolve()
-    if not fixed or not root.exists():
-        return []
-    if root.is_file():
-        files, base = [root], root.parent
-    else:
-        base = root
-        files, seen = [], set()
-        for project in sorted({_project_root(base, f) for f in fixed}):
-            for path in scanner._iter_files(project)[0]:
-                if path not in seen:
-                    seen.add(path)
-                    files.append(path)
-    pins: list[Pin] = []
-    for path in sorted(files):
-        if path.suffix.lower() not in LANGUAGES:
-            continue
-        text = scanner._read(path)
-        if text is None or "stripe" not in text.lower():
-            continue
-        rel = path.relative_to(base).as_posix()
-        for m in PIN_RE.finditer(text):
-            pins.append(Pin(rel, text.count("\n", 0, m.start()) + 1, m.group(1)))
-            if len(pins) >= MAX_PINS:
-                return pins
-    return pins
-
-
-def _project_root(base: Path, rel: str) -> Path:
-    here = (base / rel).parent
-    for d in [here, *here.parents]:
-        if d == base or any((d / marker).exists() for marker in PROJECT_MARKERS):
-            return d
-        if base not in d.parents:
-            break
-    return here
-
-
 # --- Rendering (apidrift fix) ---------------------------------------------------
 
 
@@ -469,6 +415,9 @@ def render_fix_text(plan: FixPlan, root: str) -> str:
     if plan.pins:
         lines += ["", "API-version pins (merge the fix together with your upgrade; these are not changed):"]
         lines += [f"  {p.file}:{p.line}  {p.version}" for p in plan.pins]
+    if plan.sdks:
+        lines += ["", "Stripe SDK versions locked (the new fields need a release built for the new API version):"]
+        lines += [f"  {s.file}:{s.line}  {s.sdk} {s.version}" for s in plan.sdks]
     if plan.possibly_remaining:
         lines += ["", "removed here, but possibly still sent through arguments that are not visible:"]
         lines += [f"  {p['file']}:{p['line']}  {p['target']}  {p['path']}" for p in plan.possibly_remaining]

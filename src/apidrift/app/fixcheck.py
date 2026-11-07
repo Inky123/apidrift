@@ -14,7 +14,7 @@ import logging
 import re
 from pathlib import PurePosixPath
 
-from .. import migrations
+from .. import fixsdk, migrations
 from ..scanner import LANGUAGES
 from . import issue
 from .github import GitHubClient, GitHubError
@@ -110,6 +110,41 @@ def _site(site: dict) -> dict:
         "line": site["line"], "path": site["path"], "target": migration.target,
         "replacement": migration.replacement, "action": migration.action,
     }
+
+
+LOCKFILE_RE = re.compile(
+    r"Gemfile\.lock|composer\.lock|go\.mod|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|package\.json|poetry\.lock"
+    r"|uv\.lock|Pipfile\.lock|requirements[A-Za-z0-9_.-]{0,40}\.txt"
+)
+
+
+def sdk_locks(items: object, fixes: list[dict]) -> list[dict]:
+    """The child's locked SDK versions the parent will mention, rebuilt from checked values only: a known SDK
+    whose language an accepted fix with a non-delete site is written in, a short plain version string, a
+    lockfile or manifest path that :func:`issue.valid_path` admits, and a line number."""
+    wanted = {
+        fixsdk.SDK_BY_SUFFIX.get(PurePosixPath(str(fix.get("file"))).suffix.lower()) for fix in fixes
+        if any(isinstance(s, dict) and s.get("action") != "delete" for s in fix.get("sites") or [])
+    }
+    out: list[dict] = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict) or len(out) >= fixsdk.MAX_LOCKS:
+            continue
+        sdk, version, file, line = item.get("sdk"), item.get("version"), item.get("file"), item.get("line")
+        if not isinstance(sdk, str) or sdk not in fixsdk.SDKS or sdk not in wanted:
+            continue
+        if not isinstance(version, str) or len(version) > 40 or not fixsdk.VERSION_SHAPE.fullmatch(version):
+            continue
+        if not isinstance(file, str) or not issue.valid_path(file) or file != PurePosixPath(file).as_posix():
+            continue
+        if not LOCKFILE_RE.fullmatch(PurePosixPath(file).name) or any(p in ("", ".", "..") for p in PurePosixPath(file).parts):
+            continue
+        if isinstance(line, bool) or not isinstance(line, int) or not 1 <= line <= 10_000_000:
+            continue
+        entry = {"sdk": sdk, "version": version, "file": file, "line": line}
+        if entry not in out:
+            out.append(entry)
+    return out
 
 
 def _content_meta(gh: GitHubClient, token: str, full_name: str, file: str, base_sha: str) -> dict:
