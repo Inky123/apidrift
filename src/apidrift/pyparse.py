@@ -12,7 +12,7 @@ import ast
 from dataclasses import dataclass
 from typing import Callable
 
-from .sdkmap import Resolved
+from .sdkmap import Resolved, without_id
 
 OPTION_KWARGS = {
     "api_key", "stripe_account", "stripe_version", "idempotency_key", "api_version", "options", "timeout",
@@ -79,8 +79,17 @@ def calls(text: str, resolve: Callable[[list[str]], Resolved | None]) -> tuple[l
         if resolved is None:
             unresolved.append((node.lineno, call))
             continue
+        if _no_id(node):  # stripe.Account.retrieve() is GET /v1/account
+            resolved = without_id(resolve, resolved)
         found.append(PyCall(node, fn, call, resolved, scopes))
     return found, unresolved
+
+
+def _no_id(node: ast.Call) -> bool:
+    """The call passes no id: no positional argument (or ``None``), no ``id=`` and no ``**kwargs``."""
+    if node.args:
+        return isinstance(node.args[0], ast.Constant) and node.args[0].value is None
+    return all(k.arg not in (None, "id") for k in node.keywords)
 
 
 def stripe_like(chain: list[str]) -> bool:

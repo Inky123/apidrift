@@ -11,7 +11,7 @@ import bisect
 import re
 from dataclasses import dataclass, field
 
-from . import jshelpers, jsroots, jsspread
+from . import jsbare, jshelpers, jsroots, jsspread
 from .jsroots import CALL_ARGS, NAME
 from .sdkmap import Resolved, SdkIndex
 
@@ -392,6 +392,7 @@ def calls(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> tu
     resolve = resolve or index.resolve
     found: list[Call] = []
     unresolved: list[tuple[int, str]] = []
+    taken: set[int] = set()
     pattern, at = (RUBY_CALL if ruby else JS_CALL), 0
     while (m := pattern.search(src.text, at)) is not None:
         at = m.end()
@@ -416,8 +417,11 @@ def calls(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> tu
             spans = args_src.args(m.end() - 1)
         else:
             args_src, spans = src, src.args(m.end() - 1)
+        resolved = jsbare.by_id(resolve, resolved, args_src, spans, ruby=ruby)
         found.append(Call(line, call, resolved, m.end() - 1, args_src, spans, bindings))
-    return found, unresolved
+        taken.add(m.start(1))
+    bare = jsbare.calls(src, mask, lambda chain: eligible(chain, roots), resolve, taken) if ruby else []
+    return sorted(found + [Call(*b, bindings) for b in bare], key=lambda c: c.pos), unresolved  # bare: no parentheses
 
 
 def collect(
