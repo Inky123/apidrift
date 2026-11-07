@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import fixhelpers, fixtests, gofix, goowned, migrations, phpfix, phplex, scanner
+from . import fixhelpers, fixtests, gofix, goowned, migrations, phpfix, phplex, phpvendor, scanner
 from .diff import BREAKING, Change
 from .fixedit import Edit, Locator, apply
 from .fixtokens import accessed, app_names, tokens
@@ -130,6 +130,7 @@ Candidate = tuple[Impact, Migration]
 Planned = tuple[Impact, Migration, bool]  # the bool: a wrap_type edit wrote the timestamp form
 
 
+@phpvendor.within_repo  # the re-scans and the PHP locator see the scan's vendored stripe-php prefixes
 def plan_fixes(result: ScanResult, impacts: list[Impact], index: SdkIndex, root: Path) -> FixPlan:
     root = Path(root).resolve()
     base = root.parent if root.is_file() else root

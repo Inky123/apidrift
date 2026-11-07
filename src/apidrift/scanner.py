@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import goparse, jsparse, phpparse, pyparse
+from . import goparse, jsparse, phpparse, phpvendor, pyparse
 from .sdkmap import Resolved, SdkIndex
 
 SKIP_DIRS = {"node_modules", "vendor", "site-packages", "__pycache__"}  # skipped anywhere
@@ -159,6 +159,7 @@ class ScanResult:
         return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
+@phpvendor.within_repo  # stripe-php vendored under a renamed namespace: found once per checkout
 def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> ScanResult:
     """Scan a checkout for one vendor's calls: Stripe's unless ``reader`` (with an index of its own kind) says otherwise."""
     reader = reader or Reader()

@@ -16,9 +16,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from . import phpflow, phpinstance, phpvendor
 from .jsparse import Fields, Found, Span
 from .phplex import OPENERS, STRING, Lex
-from .phpscope import WRITE, Bindings, Scopes
+from .phpscope import Bindings, Scopes
 from .sdkmap import Resolved
 
 VERB = re.compile(r"(\?->|->|::)\s*([A-Za-z_]\w*)\s*\(")
@@ -70,6 +71,8 @@ class Call:
     pos: int  # index of the call's ``(``
     spans: list[tuple[int, int]]
     params: int | None  # which argument holds the request parameters
+    start: int = -1  # where the call's chain starts
+    saved: tuple[str, int] | None = None  # ``$sub->save()``: (variable, where its tracking starts), see phpinstance
 
 
 @dataclass
@@ -90,6 +93,8 @@ def extract(text: str, resolve) -> tuple[list[Found], list[tuple[int, str]]]:
     for c in parsed.calls:
         fields, via = Fields(), Via(helpers)
         collect(parsed, c, fields, via)
+        if c.saved is not None and fields.complete and not fields.paths:
+            continue  # ``save()`` with nothing assigned sends no request
         found.append(Found(c.line, c.call + via.suffix, c.resolved, fields))
         found += helpers.callers_of(c)  # calls of a same-file wrapper that forwards its parameter here
     return found, parsed.unresolved
@@ -102,7 +107,7 @@ def parse(text: str, resolve) -> Parsed:
     uses = _uses(src)
     clients = _clients(src, uses)
     other: dict[int, tuple[int, str]] = {}  # chain start -> a Stripe-looking call that matched no endpoint
-    resolved_at: set[int] = set()
+    resolved_at: dict[int, Call] = {}
     for m in VERB.finditer(src.code):
         walked = walk_back(src, m.start())
         if walked is None:
@@ -110,8 +115,16 @@ def parse(text: str, resolve) -> Parsed:
         start, segs, root = walked
         verb, chain = m.group(2), _names(segs, root, uses)
         static = m.group(1) == "::" and root == "class" and len(segs) == 1
+        owner, on_object = None, None
+        if root == "var" and segs[0].name != "this" and not any(s.called for s in segs):
+            owner = phpinstance.resource(
+                parsed, segs[0].name, start, resolved_at, uses, lambda n, v: _static(n, v, resolve),
+            )
         if static:
             resolved = _static(chain[0], verb, resolve)
+        elif owner is not None:  # a Stripe object: only its own methods and collections (phpinstance)
+            on_object = phpinstance.instance(owner, [s.name for s in segs[1:]], verb, resolve)
+            resolved = on_object[0] if on_object else None
         else:
             resolved = _service(chain, verb, clients, resolve)
             if resolved is None and root == "var" and segs[0].name != "this":
@@ -122,10 +135,17 @@ def parse(text: str, resolve) -> Parsed:
                 other[start] = (src.line(start), call)
             continue
         spans = src.args(m.end() - 1)
-        resolved_at.add(start)
         ids = resolved.path.count("{")
-        params = _params(src, spans, ids, id_only=static and verb == "retrieve" and ids == 1)
-        parsed.calls.append(Call(src.line(start), call, resolved, m.end() - 1, spans, params))
+        if on_object:
+            params, saved = on_object[1], None
+            if params is not None and params >= len(spans):
+                params = None
+            if verb == "save":
+                saved = (segs[0].name, phpinstance.since(parsed, segs[0].name, start))
+        else:
+            params, saved = _params(src, spans, ids, id_only=static and verb == "retrieve" and ids == 1), None
+        resolved_at[start] = Call(src.line(start), call, resolved, m.end() - 1, spans, params, start, saved)
+        parsed.calls.append(resolved_at[start])
     # ``$owner->stripe()`` on the way to ``->subscriptions->update(`` is that call's receiver, not another call
     parsed.unresolved = [entry for start, entry in sorted(other.items()) if start not in resolved_at]
     return parsed
@@ -217,11 +237,12 @@ def _uses(src: Lex) -> dict[str, list[str]]:
 
 
 def _qualify(name: str, uses: dict[str, list[str]]) -> list[str]:
-    """Namespace parts of a class name as written, through the file's ``use`` imports."""
+    """Namespace parts of a class name as written, through the file's ``use`` imports; a copy of stripe-php
+    vendored under a prefix (``EDD\\Vendor\\Stripe\\...``) reads as ``Stripe\\...`` (:mod:`phpvendor`)."""
     parts = [p for p in name.split("\\") if p]
     if name.startswith("\\") or not parts:
-        return parts
-    return uses.get(parts[0], [parts[0]]) + parts[1:]
+        return phpvendor.unprefix(parts)
+    return phpvendor.unprefix(uses.get(parts[0], [parts[0]]) + parts[1:])
 
 
 def _clients(src: Lex, uses: dict[str, list[str]]) -> set[str]:
@@ -293,7 +314,9 @@ def _service(chain: Chain, verb: str, clients: set[str], resolve) -> Resolved | 
     while c > 0 and names[c] in ("v1", "v2") and not called[c]:
         c -= 1
     owner = names[c]
-    is_client = "stripe" in owner.lower() or hints[c] or (owner in clients and (c == 0 or names[c - 1] == "this"))
+    # evidence: ``new StripeClient`` or a StripeClient type on it, ``app('stripe')``, or a name that says client
+    # and nothing else (``$stripe_customer->sources`` is a Customer's collection, not the client's ``sources``)
+    is_client = phpinstance.client_name(owner) or hints[c] or (owner in clients and (c == 0 or names[c - 1] == "this"))
     return resolved if is_client else None
 
 
@@ -415,6 +438,8 @@ def _hide(out: Fields, path: str) -> None:
 def collect(parsed: Parsed, call: Call, out: Fields, helper=None) -> None:
     """Read the request fields of ``call`` into ``out``."""
     src, text = parsed.src, parsed.src.text
+    if call.saved is not None:  # ``$sub->save()``: the properties assigned to the object
+        phpinstance.saved_fields(parsed, call.saved[0], call.saved[1], call.start, out)
     if call.params is None:
         return
     if any(text.startswith("...", src.skip_space(a)) for a, _ in call.spans[: call.params + 1]):
@@ -428,16 +453,8 @@ def collect(parsed: Parsed, call: Call, out: Fields, helper=None) -> None:
         if src.skip_space(src.pairs[opener] + 1) < b:
             out.hide("")
         return
-    merge = MERGE.match(text, i)
-    if merge:  # array_merge([...], $options): the literal keys are read, never edited
-        for x, _ in src.args(merge.end() - 1):
-            inner = src.array_open(src.skip_space(x))
-            if inner is not None:
-                sub = Fields()
-                read_array(src, inner, "", sub)
-                out.paths |= sub.paths
-                out.hidden |= sub.hidden
-        out.hide("")
+    if MERGE.match(text, i):  # array_merge([...], $options): visible only when every argument is (phpflow)
+        phpflow.merge_fields(parsed, i, b, out)
         return
     if helper is not None and helper(i, b, out):
         return  # a same-file helper's array (phphelpers)
@@ -450,25 +467,4 @@ def collect(parsed: Parsed, call: Call, out: Fields, helper=None) -> None:
 
 def variable_fields(parsed: Parsed, name: str, at: int, out: Fields) -> None:
     """Fields of the array literals a variable can hold at the call, plus keys written into it before it."""
-    src = parsed.src
-    reaching = parsed.bindings.reaching(name, at)
-    if not reaching:
-        out.hide("")
-        return
-    for binding in reaching:
-        if binding.literal is None:
-            out.hide("")
-            continue
-        before = len(out.paths)
-        read_array(src, binding.literal, "", out)
-        if len(out.paths) == before and not elements(src, binding.literal):
-            out.hide("")  # ``$params = [];`` is filled in elsewhere
-    for write in parsed.bindings.mutations(name, min(b.pos for b in reaching), at):
-        assert write.kind == WRITE
-        out.hide("")
-        if write.key:
-            out.paths.add(write.key)
-        if write.literal is not None:
-            sub = Fields()
-            read_array(src, write.literal, "", sub)
-            out.paths |= sub.paths
+    phpflow.variable_fields(parsed, name, at, out)
