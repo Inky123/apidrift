@@ -250,7 +250,8 @@ def test_stripe_go_flags_for_a_sibling_field_and_range_filters_read_as_that_fiel
         "\t})\n}\n", "sub", "customer",
     )
     update, listing = usages(text)
-    assert update.fields == {"billing_cycle_anchor"} and listing.fields == {"created", "created.gte"}
+    # the embedded ListParams sends its own fields at the top level (form:"*")
+    assert update.fields == {"billing_cycle_anchor"} and listing.fields == {"created", "created.gte", "limit"}
     hit = [(i.change.kind, i.change.target, i.certainty) for i in impacts(text)]
     assert ("body_type_changed", "billing_cycle_anchor", "affected") in hit
 

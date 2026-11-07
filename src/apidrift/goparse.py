@@ -20,9 +20,10 @@ import bisect
 import re
 from dataclasses import dataclass
 
+from . import gopick
 from .golex import ID, STR, GoSource
 from .gomap import API, PACKAGE, SERVICE, GoIndex, snake_guess
-from .govars import COMPARE, PARAM_METHODS, Decl, Entry, Params, Reader, Vars, assign_op, chain_after
+from .govars import COMPARE, EMBEDDED, PARAM_METHODS, Decl, Entry, Params, Reader, Vars, assign_op, chain_after
 from .sdkmap import Resolved
 
 IMPORTS_STRIPE = re.compile(r"github\.com/stripe/stripe-go")
@@ -229,6 +230,11 @@ class GoFile:
 
     def _write(self, t: int, sel: list[int], k: int, op: int, use: int, struct: str, reader: Reader, out: Params) -> None:
         src = self.src
+        while len(sel) > 1 and src.tok[sel[0]] in EMBEDDED:
+            sel = sel[1:]  # params.ListParams.Limit = 10 sends limit
+        if src.tok[sel[0]] in EMBEDDED:
+            out.hidden.add("")  # params.ListParams = ...: whatever that struct holds
+            return
         prefix, exact, paths = "", True, []
         for s in sel:
             path, exact = reader.name(prefix, src.tok[s])
@@ -280,20 +286,22 @@ def calls(text: str, go: GoIndex) -> tuple[list[GoCall], list[tuple[int, str]], 
             sub = f.pkgs[parts[0]]
             if f.vars.shadowed(parts[0], first) or sub.rsplit("/", 1)[-1] in QUIET_PACKAGES:
                 continue
-            resolved = go.resolve(PACKAGE, sub, verb)
+            style, owner = PACKAGE, sub
         elif len(parts) < 3 or not parts[-2][0].isupper():
             continue  # client fields are exported; a two-name chain has no client
         elif go.owns(SERVICE, parts[-2]):
-            resolved = go.resolve(SERVICE, parts[-2], verb)
-        elif len(parts) >= 3 and go.owns(API, parts[-2]):
+            style, owner = SERVICE, parts[-2]
+        else:
             args = src.split(paren + 1, src.match[paren])
             if len(args) > 2 or (args and CONTEXT_ARG.fullmatch(f.text_of(*src.trim(*args[0])))):
                 continue  # not a client.API signature: some other object with a field of this name
-            resolved = go.resolve(API, parts[-2], verb)
-            if resolved is None and not go.known(API, parts[-2], verb):
+            style, owner = API, parts[-2] if go.owns(API, parts[-2]) else gopick.from_params(f, paren, verb)
+            if owner is None:
                 continue
-        else:
+        resolved = go.resolve(style, owner, verb)
+        if resolved is None and style == API and not go.known(API, owner, verb):
             continue
+        resolved = resolved or gopick.by_parent(f, style, owner, verb, paren)
         if resolved is None:
             unresolved.append((src.line(first), call))
         else:
