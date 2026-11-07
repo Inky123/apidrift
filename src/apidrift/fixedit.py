@@ -15,7 +15,7 @@ import re
 import tokenize
 from dataclasses import dataclass, field
 
-from . import fixhelpers, fixvalue, jsparse, jsspread, pyparse, scanner
+from . import fixcross, fixhelpers, fixvalue, jsparse, jsspread, pyparse, scanner
 from .fixtokens import _Offsets
 from .fixvalue import Edit, Entry
 from .jsparse import IDENT, QUOTES, RUBY_KEYWORD, Fields, Source
@@ -91,6 +91,8 @@ class Locator:
     # --- JavaScript / TypeScript / Ruby ---------------------------------------
 
     def _js(self, usage: Usage, m: Migration) -> Sites:
+        if fixcross.is_cross(usage.call):
+            return fixcross.js_sites(self, usage, m)  # a caller of a wrapper defined in another file
         matches = [
             c for c in self.js_calls
             if c.line == usage.line and c.call == fixhelpers.plain_call(usage.call) and c.resolved.path == usage.path

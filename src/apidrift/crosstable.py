@@ -80,6 +80,7 @@ class Table:
     facts: dict[str, object] = field(default_factory=dict)  # language -> what its module learnt from the walk
     rescan: set[str] = field(default_factory=set)
     notes: list[str] = field(default_factory=list)  # why a candidate was not followed
+    base: Path | None = None  # the checkout (module paths of JS imports are resolved against it)
 
     def add(self, w: Wrapper) -> None:
         if self.collecting:
@@ -175,7 +176,8 @@ def settle(table: Table, language: str) -> None:
 def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
     """Pass 2: decide what is followed. ``sources`` are the files the scan reads (vendored and build
     directories already left out); ``resolve`` is the scan's chain resolver."""
-    from . import phpcross
+    from . import jscross, phpcross
 
-    table.collecting = False
+    table.collecting, table.base = False, base
     phpcross.finish(table, base, sources, resolve)
+    jscross.finish(table, base, sources, resolve)

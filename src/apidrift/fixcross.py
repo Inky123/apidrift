@@ -82,3 +82,38 @@ def _escapes(bindings, name: str, at: int, head: str) -> bool:
         if any(b.value < 0 or b.pos in ours for b in reaching):
             return True
     return False
+
+
+def js_sites(loc, usage, m):
+    """The edit sites of a JS/TS caller of a wrapper defined elsewhere: its object literal, or the literal
+    (and keyed writes) of the one local it passes, exactly as for a direct call's argument."""
+    from types import SimpleNamespace
+
+    from . import jscross
+    from .fixedit import Sites
+
+    table = getattr(loc, "table", None)
+    got = THROUGH_FILE.search(usage.call)
+    if table is None or got is None or table.collecting or loc.ruby:
+        return Sites(found_call=False)
+    rel = (getattr(loc, "context", None) or (None, ""))[1]
+    ctx = jscross.Context(loc.text)
+    name, file, line = got.group(1), got.group(2), int(got.group(3))
+    found = [
+        arg for w, at, _, (arg, _) in jscross.sites(ctx, table, rel)
+        if at == usage.line and (w.name, w.file, w.line) == (name, file, line) and w.resolved.path == usage.path
+        and w.resolved.method == usage.method
+    ]
+    if len(found) != 1:
+        return Sites(found_call=False)
+    (a, b), out, src = found[0], Sites(), ctx.src
+    loc.bindings = loc.bindings or ctx.bindings  # value rewrites look up the names they wrap
+    i = src.skip_space(a)
+    if src.text.startswith("{", i):
+        loc._js_literal(src, i + 1, m, out, literal=True)
+        return out
+    variable = src.text[i:b].strip()
+    loc._js_variable(SimpleNamespace(bindings=ctx.bindings), variable, i, False, m, out)
+    if ctx.bindings.escapes(variable, i):
+        out.why = out.why or fixhelpers.SHARED  # the caller's object is also used elsewhere
+    return out

@@ -367,10 +367,13 @@ class Call:
     bindings: jsroots.Bindings
 
 
-def extract(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> tuple[list[Found], list[tuple[int, str]]]:
+def extract(
+    text: str, index: SdkIndex, *, ruby: bool = False, resolve=None, table=None, rel: str = ""
+) -> tuple[list[Found], list[tuple[int, str]]]:
     """Stripe SDK calls in a JS/TS/Ruby source, plus (line, call) pairs that matched no endpoint.
 
-    ``resolve`` maps a call chain to a :class:`Resolved` operation (defaults to ``index.resolve``).
+    ``resolve`` maps a call chain to a :class:`Resolved` operation (defaults to ``index.resolve``);
+    ``table`` (:mod:`crosstable`): wrappers followed across files, for the file at ``rel``.
     """
     found: list[Found] = []
     resolved_calls, unresolved = calls(text, index, ruby=ruby, resolve=resolve)
@@ -379,6 +382,9 @@ def extract(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> 
         fields, via = Fields(), jshelpers.Via(helpers)
         collect(c.args_src, c.spans, "{" in c.resolved.path, c.bindings, fields, ruby=ruby, helper=via)
         found.append(Found(c.line, c.call + via.suffix, c.resolved, fields))
+    if table is not None:  # wrappers defined in other files (jscross builds on this module)
+        from . import jscross
+        found = jscross.extend(text, table, rel, found, resolved_calls, helpers, ruby)
     return found, unresolved
 
 

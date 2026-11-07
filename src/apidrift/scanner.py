@@ -359,7 +359,7 @@ def _scan_dynamic(text: str, rel: str, index: SdkIndex, reads: frozenset[str], l
     if language == "php":
         found, missing = phpparse.extract(text, resolve, table, rel)
     else:
-        found, missing = jsparse.extract(text, index, ruby=language == "ruby", resolve=resolve)
+        found, missing = jsparse.extract(text, index, ruby=language == "ruby", resolve=resolve, table=table, rel=rel)
     usages = [
         Usage(rel, f.line, f.resolved.method, f.resolved.path, f.call, frozenset(f.fields.paths), f.fields.complete,
               language, reads, frozenset(f.fields.hidden))
