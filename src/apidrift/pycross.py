@@ -225,6 +225,8 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
         for w in followed:
             for line, _, visible in (uses(ctx, w, table) if ctx is not None and ctx.tree is not None else [(0, None, None)]):
                 crosstable.record(table, w, rel, line, visible is not None)
+        if crosstable.over_cap(table, LANG):
+            break  # settled below: nothing more is followed
     crosstable.settle(table, LANG)
 
 

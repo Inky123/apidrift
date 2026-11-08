@@ -176,6 +176,7 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
     if not names:
         return
     funcs = [w.name for w in names.values() if not w.method]
+    counted = _definitions_pattern(funcs)  # one pass per file for every name (was one per name and file)
     source = {str(p) for p in sources}
     facts = jsreach.Facts()
     defined: Counter[str] = Counter()
@@ -189,11 +190,9 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
             return
         path, text = item
         facts.learn(text)
-        for f in funcs:
-            if f in text:
-                n = re.escape(f)
-                defined[f] += len(re.findall(rf"function(?<![\w$]function)\s*\*?\s*{n}\s*[<(]|const(?<![\w$]const)\s+{n}(?![\w$])"
-                                             rf"|let(?<![\w$]let)\s+{n}(?![\w$])|var(?<![\w$]var)\s+{n}(?![\w$])", text))
+        if counted is not None:
+            for m in counted.finditer(text):
+                defined[m.group(1) or m.group(2) or m.group(3) or m.group(4)] += 1
         if str(path) in source and path.suffix.lower() in SUFFIXES and mention.search(text):
             mentioned.append(path)
     for key, w in names.items():
@@ -216,7 +215,20 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
         for w in followed:
             for line, _, visible in (uses(ctx, w, rel, table) if ctx else [(0, -1, None)]):
                 crosstable.record(table, w, rel, line, visible is not None)
+        if crosstable.over_cap(table, LANG):
+            break  # settled below: nothing more is followed
     crosstable.settle(table, LANG)
+
+
+def _definitions_pattern(funcs: list[str]) -> re.Pattern[str] | None:
+    """``function NAME(`` / ``const|let|var NAME`` for every function wrapper name at once, the name captured:
+    a definition is one whole identifier, so each occurrence counts for exactly the name it spells, as the
+    one-name-at-a-time patterns counted it."""
+    if not funcs:
+        return None
+    n = "|".join(re.escape(f) for f in funcs)
+    return re.compile(rf"function(?<![\w$]function)\s*\*?\s*({n})\s*[<(]|const(?<![\w$]const)\s+({n})(?![\w$])"
+                      rf"|let(?<![\w$]let)\s+({n})(?![\w$])|var(?<![\w$]var)\s+({n})(?![\w$])")
 
 
 def _library(base: Path, rel: str) -> bool:

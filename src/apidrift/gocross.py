@@ -174,6 +174,8 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
         for w in followed:
             for line, _, visible in (uses(f, text, w, rel, table) if f is not None else [(0, -1, None)]):
                 crosstable.record(table, w, rel, line, visible is not None)
+        if crosstable.over_cap(table, LANG):
+            break  # settled below: nothing more is followed
     crosstable.settle(table, LANG)
 
 

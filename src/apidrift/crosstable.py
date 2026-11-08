@@ -194,6 +194,13 @@ def record(table: Table, w: Wrapper, file: str, line: int, visible: bool) -> Non
         table.rescan.add(file)
 
 
+def over_cap(table: Table, language: str) -> bool:
+    """More visible callers than :data:`MAX_CALLERS` already recorded for ``language``: :func:`settle` will
+    drop everything of it, so the files still to read cannot change the result (their callers would only be
+    dropped too, and the files they would add to ``rescan`` removed again)."""
+    return sum(len(v) for k, v in table.callers.items() if k[0] == language) > MAX_CALLERS
+
+
 def settle(table: Table, language: str) -> None:
     """Past the caller cap, nothing of the language is followed (the scan is then the per-file one)."""
     if sum(len(v) for k, v in table.callers.items() if k[0] == language) > MAX_CALLERS:
