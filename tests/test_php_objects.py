@@ -229,7 +229,24 @@ def test_account_retrieve_with_an_id_is_that_account(index, args, label):
 
 # --- a vendored, renamed stripe-php ------------------------------------------------------------
 
-API_RESOURCE = "<?php\n\nnamespace EDD\\Vendor\\Stripe;\n\nabstract class ApiResource extends StripeObject\n{\n}\n"
+API_RESOURCE = (
+    "<?php\n\nnamespace EDD\\Vendor\\Stripe;\n\nabstract class ApiResource extends StripeObject\n{\n"
+    "    public static function baseUrl() { return Stripe::$apiBase; }\n"
+    "    public static function classUrl() { return '/v1/x'; }\n"
+    "    public static function resourceUrl($id) { return static::classUrl() . '/' . $id; }\n"
+    "}\n"
+)
+SIBLINGS = {  # stripe-php's shape: ApiResource next to StripeObject and ApiRequestor, one namespace
+    "StripeObject.php": "<?php\nnamespace EDD\\Vendor\\Stripe;\nclass StripeObject implements \\ArrayAccess {}\n",
+    "ApiRequestor.php": "<?php\nnamespace EDD\\Vendor\\Stripe;\nclass ApiRequestor {}\n",
+}
+
+
+def vendored(where="lib/Stripe", resource=None, siblings=None):
+    """The files of a stripe-php copy under the EDD\\Vendor prefix, at ``where``."""
+    out = {f"{where}/ApiResource.php": API_RESOURCE if resource is None else resource}
+    out.update({f"{where}/{k}": v for k, v in (SIBLINGS if siblings is None else siblings).items()})
+    return out
 
 
 def scan(tmp_path, files, index):
@@ -250,7 +267,7 @@ PREFIXED = H + (
 
 
 def test_a_prefixed_namespace_counts_when_the_checkout_holds_that_copy(tmp_path, index):
-    found = scan(tmp_path, {"libraries/Stripe/lib/ApiResource.php": API_RESOURCE, "src/pay.php": PREFIXED}, index)
+    found = scan(tmp_path, {**vendored("libraries/Stripe/lib"), "src/pay.php": PREFIXED}, index)
     assert [(c, label) for _, _, c, label, _, _ in found] == [
         ("\\EDD\\Vendor\\Stripe\\Charge::create", "POST /v1/charges"), ("Customer::create", "POST /v1/customers"),
     ]
@@ -264,7 +281,7 @@ def test_a_prefixed_namespace_counts_when_the_checkout_holds_that_copy(tmp_path,
 def test_without_the_vendored_copy_a_prefixed_name_is_not_stripe(tmp_path, index, marker):
     files = {"src/pay.php": PREFIXED}
     if marker:
-        files["libraries/Stripe/lib/ApiResource.php"] = marker
+        files.update(vendored("libraries/Stripe/lib", resource=marker))
     assert scan(tmp_path, files, index) == []
 
 
@@ -306,7 +323,7 @@ CALLS = H + (
 
 
 def dispatch(tmp_path, index, write="", **over):
-    files = {"lib/Stripe/ApiResource.php": API_RESOURCE, "src/API.php": API.replace("@WRITE@", write),
+    files = {**vendored(), "src/API.php": API.replace("@WRITE@", write),
              "inc/functions.php": FORWARD, "inc/pay.php": CALLS}
     files.update(over)
     return [(c, label, f, complete) for file, _, c, label, f, complete in scan(tmp_path, files, index) if file == "inc/pay.php"]

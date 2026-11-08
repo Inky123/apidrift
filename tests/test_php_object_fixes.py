@@ -16,7 +16,7 @@ from apidrift.report import filter_changes
 from apidrift.scanner import scan_repo
 from apidrift.sdkmap import SdkIndex
 from test_fixer import NEW, OLD, docs
-from test_php_objects import API, API_RESOURCE, FORWARD
+from test_php_objects import API, FORWARD, vendored
 
 H = "<?php\n"
 CONFIRM = "/v1/payment_intents/{intent}/confirm"
@@ -119,7 +119,7 @@ CALLER = H + "// Stripe\nfunction pay($id) {\n  return edds_api_request('Payment
 
 
 def _dispatch_files(write=""):
-    return {"lib/Stripe/ApiResource.php": API_RESOURCE, "src/API.php": API.replace("@WRITE@", write),
+    return {**vendored(), "src/API.php": API.replace("@WRITE@", write),
             "inc/functions.php": FORWARD, "app/Pay.php": CALLER}
 
 
@@ -134,3 +134,35 @@ def test_a_dispatched_call_whose_wrapper_writes_into_the_parameters_is_not_edite
 
 def test_a_dispatched_call_whose_wrapper_adds_another_key_is_still_fixed(tmp_path):
     assert outcome(tmp_path, _dispatch_files("$args[0]['metadata']['via'] = 'edd';")) == ("fixed", renamed(CALLER), [])
+
+
+HELPER = H + (
+    "// Stripe\nfunction pay($p) {\n  return edds_api_request('PaymentIntent', 'create', $p);\n}\n"
+    "function go() {\n  return pay(['amount' => 1, '" + OLD + "' => ['card']]);\n}\n"
+)
+
+
+def test_a_key_the_wrapper_writes_reaches_the_callers_of_a_same_file_helper_and_is_not_edited(tmp_path):
+    files = _dispatch_files("$args[0]['" + OLD + "'] = ['card'];")
+    files["app/Pay.php"] = HELPER
+    assert outcome(tmp_path, files)[:2] == ("refused", ["incomplete_binding", "incomplete_binding"])
+
+
+def test_a_callers_fields_through_a_same_file_helper_include_what_the_wrapper_adds(tmp_path):
+    from test_php_objects import _doc
+    from apidrift.openapi import load_spec
+
+    files = _dispatch_files("$args[0]['metadata']['via'] = 'edd';")
+    files["app/Pay.php"] = HELPER
+    for f, text in files.items():
+        (tmp_path / f).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / f).write_text(text)
+    result = scan_repo(tmp_path, SdkIndex.build(load_spec(_doc())))
+    via = [u for u in result.usages if "[through pay" in u.call]
+    assert [sorted(u.fields) for u in via] == [["amount", "metadata", "metadata.via", OLD]]
+
+
+def test_a_helper_caller_is_still_fixed_when_the_wrapper_adds_another_key(tmp_path):
+    files = _dispatch_files("$args[0]['metadata']['via'] = 'edd';")
+    files["app/Pay.php"] = HELPER
+    assert outcome(tmp_path, files)[0] == "fixed"

@@ -99,8 +99,11 @@ def extract(text: str, resolve) -> tuple[list[Found], list[tuple[int, str]]]:
             continue  # ``save()`` with nothing assigned sends no request
         found.append(Found(c.line, c.call + via.suffix, c.resolved, fields))
         callers = helpers.callers_of(c)  # calls of a same-file wrapper that forwards its parameter here
-        for f in callers if c.hidden_by else ():
-            f.fields.hide("")  # what the dispatch wrapper writes reaches them too
+        for f in callers:  # what the dispatch wrapper writes or adds reaches them too
+            if c.hidden_by:
+                f.fields.hide("")
+            for path in c.extra:
+                phpflow.add_path(f.fields, path)
         found += callers
     return found, parsed.unresolved
 
