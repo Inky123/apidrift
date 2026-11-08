@@ -16,27 +16,31 @@ import tokenize
 OPEN, CLOSE = "([{", ")]}"
 
 
+UNPARSABLE = (SyntaxError, ValueError, RecursionError, MemoryError)  # MemoryError: too deeply nested to parse
+
+
 def parse(text: str) -> ast.Module | None:
+    """The module, or None when it cannot be read (the caller then reads nothing in it)."""
     try:
         return ast.parse(text)
-    except (SyntaxError, ValueError):
+    except UNPARSABLE:
         pass
     patched = bare_except_tuples(text)
     if patched is None:
         return None
     try:
         return ast.parse(patched)
-    except (SyntaxError, ValueError, RecursionError):
+    except UNPARSABLE:
         return None
 
 
 def bare_except_tuples(text: str) -> str | None:
     """The text with each ``except A, B:`` read as ``except(A, B):``, or None when there is none."""
-    try:
-        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
-    except (tokenize.TokenError, SyntaxError, IndentationError):
+    try:  # lines end at \n, \r\n or \r only, as the parser counts them (not at \f or \x1c)
+        tokens = list(tokenize.generate_tokens(io.StringIO(text, newline="").readline))
+    except (tokenize.TokenError, *UNPARSABLE):
         return None
-    lines = text.splitlines(keepends=True)
+    lines = io.StringIO(text, newline="").readlines()
     changes: list[tuple[int, int, int]] = []  # (line, column of the space after except, column of the colon)
     for i, tok in enumerate(tokens):
         if tok.type != tokenize.NAME or tok.string != "except":
