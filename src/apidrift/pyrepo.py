@@ -259,14 +259,15 @@ def collect(tree: ast.Module) -> Facts:
 
     binders, facts, parents = Binders(tree), Facts(), {}
     annotations: set[int] = set()
+    resolve = lambda node: _resolve(node, binders)  # noqa: E731
+    # One breadth-first walk: a node's parent, and whether it sits in an annotation, were recorded when its
+    # ancestors came off the queue, which is before it does.
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
             parents[child] = node
         for ann in (getattr(node, "annotation", None), getattr(node, "returns", None)):
             if isinstance(ann, ast.AST):
                 annotations |= {id(n) for n in ast.walk(ann)}
-    resolve = lambda node: _resolve(node, binders)  # noqa: E731
-    for node in ast.walk(tree):
         if id(node) in annotations:
             continue
         if isinstance(node, ast.ClassDef):
