@@ -1,7 +1,8 @@
 """API-version pins near the fixed files: reported in the fix pull request, never edited.
 
 A pin is an assignment whose name says it holds the Stripe API version (``apiVersion:``, ``api_version =``,
-``'Stripe-Version' =>``, ``setApiVersion(``). Its value is read as one expression up to the end of the
+``'Stripe-Version' =>``, ``setApiVersion(``, and the client or per-request ``stripe_version=`` /
+``stripe_version:`` of stripe-python and stripe-ruby). Its value is read as one expression up to the end of the
 statement (a top-level ``,`` / ``;`` / closer / assignment, or a line break that does not continue it), and
 every version-shaped string literal in that expression is a pin: ``Rails.env.test? ? "2023-10-16" :
 "2023-10-16; x_beta=v1"`` pins 2023-10-16 in both branches, ``os.environ.get("V", "2020-08-27")`` pins its
@@ -15,26 +16,38 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import scanner
-from .jsparse import Source
+from .jsparse import Mask, Source
 from .scanner import LANGUAGES
 
 MAX_PINS = 100
 MAX_EXPRESSION = 400  # characters read after the name: a pin's value is short
 PROJECT_MARKERS = scanner.PROJECT_FILES | {"requirements.txt", "Pipfile", "setup.cfg", "Gemfile.lock", "deno.json"}
 PIN_HEAD = re.compile(
-    r"""(?:\bapiVersion|\bapi_version|['"]?Stripe-Version['"]?)\s*(?:=>|[:=])|['"](?:api|stripe)_version['"]\s*=>"""
+    r"""(?:\bapiVersion|\bapi_version|\bstripe_version|['"]?Stripe-Version['"]?)\s*(?:=>|[:=])"""
+    r"""|['"](?:api|stripe)_version['"]\s*=>"""
     r"""|\bsetApiVersion\("""
 )
 VERSION = re.compile(r"(\d{4}-\d{2}-\d{2}(?:\.[A-Za-z]\w*)?)(?:;[^\n]*)?")  # the whole string; a beta suffix after ";"
-CONTINUES = ("?", ":", "||", "&&", "??", ".", "+", "or ", "and ", "if ", "else", "unless ")
+# A line break continues the value only after an operator that cannot end a statement (or before one that
+# cannot start a statement, in JS-like languages). Never on words (``if``, ``unless``, ``else``, ``or``): in Ruby
+# and Python those start or modify a new statement. Ruby/Python ``?``/``:`` end method names and block heads.
+TRAILING = {"any": ("||", "&&", "+", "-", "*", "\\"), "js": ("||", "&&", "??", "+", "-", "*", "?", ":", "\\")}
+LEADING_JS = ("?", ":", "||", "&&", "??")
+JS_LIKE = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".vue", ".svelte", ".php"}
 
 
 KINDS = ("server", "test", "browser")
 JS_SUFFIXES = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".vue", ".svelte"}
-# Stripe.js: ``loadStripe(pk, {apiVersion})`` (@stripe/stripe-js) or the global ``Stripe(pk, {apiVersion})``.
-BROWSER_CALL = re.compile(r"(?<![\w$.])(loadStripe|Stripe)\s*\(")
+BROWSER_DIRS = {"client", "public", "static"}
+LOAD_STRIPE = re.compile(r"(?<![\w$.])loadStripe\s*\(")  # @stripe/stripe-js: always the browser
 NEW_STRIPE = re.compile(r"\bnew\s+Stripe\s*\(")
-SERVER_IMPORT = re.compile(r"""\brequire\(\s*['"]stripe['"]\s*\)|\bfrom\s+['"]stripe['"]|\bimport\s+['"]stripe['"]""")
+STRIPE_JS_URL = re.compile(r"js\.stripe\.com/")
+# Any import of the server SDK: require/import()/import/from with 'stripe', 'stripe/...', 'npm:stripe@14',
+# 'https://esm.sh/stripe@14?target=deno' (never '@stripe/stripe-js' or 'stripe-js').
+SERVER_IMPORT = re.compile(
+    r"""(?:\brequire\s*\(\s*|\bimport\s*\(\s*|\bfrom\s+|\bimport\s+)(['"`])"""
+    r"""(?:npm:|https?://[^'"`\s]*/)?stripe(?:@[^'"`/?\s]*)?(?:[/?][^'"`\s]*)?\1"""
+)
 
 
 @dataclass(frozen=True)
@@ -53,57 +66,68 @@ def test_path(rel: str) -> bool:
 
 
 def pin_kind(rel: str, text: str, pos: int) -> str:
-    if test_path(rel):
-        return "test"
-    if Path(rel).suffix.lower() in JS_SUFFIXES and _in_browser_call(text, pos):
-        return "browser"
-    return "server"
+    return Kinds(rel, text).of(pos)
 
 
-def _in_browser_call(text: str, pos: int) -> bool:
-    """The pin sits in the arguments of ``loadStripe(...)``, or of a bare ``Stripe(...)`` (not ``new Stripe``) in
-    a file that never imports the server SDK (``require('stripe')``, ``from 'stripe'``); or the file is Stripe.js
-    code throughout: it calls one of those, never imports the server SDK and never writes ``new Stripe(``."""
-    server = SERVER_IMPORT.search(text) is not None
-    if not server and not NEW_STRIPE.search(text) and any(_browser_call(text, m) for m in BROWSER_CALL.finditer(text)):
-        return True  # a Stripe.js file (``config.apiVersion = '...'; Stripe(pk, config)``): no server SDK in it at all
-    src = None
-    for m in reversed(list(BROWSER_CALL.finditer(text, max(0, pos - 2000), pos))):
-        if m.group(1) == "Stripe" and (server or not _browser_call(text, m)):
-            continue
-        src = src or Source(text)
-        if src.skip_balanced(m.end() - 1) > pos:
-            return True
-    return False
+class Kinds:
+    """Which kind each pin in one file is, read once per file. "browser" needs positive evidence and a file that
+    never imports the server SDK in any form: the pin sits in ``loadStripe(...)``'s arguments (outside strings
+    and comments), or the file loads ``js.stripe.com``, or it lives under a client/, public/ or static/
+    directory without writing ``new Stripe(``. Everything else that is not a test file is the server's."""
+
+    def __init__(self, rel: str, text: str) -> None:
+        self.test = test_path(rel)
+        self.js = Path(rel).suffix.lower() in JS_SUFFIXES
+        self.calls: list[tuple[int, int]] = []
+        self.whole = False
+        if self.test or not self.js or SERVER_IMPORT.search(text):
+            self.js = False  # a server file: no browser evidence counts
+            return
+        mask, src = Mask(text, ruby=False), None
+        for m in LOAD_STRIPE.finditer(text):
+            if not mask.covers(m.start()):
+                src = src or Source(text)
+                self.calls.append((m.end() - 1, src.skip_balanced(m.end() - 1)))
+        code_new = any(not mask.covers(m.start()) for m in NEW_STRIPE.finditer(text))
+        dirs = set(rel.split("/")[:-1])
+        self.whole = not code_new and (STRIPE_JS_URL.search(text) is not None or bool(dirs & BROWSER_DIRS))
+
+    def of(self, pos: int) -> str:
+        if self.test:
+            return "test"
+        if self.js and (self.whole or any(a < pos < b for a, b in self.calls)):
+            return "browser"
+        return "server"
 
 
-def _browser_call(text: str, m: re.Match[str]) -> bool:
-    """``loadStripe(``, or ``Stripe(`` that is not ``new Stripe(``."""
-    return m.group(1) == "loadStripe" or not re.search(r"\bnew\s*$", text[max(0, m.start() - 8) : m.start()])
-
-
-def pin_versions(text: str) -> list[tuple[int, str]]:
-    """(offset, version) of every pinned version string in ``text``, in order, once per statement."""
+def pin_versions(text: str, js: bool = True) -> list[tuple[int, str]]:
+    """(offset, version) of every pinned version string in ``text``, in order, once per statement. ``js``: a
+    language where a line break never ends a statement on its own (JS/TS, PHP); False for Ruby and Python."""
     out: list[tuple[int, str]] = []
     for m in PIN_HEAD.finditer(text):
+        line = text[text.rfind("\n", 0, m.start()) + 1 : m.start()].lstrip()
+        if line.startswith(("//", "#", "/*")) or (line.startswith("*") and not line.startswith("*/")):
+            continue  # a commented-out line: not a pin
         seen: set[str] = set()
-        for pos, version in _strings(text, m.end()):
+        for pos, version in _strings(text, m.end(), js):
             if version not in seen:
                 seen.add(version)
                 out.append((pos, version))
     return out
 
 
-def _strings(text: str, i: int) -> list[tuple[int, str]]:
+def _strings(text: str, i: int, js: bool = True) -> list[tuple[int, str]]:
     """Version strings in the expression starting at ``i``."""
     n = len(text)
     while i < n and text[i] in " \t":
         i += 1
     if i < n and text[i] in "=~>":  # ``api_version == x``, ``=~``: a comparison, not an assignment
         return []
-    stop, depth, found = min(n, i + MAX_EXPRESSION), 0, []
+    stop, depth, found, code_end = min(n, i + MAX_EXPRESSION), 0, [], i  # code_end: past the last code character
     while i < stop:
         c = text[i]
+        if not c.isspace() and c != "#" and not text.startswith(("//", "/*"), i):
+            code_end = i + 1
         if c in "'\"`":
             end = _string_end(text, i)
             if end < 0:
@@ -111,7 +135,7 @@ def _strings(text: str, i: int) -> list[tuple[int, str]]:
             m = VERSION.fullmatch(text, i + 1, end)
             if m:
                 found.append((i, m.group(1)))
-            i = end + 1
+            i = code_end = end + 1
         elif c in "([{":
             depth += 1
             i += 1
@@ -124,11 +148,14 @@ def _strings(text: str, i: int) -> list[tuple[int, str]]:
             break
         elif c == "=" and depth == 0 and text[i - 1] not in "=!<>" and text[i + 1 : i + 2] not in ("=", ">", "~"):
             break  # a second assignment: another statement
+        elif text.startswith("/*", i):
+            close = text.find("*/", i + 2)
+            i = n if close < 0 else close + 2
         elif c == "#" or text.startswith("//", i):
             nl = text.find("\n", i)
             i = n if nl < 0 else nl
         elif c == "\n" and depth == 0:
-            if not _continues(text, i):
+            if not _continues(text, code_end, i, js):
                 break
             i += 1
         else:
@@ -152,13 +179,17 @@ def _string_end(text: str, i: int) -> int:
     return -1
 
 
-def _continues(text: str, nl: int) -> bool:
-    """A line break inside the value: the line ends in an operator, or the next line starts with one."""
-    before = text[:nl].rstrip()
-    if before.endswith(("?", ":", "||", "&&", "??", "(", "+", " or", " and", " if", " else", "\\")):
+def _continues(text: str, code_end: int, nl: int, js: bool) -> bool:
+    """A line break inside the value: the code before it ends in a binary operator, or (JS-like) the next line
+    starts with one. ``code_end``: just past the last code character before the break (comments excluded)."""
+    if text[max(0, code_end - 2) : code_end].endswith(TRAILING["js" if js else "any"]):
         return True
-    after = text[nl + 1 :].lstrip(" \t")
-    return after.startswith(CONTINUES)
+    if not js:
+        return False
+    j = nl + 1
+    while j < len(text) and text[j] in " \t":
+        j += 1
+    return text.startswith(LEADING_JS, j)
 
 
 def find_pins(root: Path, fixed: list[str]) -> list[Pin]:
@@ -188,8 +219,10 @@ def find_pins(root: Path, fixed: list[str]) -> list[Pin]:
         if text is None or "stripe" not in text.lower():
             continue
         rel = path.relative_to(base).as_posix()
-        for pos, version in pin_versions(text):
-            pins.append(Pin(rel, text.count("\n", 0, pos) + 1, version, pin_kind(rel, text, pos)))
+        kinds = None
+        for pos, version in pin_versions(text, path.suffix.lower() in JS_LIKE):
+            kinds = kinds or Kinds(rel, text)  # once per file
+            pins.append(Pin(rel, text.count("\n", 0, pos) + 1, version, kinds.of(pos)))
             if len(pins) >= MAX_PINS:
                 return pins
     return pins

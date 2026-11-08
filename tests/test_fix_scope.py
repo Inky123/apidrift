@@ -52,7 +52,7 @@ def test_fxa_division_in_an_earlier_sibling_no_longer_blocks_the_wrap(tmp_path):
      "billing_cycle_anchor: { type: 'now' }"),
     ("js_comparison", "a.ts", SUB % "metadata: { small: String(n < 10) }, billing_cycle_anchor: 'now'",
      "billing_cycle_anchor: { type: 'now' }"),
-    ("js_regex_after_the_entry", "a.js", SUB % "billing_cycle_anchor: 'now', metadata: { ok: /a,b/.test(s) }",
+    ("js_division_after_the_entry", "a.js", SUB % "billing_cycle_anchor: 'now', metadata: { at: now / 1000 }",
      "billing_cycle_anchor: { type: 'now' }"),
     ("js_url_template_before", "a.js", SUB % "metadata: { url: `${base}/v1/x` }, billing_cycle_anchor: 'now'",
      "billing_cycle_anchor: { type: 'now' }"),
@@ -90,16 +90,41 @@ def test_division_and_comparisons_outside_the_entry_are_read_correctly(tmp_path,
     ("rb_regex_arg_before", "a.rb", SUB_RB % "metadata: { n: s.split /,/ }, billing_cycle_anchor: 'now'"),
     ("rb_percent_before", "a.rb", SUB_RB % "metadata: { n: %q(a, b) }, billing_cycle_anchor: 'now'"),
     ("rb_percent_r_before", "a.rb", SUB_RB % "metadata: { n: %r{a,b} }, billing_cycle_anchor: 'now'"),
-    # after it: a misread there could hide the same key a second time
+    # after it: a misread there could end the literal early and hide a later key or spread
     ("dup_key_hidden_after", "a.js",
      SUB % "billing_cycle_anchor: 'now', re: /{/, billing_cycle_anchor: 'unchanged', x: /}/"),
+    ("regex_after_the_entry", "a.js", SUB % "billing_cycle_anchor: 'now', metadata: { ok: /a,b/.test(s) }"),
+    # review r2: the `}` in the regex ended the literal for the cursor, so the last copy (which wins) was unseen
+    ("review_r2", "a.js",
+     "stripe.subscriptions.update('sub_1', {\n  billing_cycle_anchor: 'now',\n  re: /}/,\n"
+     "  billing_cycle_anchor: 'unchanged'\n});\n"),
+    # review r3: the same `}` hid a spread that may send the key
+    ("review_r3", "a.js",
+     "function go(o) {\n  return stripe.subscriptions.update('sub_1', {\n    billing_cycle_anchor: 'now',\n"
+     "    re: /}/,\n    ...o\n  });\n}\n"),
+    # review r8: a heredoc after the entry hides the later copy
+    ("review_r8", "a.rb",
+     "Stripe::Subscription.update('sub_1',\n  billing_cycle_anchor: 'now',\n  description: <<~EOS,\n"
+     "    see note :)\n  EOS\n  billing_cycle_anchor: 'unchanged')\n"),
+    # review r9: `for await (...)`: a regex after a statement head, not a division
+    ("review_r9", "a.js",
+     "stripe.subscriptions.update('sub_1', {\n  metadata: { f: async () => { for await (const x of xs) /\"/.test(x); } },\n"
+     "  description: \"} }, billing_cycle_anchor: 'now', w: { v: { u: \",\n"
+     "  tail: { g: async () => { for await (const x of xs) /\"/.test(x); } },\n});\n"),
+    ("rb_next_regex", "a.rb", SUB_RB % "metadata: { f: -> { next/,/ } }, billing_cycle_anchor: 'now'"),
+    ("rb_break_regex", "a.rb", SUB_RB % "metadata: { f: -> { break/,/ } }, billing_cycle_anchor: 'now'"),
+    ("rb_char_literal", "a.rb", SUB_RB % "metadata: { open: ?' }, billing_cycle_anchor: 'now', x: { close: ?' }"),
 ])
 def test_text_the_cursor_may_misread_still_blocks_the_edit(tmp_path, name, file, text):
     head = {"a.js": JS, "a.ts": TS, "a.rb": RB}[file]
     plan = plan_v2(tmp_path, {file: head + text})
     assert plan.fixes == [], (name, plan.fixes[0].diff() if plan.fixes else "")
-    target = "payto" if "payto" in text else "billing_cycle_anchor"
-    assert (target, "unsupported_value") in whys(plan), (name, plan.to_dict())  # found, and refused here
+    if name not in NOT_FOUND:
+        target = "payto" if "payto" in text else "billing_cycle_anchor"
+        assert (target, "unsupported_value") in whys(plan), (name, plan.to_dict())  # found, and refused here
+
+
+NOT_FOUND = {"rb_char_literal"}  # cases where the cursor loses the key or call itself (nothing is written either way)
 
 
 def test_a_refused_site_says_unsupported_value(tmp_path):
@@ -140,8 +165,90 @@ def test_a_quote_inside_a_regex_never_yields_an_edit(tmp_path, text):
     ("{ a: n % q, k: 1 }", True, False),
     ("{ a: \"#{x / 2}\", k: 1 }", True, False),
     ("{ a: \"#{s =~ /'/}\", k: 1 }", True, True),
+    ("{ a: for await (x of y) /re/, k: 1 }", False, True),
+    ("{ a: await (x) / 2, k: 1 }", False, True),  # positive-only: a ( after a keyword is never a value
+    ("{ a: next/x/, k: 1 }", True, True),
+    ("{ a: break/x/, k: 1 }", True, True),
+    ("{ a: puts /x/, k: 1 }", True, True),
+    ("{ a: return /x/, k: 1 }", False, True),
+    ("{ a: } /x/, k: 1 }", False, True),
+    ("{ a: ?', k: 1 }", True, True),
+    ("{ a: $', k: 1 }", True, True),
+    ("{ a: x ? 1 : 2, k: 1 }", True, False),
+    ("{ a: x.empty? ? 1 : 2, k: 1 }", True, False),
+    ("{ k: 1, b: /}/, k: 2 }", False, True),  # after the entry: checked to the closer
 ])
 def test_the_prefix_classifier(text, ruby, unsafe):
     src = Source(text, ruby=ruby)
     key = text.index("k:")
-    assert fixscope.unsafe_entry(src, 0, key, len(text) - 2, len(text) - 1, "k") is unsafe
+    end = src.skip_scalar(key)
+    assert fixscope.unsafe_entry(src, 0, key, end, src.skip_scalar(1, ""), strict=True) is unsafe
+
+
+# --- Ruby heredocs: their bodies are text (review item a) ---------------------------------------
+
+
+def test_review_r5_a_call_inside_a_heredoc_body_is_never_edited(tmp_path):
+    text = RB + "DOC = <<~EOS\n  Example:\n  Stripe::Subscription.update('sub_1', billing_cycle_anchor: 'now')\nEOS\n"
+    plan = plan_v2(tmp_path, {"a.rb": text})
+    assert plan.fixes == [] and whys(plan) == [("billing_cycle_anchor", "in_string")], plan.to_dict()
+
+
+def test_a_call_after_the_heredoc_ends_is_still_fixed(tmp_path):
+    text = RB + ("DOC = <<-EOS\n  Stripe::Subscription.update('sub_1', billing_cycle_anchor: 'now')\n  EOS\n"
+                 "Stripe::Subscription.update('sub_2', billing_cycle_anchor: 'now')\n")
+    plan = plan_v2(tmp_path, {"a.rb": text})
+    assert [(s.line, s.target) for f in plan.fixes for s in f.sites] == [(6, "billing_cycle_anchor")]
+    assert whys(plan) == [("billing_cycle_anchor", "in_string")]
+    assert "update('sub_2', billing_cycle_anchor: { type: 'now' })" in plan.fixes[0].content
+    assert "update('sub_1', billing_cycle_anchor: 'now')" in plan.fixes[0].content
+
+
+@pytest.mark.parametrize("text,bodies", [
+    ("a = <<~EOS\n  x\nEOS\nb\n", ["  x\nEOS\n"]),
+    ("a = <<EOS\nx\n  EOS\nEOS\nb\n", ["x\n  EOS\nEOS\n"]),  # without ~ or - the closer must start the line
+    ("f(<<~A, <<~B)\n  one\nA\n  two\nB\nc\n", ["  one\nA\n", "  two\nB\n"]),
+    ("a = <<~'EOS'\n  #{x}\nEOS\n", ["  #{x}\nEOS\n"]),
+    ("a = <<~EOS\n  never closed\n", ["  never closed\n"]),
+    ("a = b << c\n", []),
+])
+def test_heredoc_bodies(text, bodies):
+    assert [text[a:b] for a, b in fixscope.ruby_heredocs(text)] == bodies
+
+
+# --- renames: the same guard (review item b) ------------------------------------------------
+
+PI = "stripe.paymentIntents.create({ %s });\n"
+
+
+@pytest.mark.parametrize("body", [
+    "amount: total / 100, payment_method_types: ['card']",  # division in a sibling, and below in the value
+    "payment_method_types: ['card'], amount: Math.round(x / 2)",
+    "amount: 1, payment_method_types: ids.length / 2 ? ['card'] : []",
+])
+def test_a_rename_next_to_division_still_goes_through(tmp_path, body):
+    from test_fixer import plan_for
+
+    plan = plan_for(tmp_path, {"a.js": JS + PI % body})
+    assert plan.unfixable == [] and len(plan.fixes) == 1, plan.to_dict()
+    assert plan.fixes[0].content == JS + PI % body.replace("payment_method_types", "allowed_payment_method_types")
+
+
+@pytest.mark.parametrize("body", [
+    "q: /[,]/, payment_method_types: ['card']",
+    "payment_method_types: ['card'], r: /}/, payment_method_types: ['sepa_debit']",
+    "description: `${s.replace(/[,]/g, '')}`, payment_method_types: ['card']",
+])
+def test_a_rename_next_to_a_regex_is_refused(tmp_path, body):
+    from test_fixer import plan_for
+
+    plan = plan_for(tmp_path, {"a.js": JS + PI % body})
+    assert plan.fixes == [] and {u.why for u in plan.unfixable} == {"unsupported_value"}, plan.to_dict()
+
+
+def test_review_r7_a_key_inside_a_string_after_a_regex_is_never_renamed(tmp_path):
+    from test_fixer import plan_for
+
+    text = JS + ("stripe.paymentIntents.create({\n  amount: 100,\n  currency: 'usd',\n  q: /'/,\n"
+                 "  description: ' payment_method_types: [\"card\"], ',\n  r: /'/,\n});\n")
+    assert plan_for(tmp_path, {"a.js": text}).fixes == []

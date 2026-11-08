@@ -70,11 +70,31 @@ def test_deletions_only_and_no_locks_add_nothing():
     lock("stripe-ruby", "19.4.0", line=0),
     {"sdk": "stripe-ruby", "version": 19, "file": "Gemfile.lock", "line": 1},
     "stripe-ruby 19.4.0",
+    # review item 8: the lockfile must be the SDK's own ecosystem's, and never a vendored dependency's
+    lock("stripe-ruby", "19.4.0", "package-lock.json"),
+    lock("stripe-ruby", "19.4.0", "composer.lock"),
+    lock("stripe-ruby", "19.4.0", "vendor/bundle/x/Gemfile.lock"),
+    lock("stripe-ruby", "19.4.0", "node_modules/x/Gemfile.lock"),
 ])
 def test_the_parent_drops_anything_it_cannot_check(entry):
     fixes = [fix(PMT, "app/pay.rb")]
     assert fixcheck.sdk_locks([entry], fixes) == []
     assert "Stripe SDK version" not in body(fixes, [entry])
+
+
+@pytest.mark.parametrize("sdk,file,source", [
+    ("stripe-ruby", "Gemfile.lock", "a.rb"), ("stripe-php", "composer.lock", "a.php"), ("stripe-go", "go.mod", "a.go"),
+    ("stripe-node", "package-lock.json", "a.ts"), ("stripe-node", "yarn.lock", "a.js"),
+    ("stripe-node", "pnpm-lock.yaml", "a.js"), ("stripe-node", "package.json", "a.js"),
+    ("stripe-python", "poetry.lock", "a.py"), ("stripe-python", "uv.lock", "a.py"),
+    ("stripe-python", "Pipfile.lock", "a.py"), ("stripe-python", "requirements-prod.txt", "a.py"),
+])
+def test_each_sdk_is_believed_from_its_own_lockfiles(sdk, file, source):
+    fixes = [fix(PMT, source)]
+    assert fixcheck.sdk_locks([lock(sdk, "1.0.0", file)], fixes) == [lock(sdk, "1.0.0", file)]
+    others = {"stripe-ruby": "go.mod", "stripe-php": "Gemfile.lock", "stripe-go": "package.json",
+              "stripe-node": "poetry.lock", "stripe-python": "yarn.lock"}
+    assert fixcheck.sdk_locks([lock(sdk, "1.0.0", others[sdk])], fixes) == []
 
 
 def test_the_list_is_capped_and_deduplicated():

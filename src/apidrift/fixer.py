@@ -16,7 +16,7 @@ import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import fixhelpers, fixsdk, fixtestedit, fixtests, gofix, goowned, migrations, phpfix, phplex, phpvendor
+from . import fixhelpers, fixscope, fixsdk, fixtestedit, fixtests, gofix, goowned, migrations, phpfix, phplex, phpvendor
 from .diff import BREAKING, Change
 from .fixedit import Edit, Locator, apply
 from .fixpins import Pin, find_pins
@@ -31,10 +31,11 @@ FIX_LANGUAGES = {"python", "javascript", "typescript", "ruby", "php", "go"}
 WHY = (
     "nested", "not_found", "incomplete_binding", "unsupported_key_form", "oracle_changed_other_calls",
     "oracle_finding_remains", "oracle_new_finding", "leftover_tokens", "not_utf8", "too_large", "cap",
-    "nested_array", "unsupported_value", "would_empty_literal", "syntax", "unbounded",
+    "nested_array", "unsupported_value", "would_empty_literal", "syntax", "unbounded", "in_string",
     gofix.NO_REWRITE, *fixhelpers.REASONS,
 )
 NOT_VISIBLE = "arguments are not fully visible at this call"  # impact.py's reason at an incomplete call
+IN_STRING = "in_string"
 NOT_ATTEMPTED = "arguments_not_visible"  # a possible hit: the call may send the field through arguments we cannot read
 CAP_FILES, CAP_FILE_BYTES, CAP_TOTAL_BYTES = 25, 1_000_000, 3_000_000
 
@@ -196,8 +197,11 @@ def _plan_file(
     locator.context, locator.group = (base, file) if base is not None else None, group  # for fixhelpers
     edits: list[Edit] = []
     planned: list[Planned] = []
+    heredocs = fixscope.ruby_heredocs(text) if language == "ruby" else []
     for impact, migration in group:
         why, found = _candidate_edits(locator, impact.usage, migration)
+        if not why and any(a < e.end and e.start < b for e in found for a, b in heredocs):
+            why = IN_STRING  # the "call" is text in a heredoc: never edited
         if why:
             _drop(plan, [(impact, migration)], why)
         else:

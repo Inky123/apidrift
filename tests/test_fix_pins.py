@@ -25,6 +25,14 @@ def versions(text: str) -> list[tuple[int, str]]:
     ("$c = new StripeClient(['api_key' => $k, 'stripe_version' => $live ? '2024-06-20' : '2023-10-16']);\n",
      [(1, "2024-06-20"), (1, "2023-10-16")]),
     ("\\Stripe\\Stripe::setApiVersion($beta ? '2024-06-20; x_beta=v1' : '2024-06-20');\n", [(1, "2024-06-20")]),
+    # review item 6: client and per-request options
+    ('client = stripe.StripeClient("sk", stripe_version="2020-08-27")\n', [(1, "2020-08-27")]),
+    ('stripe.Customer.create(email=e, stripe_version="2020-08-27")\n', [(1, "2020-08-27")]),
+    ('client = Stripe::StripeClient.new("sk", stripe_version: "2020-08-27")\n', [(1, "2020-08-27")]),
+    ("Stripe::Customer.create({ email: e }, { stripe_version: '2024-06-20', idempotency_key: k })\n", [(1, "2024-06-20")]),
+    ("$stripe->customers->create([], ['stripe_version' => '2024-06-20']);\n", [(1, "2024-06-20")]),
+    # a minified bundle line that starts by closing a licence comment is code
+    (' */class m{init(){let e={};e.apiVersion="2020-08-27"}}\n', [(1, "2020-08-27")]),
     # the forms the old pattern read keep reading the same
     ("apiVersion: '2023-10-16',\n", [(1, "2023-10-16")]),
     ("headers: { 'Stripe-Version': \"2022-11-15\" }\n", [(1, "2022-11-15")]),
@@ -42,6 +50,8 @@ def test_conditional_and_default_pins_report_each_version(text, want):
     "const o = { apiVersion: pick() };\nconst since = '2024-01-01';\n",
     "apiVersion: v\nconst since = '2024-01-01'\n",
     "stripe_api_version = '2023-10-16'\n",  # another name: as before, not a pin
+    "my_stripe_version = '2023-10-16'\n",
+    "if stripe_version == '2023-10-16':\n",
     "apiVersion = latest; other = '2024-01-01'\n",
     "apiVersion: someFn(a)\n  , created: '2024-01-01'\n",
     "apiVersion: x // since '2024-01-01'\n",
@@ -50,6 +60,34 @@ def test_conditional_and_default_pins_report_each_version(text, want):
 ])
 def test_strings_outside_the_pin_statement_are_not_pins(text):
     assert versions(text) == []
+
+
+@pytest.mark.parametrize("text,js", [
+    # review item 5: a statement keyword or a method name ending in ? does not continue the pin's statement
+    ('Stripe.api_version = ENV.fetch("STRIPE_API_VERSION")\nif Rails.env.test?\n  Timecop.freeze(Date.parse("2024-01-01"))\nend\n',
+     False),
+    ('Stripe.api_version = ENV["V"] if Rails.env.test?\nTimecop.freeze(Date.parse("2024-01-01"))\n', False),
+    ('stripe.api_version = os.environ["STRIPE_API_VERSION"]\nif settings.DEBUG:\n    logger.info("x %s", "2024-01-01")\n',
+     False),
+    ("stripe.api_version = settings.V or\nlog('2024-01-01')\n", False),  # a word is never a continuation
+    ('const stripe = new Stripe(key, { apiVersion: process.env.V })\n.on("x", () => track("2024-01-01"))\n', True),
+    ("const o = { apiVersion: v }\nunless('2024-01-01')\n", True),
+    ("// apiVersion: '2020-08-27' was the old one\nconst stripe = new Stripe(key)\n", True),
+    ("# Stripe.api_version = '2020-08-27'\n", False),
+])
+def test_an_unrelated_next_line_is_not_part_of_the_pin(text, js):
+    assert pin_versions(text, js) == []
+
+
+@pytest.mark.parametrize("text,js,want", [
+    ("Stripe.api_version = ENV.fetch('V') ||\n  '2023-10-16'\n", False, ["2023-10-16"]),
+    ("stripe.api_version = os.environ.get('V') \\\n    or '2023-10-16'\n", False, ["2023-10-16"]),
+    ("stripe.api_version = os.environ.get(\n    'V', '2023-10-16'\n)\n", False, ["2023-10-16"]),
+    ("const s = new Stripe(k, { apiVersion: test ?\n  '2023-10-16' :\n  '2024-04-10' })\n", True, ["2023-10-16", "2024-04-10"]),
+    ("const s = new Stripe(k, { apiVersion: /* don't */ '2020-08-27' })\n", True, ["2020-08-27"]),
+])
+def test_a_value_continued_by_an_operator_or_bracket(text, js, want):
+    assert [v for _, v in pin_versions(text, js)] == want
 
 
 def test_find_pins_reports_the_gumroad_server_pin(tmp_path):
@@ -77,8 +115,29 @@ def test_find_pins_reports_the_gumroad_server_pin(tmp_path):
     ("client/card.js", "const stripe = Stripe(publishableKey, { apiVersion: '2020-08-27' });\n", "browser"),
     ("client/konbini.js", "const stripe = Stripe(pk, {\n  betas: ['b'],\n  apiVersion: '2020-08-27; konbini_beta=v1',\n});\n",
      "browser"),
-    # invoiceninja stripe-browserpay.js: the options object is built first, then passed to the global Stripe()
+    # invoiceninja stripe-browserpay.js: a bare Stripe() alone is not evidence; its public/ copy or Stripe.js is
     ("resources/js/pay.js", "let config = {};\nconfig.apiVersion = '2020-08-27';\nthis.stripe = Stripe(key, config);\n",
+     "server"),
+    ("public/js/pay.js", "let config = {};\nconfig.apiVersion = '2020-08-27';\nthis.stripe = Stripe(key, config);\n",
+     "browser"),
+    ("resources/js/pay2.js", "// <script src=\"https://js.stripe.com/v3/\">\nconfig.apiVersion = '2020-08-27';\n", "browser"),
+    ("static/x.js", "// new Stripe( in a comment is not code\nconst s = Stripe(pk, { apiVersion: '2020-08-27' });\n",
+     "browser"),
+    ("web/y.tsx", "const s = '<loadStripe(pk, {'; const o = { apiVersion: '2020-08-27' };\n", "server"),  # in a string
+    # the server SDK, imported in any form (review item 4)
+    ("server/api.js", "const { default: Stripe } = await import('stripe');\n"
+     "const stripe = Stripe(process.env.SK, { apiVersion: '2020-08-27' });\n", "server"),
+    ("supabase/functions/x/index.ts", "import Stripe from 'npm:stripe@14';\n"
+     "export const stripe = Stripe(Deno.env.get('SK')!, { apiVersion: '2023-10-16' });\n", "server"),
+    ("public/fn/index.ts", "import Stripe from 'https://esm.sh/stripe@14?target=deno';\n"
+     "const stripe = Stripe(key, { apiVersion: '2023-10-16' });\n", "server"),
+    ("client/stripe.js", "const stripeLib = require('stripe');\nconst stripe = stripeLib(key, { apiVersion: '2020-08-27' });\n",
+     "server"),
+    ("config/stripe.js", "export const STRIPE = { apiVersion: '2020-08-27' };\n// used by Stripe(...) in client\n", "server"),
+    ("lib/stripe.js", "const cfg = { apiVersion: '2020-08-27' }\nmodule.exports = (k) => require(\"stripe\")(k, cfg)\n",
+     "server"),
+    ("client/n.js", "import S from 'stripe/lib/stripe.js';\nconst s = S(k, { apiVersion: '2020-08-27' });\n", "server"),
+    ("client/o.js", "import { loadStripe } from '@stripe/stripe-js';\nloadStripe(pk, { apiVersion: '2020-08-27' });\n",
      "browser"),
     # the server SDK
     ("server/g.js", "let config = {};\nconfig.apiVersion = '2020-08-27';\nconst s = new Stripe(key, config);\n", "server"),
@@ -98,3 +157,17 @@ def test_pin_kind(tmp_path, rel, text, kind):
     (tmp_path / "package.json").write_text("{}")
     pins = find_pins(tmp_path, [rel])
     assert [p.kind for p in pins if p.file == rel] == [kind]
+
+
+def test_a_file_is_read_for_kinds_once_however_many_pins_it_has(tmp_path, monkeypatch):
+    """Review item 10: the browser evidence used to be re-read per pin."""
+    from apidrift import fixpins
+
+    made = []
+    real = fixpins.Kinds
+    monkeypatch.setattr(fixpins, "Kinds", lambda rel, text: made.append(rel) or real(rel, text))
+    body = "loadStripe(pk, {\n" + "".join(f"  apiVersion: '2020-08-{i % 28 + 1:02d}',\n" for i in range(80)) + "});\n"
+    (tmp_path / "package.json").write_text("{}")
+    (tmp_path / "a.js").write_text("// stripe\n" + body + "x = 1;\n" * 20000)
+    pins = find_pins(tmp_path, ["a.js"])
+    assert len(pins) == 80 and {p.kind for p in pins} == {"browser"} and made == ["a.js"]
