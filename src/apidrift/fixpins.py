@@ -1,7 +1,8 @@
 """API-version pins near the fixed files: reported in the fix pull request, never edited.
 
 A pin is an assignment whose name says it holds the Stripe API version (``apiVersion:``, ``api_version =``,
-``'Stripe-Version' =>``, ``setApiVersion(``). Its value is read as one expression up to the end of the
+``'Stripe-Version' =>``, ``setApiVersion(``, and the client or per-request ``stripe_version=`` /
+``stripe_version:`` of stripe-python and stripe-ruby). Its value is read as one expression up to the end of the
 statement (a top-level ``,`` / ``;`` / closer / assignment, or a line break that does not continue it), and
 every version-shaped string literal in that expression is a pin: ``Rails.env.test? ? "2023-10-16" :
 "2023-10-16; x_beta=v1"`` pins 2023-10-16 in both branches, ``os.environ.get("V", "2020-08-27")`` pins its
@@ -22,7 +23,8 @@ MAX_PINS = 100
 MAX_EXPRESSION = 400  # characters read after the name: a pin's value is short
 PROJECT_MARKERS = scanner.PROJECT_FILES | {"requirements.txt", "Pipfile", "setup.cfg", "Gemfile.lock", "deno.json"}
 PIN_HEAD = re.compile(
-    r"""(?:\bapiVersion|\bapi_version|['"]?Stripe-Version['"]?)\s*(?:=>|[:=])|['"](?:api|stripe)_version['"]\s*=>"""
+    r"""(?:\bapiVersion|\bapi_version|\bstripe_version|['"]?Stripe-Version['"]?)\s*(?:=>|[:=])"""
+    r"""|['"](?:api|stripe)_version['"]\s*=>"""
     r"""|\bsetApiVersion\("""
 )
 VERSION = re.compile(r"(\d{4}-\d{2}-\d{2}(?:\.[A-Za-z]\w*)?)(?:;[^\n]*)?")  # the whole string; a beta suffix after ";"

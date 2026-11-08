@@ -25,6 +25,12 @@ def versions(text: str) -> list[tuple[int, str]]:
     ("$c = new StripeClient(['api_key' => $k, 'stripe_version' => $live ? '2024-06-20' : '2023-10-16']);\n",
      [(1, "2024-06-20"), (1, "2023-10-16")]),
     ("\\Stripe\\Stripe::setApiVersion($beta ? '2024-06-20; x_beta=v1' : '2024-06-20');\n", [(1, "2024-06-20")]),
+    # review item 6: client and per-request options
+    ('client = stripe.StripeClient("sk", stripe_version="2020-08-27")\n', [(1, "2020-08-27")]),
+    ('stripe.Customer.create(email=e, stripe_version="2020-08-27")\n', [(1, "2020-08-27")]),
+    ('client = Stripe::StripeClient.new("sk", stripe_version: "2020-08-27")\n', [(1, "2020-08-27")]),
+    ("Stripe::Customer.create({ email: e }, { stripe_version: '2024-06-20', idempotency_key: k })\n", [(1, "2024-06-20")]),
+    ("$stripe->customers->create([], ['stripe_version' => '2024-06-20']);\n", [(1, "2024-06-20")]),
     # the forms the old pattern read keep reading the same
     ("apiVersion: '2023-10-16',\n", [(1, "2023-10-16")]),
     ("headers: { 'Stripe-Version': \"2022-11-15\" }\n", [(1, "2022-11-15")]),
@@ -42,6 +48,8 @@ def test_conditional_and_default_pins_report_each_version(text, want):
     "const o = { apiVersion: pick() };\nconst since = '2024-01-01';\n",
     "apiVersion: v\nconst since = '2024-01-01'\n",
     "stripe_api_version = '2023-10-16'\n",  # another name: as before, not a pin
+    "my_stripe_version = '2023-10-16'\n",
+    "if stripe_version == '2023-10-16':\n",
     "apiVersion = latest; other = '2024-01-01'\n",
     "apiVersion: someFn(a)\n  , created: '2024-01-01'\n",
     "apiVersion: x // since '2024-01-01'\n",
