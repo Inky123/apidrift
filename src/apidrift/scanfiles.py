@@ -8,6 +8,7 @@ left out everywhere alike.
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 
 SKIP_DIRS = {"node_modules", "vendor", "site-packages", "__pycache__"}  # skipped anywhere
@@ -40,9 +41,13 @@ def iter_files(root: Path, suffixes: set[str]) -> tuple[list[Path], int, int]:
             path = here / name
             if name in SKIP_NAMES or name.endswith((".min.js", ".map")) or path.suffix.lower() not in suffixes:
                 continue
-            if path.is_symlink():
+            try:
+                st = path.lstat()
+            except OSError:
                 continue
-            if path.stat().st_size > MAX_BYTES:
+            if stat.S_ISLNK(st.st_mode):
+                continue
+            if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_BYTES:  # a FIFO or socket would block the read
                 skipped_files += 1
                 continue
             files.append(path)
