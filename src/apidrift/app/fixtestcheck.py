@@ -220,10 +220,23 @@ def _key(text: str, language: str, at: int, name: str) -> bool:
 def _opens_entry(text: str, token: int, language: str) -> bool:
     """The code before a key token ends an opener or a comma (Ruby: or a paren-less call's name)."""
     j = token
-    while j > 0 and text[j - 1].isspace():
-        j -= 1
+    while True:
+        while j > 0 and text[j - 1].isspace():
+            j -= 1
+        line_start = text.rfind("\n", 0, j) + 1
+        comment = _trailing_comment(text[line_start:j], language)
+        if comment is None:
+            break
+        j = line_start + comment  # a comment ending the line before: the code before it counts
     c = text[j - 1] if j else ""
     return c in "{[(," and c != "" or (language == "ruby" and c != "" and (_ident(c) or c == "|") and j < token)
+
+
+def _trailing_comment(line: str, language: str) -> int | None:
+    """Where a line comment without quotes in it starts, when one ends ``line``."""
+    marks = "|".join(re.escape(c) for c in LINE_COMMENT.get(language, ()))
+    m = re.search(rf"(?:{marks})[^'\"`\n]*$", line) if marks else None
+    return m.start() if m and m.start() < len(line) else None
 
 
 def _entry_key(text: str, language: str, at: int, name: str) -> tuple[int, int, int] | None:
@@ -254,9 +267,13 @@ def _deletion(text: str, language: str, start: int, end: int, out: str, name: st
     before it (the fixer's own-line deletion of a last entry)."""
     lo, comma = start, False
     if out:
-        if not (text[start : start + 1] == "," and text[start + 1 : start + 1 + len(out)] == out and out.endswith("\n")):
-            return None
+        comments = "|".join(re.escape(c) for c in LINE_COMMENT[language])
+        rest_of_line = re.fullmatch(rf"[ \t]*(?:(?:{comments})[^\n]*)?\r?\n", out)
+        if not (text[start : start + 1] == "," and text[start + 1 : start + 1 + len(out)] == out and rest_of_line):
+            return None  # only the rest of the comma's own line (spaces, a comment, the line break) may be kept
         lo, comma = start + 1 + len(out), True
+        if text[lo:end].lstrip(" \t")[:1] in ("", "\n", "\r"):
+            return None  # the entry must start the next line
     i = _skip_space(text, lo, end)
     if text[i : i + 1] == ",":
         if comma:
