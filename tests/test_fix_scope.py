@@ -183,3 +183,41 @@ def test_the_prefix_classifier(text, ruby, unsafe):
     key = text.index("k:")
     end = src.skip_scalar(key)
     assert fixscope.unsafe_entry(src, 0, key, end, src.skip_scalar(1, ""), strict=True) is unsafe
+
+
+# --- renames: the same guard (review item b) ------------------------------------------------
+
+PI = "stripe.paymentIntents.create({ %s });\n"
+
+
+@pytest.mark.parametrize("body", [
+    "amount: total / 100, payment_method_types: ['card']",  # division in a sibling, and below in the value
+    "payment_method_types: ['card'], amount: Math.round(x / 2)",
+    "amount: 1, payment_method_types: ids.length / 2 ? ['card'] : []",
+])
+def test_a_rename_next_to_division_still_goes_through(tmp_path, body):
+    from test_fixer import plan_for
+
+    plan = plan_for(tmp_path, {"a.js": JS + PI % body})
+    assert plan.unfixable == [] and len(plan.fixes) == 1, plan.to_dict()
+    assert plan.fixes[0].content == JS + PI % body.replace("payment_method_types", "allowed_payment_method_types")
+
+
+@pytest.mark.parametrize("body", [
+    "q: /[,]/, payment_method_types: ['card']",
+    "payment_method_types: ['card'], r: /}/, payment_method_types: ['sepa_debit']",
+    "description: `${s.replace(/[,]/g, '')}`, payment_method_types: ['card']",
+])
+def test_a_rename_next_to_a_regex_is_refused(tmp_path, body):
+    from test_fixer import plan_for
+
+    plan = plan_for(tmp_path, {"a.js": JS + PI % body})
+    assert plan.fixes == [] and {u.why for u in plan.unfixable} == {"unsupported_value"}, plan.to_dict()
+
+
+def test_review_r7_a_key_inside_a_string_after_a_regex_is_never_renamed(tmp_path):
+    from test_fixer import plan_for
+
+    text = JS + ("stripe.paymentIntents.create({\n  amount: 100,\n  currency: 'usd',\n  q: /'/,\n"
+                 "  description: ' payment_method_types: [\"card\"], ',\n  r: /'/,\n});\n")
+    assert plan_for(tmp_path, {"a.js": text}).fixes == []

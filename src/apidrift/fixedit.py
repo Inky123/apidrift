@@ -145,7 +145,8 @@ class Locator:
                 out.incomplete = True  # the nested object is a variable or an expression
         spans = fields.spans.get(m.target, [])
         lo, hi = start - 1 if literal else start, src.skip_scalar(start, "")
-        if m.action != "rename" and any(fixscope.unsafe_entry(src, lo, s.key_start, s.entry_end, hi, strict=True) for s in spans):
+        strict = m.action != "rename"  # a rename leaves the value alone: division in it reads fine
+        if any(fixscope.unsafe_entry(src, lo, s.key_start, s.entry_end, hi, strict=strict) for s in spans):
             out.add(fixvalue.UNSUPPORTED)  # a regex, generic or heredoc in this literal: the cursor may misread it
             return
         for span in spans:
