@@ -126,9 +126,9 @@ def find(text: str, file: str, sources: list[Builder]) -> list[Expect]:
         if len(spans) != 1 or spans[0][0] < 0:
             continue
         lit = _literal(text, src, *spans[0])
-        method = _compared_only(text, mask, name, actual, derived) if lit else None
+        method, derivations = _compared_only(text, mask, src, name, actual, derived, bodies) if lit else (None, [])
         for b in mine:
-            if lit and method == b.method:
+            if lit and method == b.method and not _names_key(text, mask, derivations, b.target):
                 out.append(Expect("builder", b.head, lit[0], lit[1], b.head + "(", ")", (), (b.path, b.target)))
     return sorted(out, key=lambda e: e.lo)
 
@@ -162,10 +162,15 @@ def _literal(text: str, src: Source, lo: int, hi: int) -> tuple[int, int] | None
     return (i, end) if text[end - 1 : end] == "}" and src.skip_space(end) >= hi else None
 
 
-def _compared_only(text: str, mask: Mask, name: str, actual: dict[str, str], derived: dict[str, str]) -> str | None:
+def _compared_only(
+    text: str, mask: Mask, src: Source, name: str, actual: dict[str, str], derived: dict[str, str],
+    bodies: dict[str, list[tuple[int, int]]],
+) -> tuple[str | None, list[tuple[int, int]]]:
     """The builder ``name`` is compared with when every use of it (and of what is derived from it) is
-    ``expect(<actual>).to eq(...)`` or the start of a derivation; None when any use is something else."""
+    ``expect(<actual>).to eq(...)`` or the start of a derivation, and the spans of those derivations; None
+    when any use is something else."""
     names, todo, methods = {name}, [name], set()
+    spans: list[tuple[int, int]] = []
     locals_ = [(m.group(1), m.group(2), m.start(2), m.start(1)) for m in LOCAL.finditer(text) if not mask.covers(m.start(1))]
     compares = [(m.group(1), m.group(2), m.start(2)) for m in COMPARE.finditer(text) if not mask.covers(m.start())]
     while todo:
@@ -174,19 +179,29 @@ def _compared_only(text: str, mask: Mask, name: str, actual: dict[str, str], der
         for a, e, at in compares:
             if e == current:
                 if a not in actual:
-                    return None
+                    return None, []
                 methods.add(actual[a])
                 allowed.add(at)
         for child, base in [*derived.items(), *((c, b) for c, b, _, _ in locals_)]:
             if base == current and child not in names:
                 names.add(child)
                 todo.append(child)
+                spans += [s for s in bodies.get(child, []) if s[0] >= 0]
+        spans += [(at, src.line_end(at)) for _, b, at, _ in locals_ if b == current]
         allowed |= {at for _, b, at, _ in locals_ if b == current} | {at for c, _, _, at in locals_ if c == current}
         allowed |= {_derived_at(text, mask, c) for c, b in derived.items() if b == current}
         for use in re.finditer(rf"(?<![\w:.@$]){re.escape(current)}(?![\w?!])(?!:[ \t]*[^\s,)}}\]])", text):
             if not mask.covers(use.start()) and use.start() not in allowed:
-                return None
-    return next(iter(methods)) if len(methods) == 1 else None
+                return None, []
+    return (next(iter(methods)) if len(methods) == 1 else None), spans
+
+
+def _names_key(text: str, mask: Mask, spans: list[tuple[int, int]], target: str) -> bool:
+    """A derivation names the migrated key (``payload.merge(payment_method_types: [...])``, ``except(:k)``): the
+    derived expectation would still state the old key, so the literal is listed, not edited. Any mention
+    counts, even in a string or comment: when unsure, list."""
+    key = re.compile(rf"(?<![\w@$]){re.escape(target.rsplit('.', 1)[-1])}(?![\w?!])")
+    return any(key.search(text, lo, hi) for lo, hi in spans)
 
 
 def _derived_at(text: str, mask: Mask, child: str) -> int:
