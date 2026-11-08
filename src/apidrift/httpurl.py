@@ -28,6 +28,11 @@ EXPLICIT = re.compile(
 )
 CALLEE_METHOD = re.compile(r"(?:^|[._])(get|post|delete)$", re.I)  # requests.get, wp_remote_post, conn.delete
 DEFAULT_GET = {"fetch", "wp_remote_request", "wp_safe_remote_request", "file_get_contents", "urlopen", "Request"}
+# Clients whose method an options argument can override (WordPress merges ``$args`` over its default),
+# and those whose second positional argument (or ``data=``) is a body that makes the request a POST.
+OVERRIDABLE = {"fetch", "wp_remote_request", "wp_safe_remote_request", "wp_remote_get", "wp_safe_remote_get",
+               "wp_remote_post", "wp_safe_remote_post"}
+POSITIONAL_BODY = {"urlopen", "Request", "file_get_contents"}
 NEW_REQUEST = {"NewRequest", "NewRequestWithContext", "request", "request_async", "raw_request", "raw_request_async"}
 
 

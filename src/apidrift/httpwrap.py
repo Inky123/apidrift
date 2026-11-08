@@ -24,12 +24,14 @@ repository (Go: in the package) has that name.
 from __future__ import annotations
 
 import re
+import re
 from dataclasses import dataclass, field
 
 from . import httpurl
 
 MAX_WRAPPERS = 200  # wrappers kept per repository
 MAX_FILES = 400  # caller files rescanned
+OVER_CAP = "raw-HTTP wrapper caller"  # the ``unread`` entry for caller files past MAX_FILES
 
 
 @dataclass(frozen=True)
@@ -37,7 +39,7 @@ class Wrapper:
     language: str  # php / go / python
     rel: str
     name: str
-    owner: str  # PHP / Python class, Go package directory; "" for a plain PHP / Python function
+    owner: str  # PHP class (fully qualified) / Python class / Go receiver type; "" for a plain PHP / Python function
     base: str  # what the path parameter is appended to: "https://api.stripe.com/v1/"
     path: int  # index of the path parameter
     method: str | None = None  # the method every call uses, when the wrapper fixes it
@@ -49,6 +51,12 @@ class Wrapper:
     defaults: tuple[str | None, ...] = ()  # each parameter's default as source text, None for none
     is_method: bool = False  # a method (``$this->x()`` / ``self.x()`` / ``c.x()``), not a plain function
     line: int = 0
+    names: tuple[str, ...] = ()  # parameter names, for arguments passed by keyword (Python)
+    field: tuple[str, str] | None = None  # Go: the (struct type, field) the base is read from
+    # keys the wrapper writes only under a condition: (field path, the literal the path argument must
+    # equal for it to be written, or None when the condition is not known)
+    maybe: tuple[tuple[str, str | None], ...] = ()
+    filters: frozenset[str] = frozenset()  # PHP: filter hooks the body passes through (rewrites if hooked)
 
 
 @dataclass
@@ -58,48 +66,111 @@ class Registry:
     collecting: bool = True
     wrappers: list[Wrapper] = field(default_factory=list)
     names: dict[str, dict[str, int]] = field(default_factory=dict)  # language -> function name -> definitions
-    go_names: dict[tuple[str, str], int] = field(default_factory=dict)  # (dir, name) -> definitions
-    calls: dict[str, set[str]] = field(default_factory=dict)  # rel -> names called in it
+    calls: dict[str, dict[str, bool]] = field(default_factory=dict)  # rel -> name called -> with a string literal
+    go_files: dict[str, list[str]] = field(default_factory=dict)  # package directory -> its Go files
+    go_evidence: dict[str, list] = field(default_factory=dict)  # directory -> struct field assignments in it
+    hooks: set[str] = field(default_factory=set)  # WordPress filter hooks the checkout registers (phpfilters)
     rescan: set[str] = field(default_factory=set)
+    skipped: int = 0  # caller files past MAX_FILES, not read for wrapper calls
 
     def collect(self, text: str, rel: str) -> None:
-        """Note the wrappers and function names one file defines and the names it calls."""
+        """Note the wrappers one file defines, the function names it defines and the names it calls."""
         from . import httpgo, httpphp, httppy
 
-        module = {"php": httpphp, "go": httpgo, "python": httppy}.get(_language(rel))
-        if module is None:
-            return
-        found, defined, called = module.survey(text, rel)
         lang = _language(rel)
         if lang == "go":
-            for name in defined:
-                key = (_dir(rel), name)
-                self.go_names[key] = self.go_names.get(key, 0) + 1
+            self.go_files.setdefault(_dir(rel), []).append(rel)
+            found, defined, called = httpgo.survey(text, rel)
+        elif lang in ("php", "python"):
+            if lang == "php" and "add_filter" in text:
+                self.hooks |= production_hooks(rel, text)
+            found, defined, called = (httpphp if lang == "php" else httppy).survey(text, rel)
         else:
-            names = self.names.setdefault(lang, {})
-            for name in defined:
-                names[name.lower()] = names.get(name.lower(), 0) + 1
+            return
+        names = self.names.setdefault(lang, {})
+        for name in defined:
+            key = name.lower() if lang == "php" else name
+            names[key] = names.get(key, 0) + 1
         if len(self.wrappers) < MAX_WRAPPERS:
             self.wrappers += found[: MAX_WRAPPERS - len(self.wrappers)]
         if called:
             self.calls[rel] = called
 
-    def finish(self) -> None:
+    def finish(self, read=None) -> None:
+        """Decide which files are read again for wrapper calls: in PHP those naming a wrapper's class or
+        function, in Python those calling a wrapper's name, in Go every file of a wrapper's package. Files
+        that call one with a literal argument come first; past MAX_FILES the rest are counted in ``skipped``.
+        ``read(rel)`` gives a file's text, for the package-wide evidence a Go field base needs."""
+        from . import httpgo
+
         self.collecting = False
-        # a PHP method is called through its class name elsewhere; anything else through its own name
-        keys = {(w.owner if w.owner and w.language == "php" else w.name).lower() for w in self.wrappers}
-        for rel, called in sorted(self.calls.items()):
-            if len(self.rescan) >= MAX_FILES:
-                break
-            if {c.lower() for c in called} & keys and any(w.rel != rel for w in self.wrappers):
-                self.rescan.add(rel)
+        for directory in sorted({_dir(w.rel) for w in self.wrappers if w.language == "go" and w.field}):
+            if read is None:
+                continue
+            assigns = []
+            for rel in self.go_files.get(directory, []):
+                if not rel.endswith("_test.go"):
+                    assigns += httpgo.evidence(read(rel) or "")
+            self.go_evidence[directory] = assigns
+        defining = {w.rel for w in self.wrappers}  # read again even when a wrapper is dropped below
+        self.wrappers = [w for w in self.wrappers if not (w.language == "go" and w.field and _dir(w.rel) in self.go_evidence
+                         and httpgo.field_base(self.go_evidence[_dir(w.rel)], *w.field) != w.base)]
+        keys: dict[str, set[str]] = {"php": set(), "python": set()}
+        for w in self.wrappers:
+            if w.language == "php":
+                keys["php"].add((w.owner.rsplit("\\", 1)[-1] if w.owner else w.name).lower())
+            elif w.language == "python" and not w.is_method:
+                keys["python"].add(w.name)
+        ranked: list[tuple[int, str]] = []
+        for rel, called in self.calls.items():
+            lang = _language(rel)
+            hits = [name for name in called if (name.lower() if lang == "php" else name) in keys.get(lang, ())]
+            mine = {w.rel for w in self.wrappers if w.language == lang}
+            if hits and mine - {rel}:
+                ranked.append((0 if any(called[h] for h in hits) else 1, rel))
+        for directory in sorted({_dir(w.rel) for w in self.wrappers if w.language == "go"}):
+            ranked += [(1, rel) for rel in self.go_files.get(directory, [])]
+        ranked += [(0, rel) for rel in sorted(defining)]  # their own calls, now with the checkout's evidence
+        ranked = sorted(set(ranked))
+        best: dict[str, int] = {}
+        for rank, rel in ranked:
+            best.setdefault(rel, rank)
+        ranked = sorted((rank, rel) for rel, rank in best.items())
+        chosen = [rel for _, rel in ranked[:MAX_FILES]]
+        self.rescan = set(chosen)
+        self.skipped = len({rel for _, rel in ranked} - self.rescan)
         self.calls = {}
 
     def unique(self, language: str, name: str) -> bool:
-        return self.names.get(language, {}).get(name.lower(), 0) == 1
+        return self.names.get(language, {}).get(name.lower() if language == "php" else name, 0) == 1
 
-    def unique_in(self, directory: str, name: str) -> bool:
-        return self.go_names.get((directory, name), 0) == 1
+
+def production_hooks(rel: str, text: str) -> set[str]:
+    """Filter hooks a file registers (:func:`phpfilters.registered`), unless it is a test, fixture or
+    documentation file (the scanner's TEST_DIRS / TEST_FILE / DOC_DIRS rules): a test's callback is not
+    the customer's production code, so it does not make a filtered body invisible."""
+    import os
+
+    from . import phpfilters
+    from .scanner import _doc_like
+
+    if _doc_like(rel, os.path.splitext(rel)[1].lower()):
+        return set()
+    return phpfilters.registered({rel: text})
+
+
+LITERAL_ARGS = re.compile(r"""(?:\s*::\s*\w+\s*\()?[^()]{0,300}?['"]""")
+
+
+def called_names(text: str, pattern: re.Pattern[str]) -> dict[str, bool]:
+    """Names ``pattern`` finds called in a file, each with whether a call of it passes a string literal
+    (``request($r, 'payment_intents')``): the evidence the rescan ranks caller files by."""
+    out: dict[str, bool] = {}
+    for m in pattern.finditer(text):
+        name = m.group(1)
+        if not out.get(name):
+            out[name] = LITERAL_ARGS.match(text, m.end()) is not None
+    return out
 
 
 def registry_of(table) -> Registry | None:
@@ -143,6 +214,13 @@ def build(text: str, rel: str, index, wrapper: Wrapper, line: int, call: str, pi
         if not visible:
             hidden.add("")
     fields |= set(wrapper.adds)
+    path_arg = httpurl.template(pieces)
+    for key, when in wrapper.maybe:
+        if when is not None and None not in pieces:
+            if when == path_arg:
+                fields.add(key)
+        else:
+            hidden.add(key)  # may or may not be sent: never claimed
     glued = any(a is None and b is None for a, b in zip(pieces, pieces[1:]))  # ``"/{$id}{$query}"``: a query may hide
     if wrapper.rewrites or not wrapper.body_seen or glued:
         hidden.add("")

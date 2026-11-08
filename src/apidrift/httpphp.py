@@ -10,9 +10,11 @@ wrapper: path parameter 1 appended to ``const ENDPOINT = 'https://api.stripe.com
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import NamedTuple
 
-from . import httpphppath, httpurl, httpwrap, phpparse
+from . import httpphpbody, httpphppath, httpurl, httpwrap, phpfilters, phpparse
+from .httpphpbody import Writes, _writes
 from .jsparse import Fields
 from .phplex import STRING, Lex
 
@@ -27,6 +29,10 @@ HTTP = re.compile(
 STATIC_CALL = re.compile(r"(?<![\w$\\>])(\\?[A-Za-z_][\w\\]*)\s*::\s*([A-Za-z_]\w*)\s*\(")
 THIS_CALL = re.compile(r"\$this\s*->\s*([A-Za-z_]\w*)\s*\(")
 PLAIN_CALL = re.compile(r"(?<![\w$>:\\])([A-Za-z_]\w*)\s*\(")
+NAMESPACE = re.compile(r"(?<![\w$>:\\])namespace\s+([\w\\]+)\s*[;{]")
+USE_STMT = re.compile(r"(?<![\w$>:\\])use\s+(?!function\b|const\b)([\w\\][\w\\\s,]*?)\s*;")
+USE_PART = re.compile(r"\s*\\?([\w\\]+)(?:\s+as\s+(\w+))?\s*")
+EXTENDS = re.compile(r"\bextends\s+(\\?[\w\\]+)")
 CALLED = re.compile(r"([A-Za-z_]\w*)\s*(?:\(|::)")
 PARAM = re.compile(r"^\s*(?:[\w\\?|]+\s+)?(&\s*)?(\.\.\.)?\s*\$([A-Za-z_]\w*)\s*(?:=\s*(.*?))?\s*$", re.S)
 ENCODERS = re.compile(r"^(?:http_build_query|json_encode|wp_json_encode)\s*\(\s*\$([A-Za-z_]\w*)\s*\)$")
@@ -52,11 +58,26 @@ class File:
         self.text = text
         self.src = src = Lex(text)
         self.code = src.code
+        ns = NAMESPACE.search(self.code)
+        self.namespace = ns.group(1).strip("\\") if ns else ""
+        self.uses: dict[str, str] = {}  # lowercased alias -> fully qualified name
         self.classes: list[tuple[str, int, int]] = []
+        self.extends: dict[str, str] = {}  # class -> the fully qualified class it extends
         for m in CLASS.finditer(self.code):
             brace = m.end() - 1
             if brace in src.pairs:
                 self.classes.append((m.group(1), brace, src.pairs[brace]))
+        for m in USE_STMT.finditer(self.code):
+            if self.class_at(m.start()):
+                continue  # a trait use inside a class body
+            for part in m.group(1).split(","):
+                got = USE_PART.fullmatch(part)
+                if got:
+                    self.uses[(got.group(2) or got.group(1).rsplit("\\", 1)[-1]).lower()] = got.group(1)
+        for m in CLASS.finditer(self.code):
+            parent = EXTENDS.search(m.group(0))
+            if parent:
+                self.extends[m.group(1)] = self.resolve(parent.group(1), m.start())
         self.consts: dict[tuple[str, str], str] = {}
         for m in CONST.finditer(self.code):
             value = self.string_at(src.skip_space(m.end()))
@@ -91,6 +112,22 @@ class File:
         if self._parsed is None:
             self._parsed = phpparse.parse(self.text, lambda chain: None)
         return self._parsed
+
+    def fq(self, short: str) -> str:
+        """The fully qualified name of a class declared in this file."""
+        return f"{self.namespace}\\{short}" if self.namespace and short else short
+
+    def resolve(self, name: str, pos: int) -> str:
+        """The fully qualified class a reference names here: a leading backslash, an imported alias,
+        ``self`` / ``static``, or a name relative to the file's namespace."""
+        if name.lower() in SELF:
+            return self.fq(self.class_at(pos))
+        if name.startswith("\\"):
+            return name.strip("\\")
+        first, _, rest = name.partition("\\")
+        if first.lower() in self.uses:
+            return self.uses[first.lower()] + ("\\" + rest if rest else "")
+        return self.fq(name)
 
     def class_at(self, pos: int) -> str:
         inside = [(o, name) for name, o, c in self.classes if o < pos < c]
@@ -195,9 +232,43 @@ class File:
         out = {}
         for el in phpparse.elements(self.src, opener):
             key = phpparse.literal_key(self.src, el)
-            if key:
-                out[key[0]] = (el.value, el.end)
+            if key is None:
+                return None  # a spread or a computed key could be anything, ``method`` included
+            out[key[0]] = (el.value, el.end)
         return out
+
+
+def real_client(f: File, m: re.Match) -> bool:
+    """A WordPress / file function, or ``->request|get|post|delete`` on something named as an HTTP client
+    (``$this->client``, ``$http``, ``$guzzle``), not ``$this->cache->get(...)``."""
+    if m.group(1):
+        return True
+    owner = re.search(r"(\$?[A-Za-z_]\w*)\s*(?:\(\s*\))?\s*$", f.code[max(0, m.start() - 80) : m.start()])
+    return owner is not None and re.search(r"http|client|guzzle", owner.group(1), re.I) is not None
+
+
+def client_method(f: File, m: re.Match, args) -> tuple[str | None, str | None, dict | None, tuple[str, ...]]:
+    """(method the call names or None, the variable it takes the method from, its options, the option keys
+    that carry a body). A WordPress default holds only when the options are a visible array without
+    ``method``; options that are not visible leave the method unknown."""
+    callee, verb = m.group(1), m.group(2)
+    if verb == "request":  # Guzzle: request($method, $uri, $options)
+        got = f.pieces(*args[0]) if args else []
+        word = httpurl.method_word(got[0][1]) if len(got) == 1 and got[0][0] == "lit" else None
+        var = got[0][1] if len(got) == 1 and got[0][0] == "var" else None
+        return word, var, (f.array_items(*args[2]) if len(args) > 2 else {}), ("form_params", "json", "body", "multipart", "query")
+    if verb:
+        return verb, None, (f.array_items(*args[1]) if len(args) > 1 else {}), ("form_params", "json", "body", "query")
+    options = f.array_items(*args[1]) if len(args) > 1 else {}
+    if callee == "file_get_contents":
+        return ("get" if len(args) == 1 else None), None, {}, ()
+    if options is None:
+        return None, None, None, ("body",)
+    if "method" in options:
+        got = f.pieces(*options["method"])
+        word = httpurl.method_word(got[0][1]) if len(got) == 1 and got[0][0] == "lit" else None
+        return word, (got[0][1] if len(got) == 1 and got[0][0] == "var" else None), options, ("body",)
+    return ("post" if callee.endswith("_post") else "get"), None, options, ("body",)
 
 
 def _default(text: str | None) -> str | None:
@@ -209,15 +280,6 @@ def _default(text: str | None) -> str | None:
 
 def _empty(text: str | None) -> bool:
     return text is not None and re.fullmatch(r"\s*(?:\[\s*\]|array\s*\(\s*\))\s*", text, re.I) is not None
-
-
-def _writes(f: File, fn: Func, name: str, before: int) -> tuple[bool, set[str]]:
-    """(rebound or written with a key that is not a literal, literal keys written) for ``$name`` in ``fn``."""
-    body = f.code[fn.open : before]
-    rebound = re.search(rf"\${name}\s*(?:=(?![=>])|\.=|\+=|\?\?=)|&\s*\${name}\b", body) is not None
-    adds = set(re.findall(rf"\${name}\s*\[\s*'([A-Za-z_]\w*)'\s*\]\s*=(?![=>])", f.text[fn.open : before]))
-    other = re.findall(rf"\${name}\s*\[[^\]]*\]\s*(?:\[[^\]]*\]\s*)*=(?![=>])", body)
-    return rebound or len(other) > len(adds), adds
 
 
 def _direct(f: File, fn: Func, rel: str) -> httpwrap.Wrapper | None:
@@ -236,28 +298,11 @@ def _direct(f: File, fn: Func, rel: str) -> httpwrap.Wrapper | None:
         if not httpurl.is_base(base) or name not in fn.params:
             continue
         method, method_param, body, body_seen = None, None, None, True
-        if verb == "request":
-            got = f.pieces(*args[0])
-            method = httpurl.method_word(got[0][1]) if len(got) == 1 and got[0][0] == "lit" else None
-            if len(got) == 1 and got[0][0] == "var" and got[0][1] in fn.params:
-                method_param = fn.params.index(got[0][1])
-            options = f.array_items(*args[2]) if len(args) > 2 else {}
-            keys = ("form_params", "json", "body", "multipart", "query")
-        elif verb:
-            method, options, keys = verb, (f.array_items(*args[1]) if len(args) > 1 else {}), ("form_params", "json", "body", "query")
-        elif callee == "curl_init":
-            continue  # options set by curl_setopt elsewhere: not read
-        else:
-            options = f.array_items(*args[1]) if len(args) > 1 else {}
-            method = "get" if callee.endswith(("_get", "file_get_contents")) else "post" if callee.endswith("_post") else None
-            keys = ("body",)
-            if options is not None and "method" in options:
-                got = f.pieces(*options["method"])
-                method = httpurl.method_word(got[0][1]) if len(got) == 1 and got[0][0] == "lit" else None
-                if len(got) == 1 and got[0][0] == "var" and got[0][1] in fn.params:
-                    method_param = fn.params.index(got[0][1])
-            elif callee.endswith("_request"):
-                method = "get"
+        if callee == "curl_init" or not real_client(f, m):
+            continue  # curl options are set by curl_setopt elsewhere: not read
+        method, method_var, options, keys = client_method(f, m, args)
+        if method_var is not None and method_var in fn.params:
+            method_param = fn.params.index(method_var)
         if options is None:
             body_seen = False  # the options are not a visible array: a body may be in them
         else:
@@ -270,10 +315,10 @@ def _direct(f: File, fn: Func, rel: str) -> httpwrap.Wrapper | None:
                         body = fn.params.index(v.group(1))
                     else:
                         body_seen = False
-        rewrites, adds = _writes(f, fn, fn.params[body], m.start()) if body is not None else (False, set())
+        w = _writes(f, fn, fn.params[body], m.start(), name) if body is not None else Writes(False, set(), (), frozenset())
         return httpwrap.Wrapper(
-            "php", rel, fn.name, fn.owner, base, fn.params.index(name), method, method_param, body, body_seen,
-            rewrites, frozenset(adds), fn.defaults, fn.is_method, f.line(fn.paren),
+            "php", rel, fn.name, f.fq(fn.owner), base, fn.params.index(name), method, method_param, body, body_seen,
+            w.rewrites, frozenset(w.adds), fn.defaults, fn.is_method, f.line(fn.paren), maybe=w.maybe, filters=w.filters,
         )
     return None
 
@@ -291,14 +336,16 @@ def _calls(f: File, wrappers: list[httpwrap.Wrapper], rel: str, registry) -> lis
         return (here or found)[0] if len(here) == 1 or len(found) == 1 else None
 
     for m in STATIC_CALL.finditer(f.code):
-        owner = m.group(1).lstrip("\\").rsplit("\\", 1)[-1]
-        if owner.lower() in SELF:
-            owner = f.class_at(m.start())
-        w = one((owner.lower(), m.group(2).lower()))
+        if m.group(1).lower() == "parent":
+            continue
+        w = one((f.resolve(m.group(1), m.start()).lower(), m.group(2).lower()))  # namespaces and ``use`` resolved
         if w is not None:
             out.append((w, m.start(), m.end() - 1, re.sub(r"\s+", "", m.group(0)[:-1])))
     for m in THIS_CALL.finditer(f.code):
-        w = one((f.class_at(m.start()).lower(), m.group(1).lower()))
+        short = f.class_at(m.start())
+        w = one((f.fq(short).lower(), m.group(1).lower()))
+        if w is None and short in f.extends:  # an inherited method: only a parent this file names
+            w = one((f.extends[short].lower(), m.group(1).lower()))
         if w is not None and w.is_method:
             out.append((w, m.start(), m.end() - 1, re.sub(r"\s+", "", m.group(0)[:-1])))
     for m in PLAIN_CALL.finditer(f.code):
@@ -311,8 +358,15 @@ def _calls(f: File, wrappers: list[httpwrap.Wrapper], rel: str, registry) -> lis
     return out
 
 
-def survey(text: str, rel: str) -> tuple[list[httpwrap.Wrapper], set[str], set[str]]:
-    called = set(CALLED.findall(text)) if re.search(r"::|\(", text) else set()
+def survey(text: str, rel: str) -> tuple[list[httpwrap.Wrapper], set[str], dict[str, bool]]:
+    called = httpwrap.called_names(text, CALLED) if re.search(r"::|\(", text) else {}
+    for m in EXTENDS.finditer(text):  # a subclass calls its parent's methods through ``$this->``
+        called.setdefault(m.group(1).rsplit("\\", 1)[-1], True)
+    for m in USE_STMT.finditer(text):  # ``use Stripe\API as S; S::request(...)``
+        for part in m.group(1).split(","):
+            got = USE_PART.fullmatch(part)
+            if got:
+                called.setdefault(got.group(1).rsplit("\\", 1)[-1], True)
     defined = set(FUNC.findall(text))  # methods counted too: a plain function's name is unique only if no method has it
     if "stripe.com" not in text:
         return [], defined, called
@@ -324,23 +378,27 @@ def wrappers_in(f: File, rel: str, known: list[httpwrap.Wrapper]) -> list[httpwr
     to the path of a wrapper known here or elsewhere."""
     found = [w for fn in f.funcs if (w := _direct(f, fn, rel)) is not None]
     for _ in range(2):
-        names = {(w.owner, w.name) for w in found}
+        names = {(w.owner, w.name) for w in found if w.rel == rel}
         forwards: dict[Func, list[httpwrap.Wrapper | None]] = {}
         for w, start, paren, _ in _calls(f, found + known, rel, None):
             fn = f.func_at(start)
-            if fn is not None and (fn.owner, fn.name) not in names:
+            if fn is not None and (f.fq(fn.owner), fn.name) not in names:
                 forwards.setdefault(fn, []).append(_forward(f, fn, w, paren, rel))
         for fn, got in forwards.items():
             # every wrapper call in it must forward the same way: ``retrieve($path)`` on one branch and
             # ``request($params, $path, $method)`` on another make the method depend on the arguments
             shapes = {None if g is None else (g.base, g.path, g.method, g.method_param, g.body) for g in got}
             if len(shapes) == 1 and got[0] is not None:
-                adds = frozenset().union(*(g.adds for g in got))
+                # a key one forwarding call sends and another does not is sent only on some paths
+                adds = frozenset.intersection(*(g.adds for g in got))
+                some = {k for g in got for k in g.adds} - adds
+                maybe = tuple(dict.fromkeys([m for g in got for m in g.maybe] + [(k, None) for k in sorted(some)]))
                 first = got[0]
                 found.append(httpwrap.Wrapper(
                     first.language, first.rel, first.name, first.owner, first.base, first.path, first.method,
                     first.method_param, first.body, all(g.body_seen for g in got), any(g.rewrites for g in got),
-                    adds, first.defaults, first.is_method, first.line,
+                    adds, first.defaults, first.is_method, first.line, maybe=maybe,
+                    filters=frozenset().union(*(g.filters for g in got)),
                 ))
     return found
 
@@ -363,17 +421,18 @@ def _forward(f: File, fn: Func, w: httpwrap.Wrapper, paren: int, rel: str) -> ht
         else:
             method = httpurl.method_word(_default(w.defaults[w.method_param] if w.method_param < len(w.defaults) else None))
     body, body_seen, rewrites, adds = None, w.body_seen, w.rewrites, set(w.adds)
+    maybe, filters = tuple(w.maybe), w.filters
     if w.body is not None:
         got = f.pieces(*args[w.body]) if w.body < len(args) else []
         if len(got) == 1 and got[0][0] == "var" and got[0][1] in fn.params:
             body = fn.params.index(got[0][1])
-            more, keys = _writes(f, fn, got[0][1], fn.close)
-            rewrites, adds = rewrites or more, adds | keys
+            more = _writes(f, fn, got[0][1], paren, pieces[0][1])  # what this forwarding call has seen so far
+            rewrites, adds, maybe, filters = rewrites or more.rewrites, adds | more.adds, maybe + more.maybe, filters | more.filters
         elif got or not _empty(w.defaults[w.body] if w.body < len(w.defaults) else None):
             body_seen = False
     return httpwrap.Wrapper(
-        "php", rel, fn.name, fn.owner, w.base, fn.params.index(pieces[0][1]), method, method_param, body, body_seen,
-        rewrites, frozenset(adds), fn.defaults, fn.is_method, f.line(fn.paren),
+        "php", rel, fn.name, f.fq(fn.owner), w.base, fn.params.index(pieces[0][1]), method, method_param, body, body_seen,
+        rewrites, frozenset(adds), fn.defaults, fn.is_method, f.line(fn.paren), maybe=maybe, filters=filters,
     )
 
 
@@ -385,7 +444,10 @@ def sites(text: str, rel: str, index, reads: frozenset[str], language: str, regi
     here = wrappers_in(f, rel, known) if "stripe.com" in text or known else []
     wrappers = here + [w for w in known if w.rel != rel]
     out = httpphppath.constant_sites(f, text, rel, index, reads, language) if f.consts else []
+    hooks = registry.hooks if registry is not None else httpwrap.production_hooks(rel, text)
     for w, start, paren, display in _calls(f, wrappers, rel, registry):
+        if any(not phpfilters.pass_through(h, hooks) for h in w.filters):  # hooked, by name, prefix or any
+            w = replace(w, rewrites=True)
         args = f.src.args(paren)
         if any(phpparse_named(f, a) or f.text.startswith("...", f.src.skip_space(a)) for a, _ in args):
             continue
@@ -402,15 +464,7 @@ def sites(text: str, rel: str, index, reads: frozenset[str], language: str, regi
                 method = httpurl.method_word(got[0][1]) if len(got) == 1 and got[0][0] == "lit" else None
             else:
                 method = httpurl.method_word(_default(w.defaults[w.method_param] if w.method_param < len(w.defaults) else None))
-        fields = Fields()
-        if w.body is not None:
-            if w.body < len(args):
-                call = phpparse.Call(f.line(start), display, None, paren, args, w.body)
-                from .phphelpers import PhpHelpers, Via
-
-                phpparse.collect(f.parsed, call, fields, Via(PhpHelpers(f.parsed)))
-            elif not _empty(w.defaults[w.body] if w.body < len(w.defaults) else None):
-                fields.hide("")
+        fields = httpphpbody.call_fields(f, w, args, start, paren, display, len(templates) > 1)
         paths = set()
         for template in templates:  # one call site per endpoint the path can name
             u = httpwrap.build(text, rel, index, w, f.line(start), display, template, method, fields.paths,

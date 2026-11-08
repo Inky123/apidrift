@@ -89,6 +89,7 @@ class FixPlan:
     cassettes: list[tuple[str, int]] = field(default_factory=list)  # recorded requests that send a changed field
     root: Path | None = field(default=None, repr=False, compare=False)  # the checkout (the oracle reads Go types)
     pyrepo: object | None = field(default=None, repr=False, compare=False)  # pyrepo.Repo of the scan: read as it was
+    table: object = field(default=None, repr=False, compare=False)  # the scan's whole-repo context, for the oracle
 
     def to_dict(self) -> dict:
         """The ``--fix`` payload: a frozen contract with the App's pull-request step."""
@@ -128,7 +129,7 @@ Planned = tuple[Impact, Migration, bool]  # the bool: a wrap_type edit wrote the
 def plan_fixes(result: ScanResult, impacts: list[Impact], index: SdkIndex, root: Path) -> FixPlan:
     root = Path(root).resolve()
     base = root.parent if root.is_file() else root
-    plan = FixPlan(root=base, pyrepo=getattr(result, "pyrepo", None))
+    plan = FixPlan(root=base, pyrepo=getattr(result, "pyrepo", None), table=getattr(result, "table", None))
     by_file: dict[str, list[Candidate]] = {}
     fixable = [
         (i, m) for i in impacts
@@ -218,7 +219,9 @@ def _plan_file(
     if language == "go" and not gofix.balanced(text, content):
         _drop(plan, pairs, "syntax")  # no Go compiler here: at least every bracket still closes
         return None, []
-    why, leftovers, possibly = _oracle(file, text, content, language, planned, edits, index, changes, plan.root, plan.pyrepo)
+    why, leftovers, possibly = _oracle(
+        file, text, content, language, planned, edits, index, changes, plan.root, plan.table, plan.pyrepo
+    )
     if why:
         _drop(plan, pairs, why)
         return None, leftovers
@@ -248,12 +251,12 @@ def _candidate_edits(locator: Locator, usage: Usage, migration: Migration) -> tu
 
 def _oracle(
     file: str, before: str, after: str, language: str, planned: list[Planned], edits: list[Edit],
-    index: SdkIndex, changes: list[Change], root: Path | None = None, repo=None,
+    index: SdkIndex, changes: list[Change], root: Path | None = None, table=None, repo=None,
 ) -> tuple[str | None, list[int], list[Candidate]]:
     """Why the edited file must not be offered (None when every check holds), the old-name tokens left,
     and the planned deletions a call's hidden arguments may still send."""
-    u_before, _, _ = scan_text(before, file, index, repo=repo)  # read as the scan read it
-    u_after, _, _ = scan_text(after, file, index, repo=repo)
+    u_before, _, _ = scan_text(before, file, index, table, repo=repo)  # read as the scan read it, other files too
+    u_after, _, _ = scan_text(after, file, index, table, repo=repo)
     shape = lambda us: [(u.method, u.path, u.call, u.complete) for u in us]  # noqa: E731
     if shape(u_before) != shape(u_after):
         return "oracle_changed_other_calls", [], []

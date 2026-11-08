@@ -144,6 +144,7 @@ class ScanResult:
     unread: dict[str, int] = field(default_factory=dict)  # language -> files mentioning Stripe in languages not parsed
     reader: Reader = Reader()  # the vendor the scan was for
     pyrepo: object | None = field(default=None, repr=False, compare=False)  # pyrepo.Repo: the fixer reads with it too
+    table: object = None  # what the whole-repo pass learnt (httpwrap.Registry): re-scans of one file pass it on
 
     @property
     def counted(self) -> list[Usage]:
@@ -203,14 +204,18 @@ def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> Scan
             unread[unread_name] = unread.get(unread_name, 0) + 1
         unresolved += missing
         usages += found
-    if registry is not None:  # callers of another file's wrapper: their sites, now that every wrapper is known
-        registry.finish()
+    if registry is not None:  # wrapper files and their callers, read again now that every wrapper is known
+        registry.finish(lambda rel: _read(base / rel))
         for rel in sorted(registry.rescan):
-            text = _read(base / rel) or ""
-            usages += _http_sites(text, rel, index, [u for u in usages if u.file == rel], registry)
+            found, missing, _ = scan_text(_read(base / rel) or "", rel, index, registry, repo=repo)
+            usages = [u for u in usages if u.file != rel] + found
+            unresolved = [m for m in unresolved if m[0] != rel] + missing
+        if registry.skipped:  # never a silent drop: the files past the cap are named in the report
+            unread[httpwrap.OVER_CAP] = registry.skipped
     usages.sort(key=lambda u: (u.file, u.line, u.path))
     return ScanResult(
-        str(root), usages, scanned, unresolved, skipped_files, skipped_dirs, dict(sorted(unread.items())), reader, repo
+        str(root), usages, scanned, unresolved, skipped_files, skipped_dirs, dict(sorted(unread.items())), reader,
+        pyrepo=repo, table=registry,
     )
 
 

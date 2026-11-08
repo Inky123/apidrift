@@ -78,6 +78,35 @@ def test_a_joined_id_fills_the_next_segment_and_the_call_names_the_method(index,
     assert u.language == "http" and not u.complete
 
 
+SUB = "https://api.stripe.com/v1/subscriptions/"
+
+
+@pytest.mark.parametrize("rel,src,method", [
+    # review item 1: a client's default GET does not hold when options or a body can override it
+    ("a.js", f"// stripe\nfetch('{SUB}' + id, opts);\n", "?"),
+    ("a.js", f"// stripe\nfetch('{SUB}' + id, {{ ...base, body }});\n", "?"),
+    ("a.js", f"// stripe\nfetch('{SUB}' + id);\n", "get"),
+    ("a.js", f"// stripe\nfetch('{SUB}' + id, {{ headers: h }});\n", "get"),
+    ("a.py", f'import stripe, urllib.request\nurllib.request.Request("{SUB}" + sid, data=body)\n', "?"),
+    ("a.py", f'import stripe, urllib.request\nurllib.request.Request("{SUB}" + sid)\n', "get"),
+    ("a.php", P + f"wp_remote_request('{SUB}' . $id, $args); // stripe\n", "?"),
+    ("a.php", P + f"wp_remote_get('{SUB}' . $id, $args); // stripe\n", "?"),
+    ("a.php", P + f"wp_remote_get('{SUB}' . $id, ['timeout' => 5]); // stripe\n", "get"),
+    ("a.py", f'import os, stripe\nurl = os.environ.get("X", "{SUB}" + sid)\n', "get"),  # not a call: the old hint's word
+])
+def test_a_default_method_holds_only_when_nothing_can_override_it(index, rel, src, method):
+    assert one(src, rel, index).method == method
+
+
+def test_a_wrapper_whose_options_are_not_visible_has_no_method(index):
+    src = P + """class API { const E = 'https://api.stripe.com/v1/';
+  static function request($request, $api, $args) { return wp_remote_request(self::E . $api, $args); } }
+API::request([], 'subscriptions/' . $id, ['method' => 'DELETE']);
+"""
+    u = one(src, "a.php", index)
+    assert (u.method, u.path, u.complete) == ("?", "/v1/subscriptions/{subscription}", False)
+
+
 def test_an_explicit_method_the_path_lacks_is_unknown_rather_than_the_only_method(index):
     u = one(P + "wp_remote_get('https://api.stripe.com/v1/tokens', ['method' => 'GET']); // stripe\n", "a.php", index)
     assert (u.method, u.path) == ("?", "/v1/tokens")
@@ -153,7 +182,8 @@ def test_php_wrapper_calls_in_another_file_are_call_sites_at_the_callers_line(tm
     assert pi.call == "My_Stripe_API::request('payment_intents')"
     assert got[(7, "get", "/v1/payment_intents/{intent}")].fields == {"expand"}
     l3 = got[(8, "post", "/v1/payment_intents/{intent}")]
-    assert l3.fields == {"amount", "level3"} and l3.complete  # the wrapper's own literal key is sent too
+    # review item 7: the wrapper writes level3 only past its early return, so it may or may not be sent
+    assert l3.fields == {"amount"} and not l3.complete and l3.hidden == {"level3"}
     token = got[(6, "get", "/v1/tokens/{token}")]
     assert token.fields == frozenset() and token.complete
 
@@ -171,8 +201,18 @@ def _with(doc, path, method):
     return doc
 
 
+def test_php_form_encoded_keys_map_to_field_paths(index):
+    src = API + """My_Stripe_API::request(['payment_method_types[0]' => 'card', 'metadata[order]' => 1, 'expand[]' => 'x',
+  'line_items' => [['price' => 'p', 'quantity' => 1]], $dyn => 1], 'payment_intents');
+"""
+    u = one(src, "a.php", index)
+    assert u.fields == {OLD, "metadata", "metadata.order", "expand", "line_items", "line_items[].price",
+                        "line_items[].quantity"}
+    assert not u.complete and u.hidden == {""}  # only the computed key hides
+
+
 def test_a_wrapper_that_rewrites_the_body_keeps_the_visible_keys_but_hides_the_rest(index):
-    src = API.replace("        return wp_remote_post(", "        $request = apply_filters('body', $request, $api);\n        return wp_remote_post(", 1)
+    src = API.replace("        return wp_remote_post(", "        $request = self::strip($request);\n        return wp_remote_post(", 1)
     src += "My_Stripe_API::request(['payment_method_types' => ['card']], 'payment_intents');\n"
     u = one(src, "a.php", index)
     assert u.fields == {OLD} and not u.complete and "" in u.hidden
@@ -226,6 +266,18 @@ def test_a_path_built_from_a_variable_or_helper_with_literal_values_is_one_site_
 def test_two_expressions_joined_in_a_row_may_carry_a_query(index):
     u = one(API + 'My_Stripe_API::retrieve("payment_intents/{$id}{$query}");\n', "a.php", index)
     assert (u.method, u.path, u.complete) == ("get", "/v1/payment_intents/{intent}", False)
+
+
+def test_a_constant_url_counts_only_in_a_real_http_client_and_guzzle_names_its_method(index):
+    src = P + """class X {
+    const SUB = 'https://api.stripe.com/v1/subscriptions/';
+    function f($id) { return $this->cache->get(self::SUB . $id); }
+    function g($id) { return $this->options->delete(self::SUB . $id); }
+    function h($id) { return $this->client->request('DELETE', self::SUB . $id); }
+}
+"""
+    found = [s for s in sites(src, "a.php", index) if s[0] != 3]  # line 3 is the URL scan's const literal
+    assert found == [(6, "delete", "/v1/subscriptions/{subscription}")]
 
 
 def test_a_class_constant_url_in_an_http_call_is_a_call_site(index):
@@ -337,6 +389,32 @@ def go(i):
                            (11, "delete", "/v1/subscriptions/{subscription}")]
     assert got[(9, "post", "/v1/payment_intents")].fields == {"amount", OLD}
     assert got[(10, "post", "/v1/payment_intents")].fields == {"amount"}
+
+
+PYW = '''import requests
+STRIPE = "https://api.stripe.com/v1/"
+
+def call(path, params=None, method="post", **extra):
+    return requests.request(method, STRIPE + path, data=params)
+
+def change(path, params):
+    params["expand[]"] = "latest_invoice"
+    return requests.post(STRIPE + path, data=params)
+'''
+
+
+@pytest.mark.parametrize("line,method,fields,complete", [
+    ("call('subscriptions/' + i, method='delete')", "delete", set(), True),  # review item 2: keywords by name
+    ("call(path='charges', params={'amount': 1})", "post", {"amount"}, True),
+    ("call('charges', params=build())", "post", set(), False),
+    ("call('charges', {'amount': 1}, timeout=3)", None, {"amount"}, False),  # a keyword no parameter takes
+    ("call('charges', {'metadata[order]': '1', 'expand[]': 'x'})", "post", {"metadata", "metadata.order", "expand"}, True),
+    ("change('charges', {'amount': 1})", "post", {"amount"}, False),  # review item 8: the wrapper writes the body
+])
+def test_python_wrapper_arguments_by_position_and_keyword(index, line, method, fields, complete):
+    u = one(PYW + line + "\n", "app/pay.py", index)
+    assert (u.fields, u.complete) == (fields, complete)
+    assert u.method == (method or "?")
 
 
 # --- the fixer never edits them -----------------------------------------------------------------
