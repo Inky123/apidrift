@@ -188,3 +188,25 @@ def test_a_write_after_the_call_that_only_reaches_later_code_is_neither_a_findin
         "}\n"
     )
     assert outcome(tmp_path, {"app/Pay.php": src})[0] == "nothing"
+
+
+SENDER = H + "// Stripe\nfunction send_intent($p) {\n  return edds_api_request('PaymentIntent', 'create', $p);\n}\n"
+SENDS = H + "function go() {\n  return send_intent(['amount' => 1, '" + OLD + "' => ['card']]);\n}\n"
+
+
+def _cross(tmp_path, write):
+    from test_php_objects import _doc
+    from apidrift.openapi import load_spec
+
+    files = {**_dispatch_files(write), "app/Pay.php": SENDER, "app/Go.php": SENDS}
+    for f, text in files.items():
+        (tmp_path / f).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / f).write_text(text)
+    result = scan_repo(tmp_path, SdkIndex.build(load_spec(_doc())))
+    return [sorted(u.fields) for u in result.usages if "[through send_intent" in u.call]
+
+
+def test_a_dispatch_call_its_wrapper_changes_is_not_followed_across_files(tmp_path):
+    assert _cross(tmp_path / "a", "") == [["amount", OLD]]  # passed through unchanged: followed
+    assert _cross(tmp_path / "b", "$args[0]['metadata']['via'] = 'edd';") == []  # adds a key the caller cannot see
+    assert _cross(tmp_path / "c", "$args[0] = $more;") == []  # hides the parameters
