@@ -18,8 +18,16 @@ from . import phpvendor
 def iter_files(root: Path, suffixes: set[str] | None = None) -> tuple[list[Path], int, int]:
     """The files a scan reads (``suffixes``: of these extensions instead of every text file), with the
     counts of files and directories left out."""
-    key = ("files", str(root), None if suffixes is None else frozenset(suffixes))
-    files, skipped_files, skipped_dirs = phpvendor.memo(key, lambda: _walk(root, suffixes))
+    from . import scanner  # the rules live with the scanner
+
+    full = phpvendor.memo(("files", str(root)), lambda: _walk(root, None))
+    if suffixes is None:
+        files, skipped_files, skipped_dirs, _ = full
+        return list(files), skipped_files, skipped_dirs
+    if set(suffixes) <= scanner.TEXT_EXT:  # the full walk's list, filtered: the skip rules do not depend on the set
+        files, _, skipped_dirs, oversize = full
+        return ([p for p in files if p.suffix.lower() in suffixes], sum(1 for s in oversize if s in suffixes), skipped_dirs)
+    files, skipped_files, skipped_dirs, _ = phpvendor.memo(("files", str(root), frozenset(suffixes)), lambda: _walk(root, suffixes))
     return list(files), skipped_files, skipped_dirs
 
 
@@ -32,11 +40,13 @@ def rel_path(path: Path, base: Path) -> str:
     return path.relative_to(base).as_posix()
 
 
-def _walk(root: Path, suffixes: set[str] | None) -> tuple[list[Path], int, int]:
+def _walk(root: Path, suffixes: set[str] | None) -> tuple[list[Path], int, int, list[str]]:
+    """(files, files over the size cap, directories skipped, the suffixes of the files over the cap)."""
     from . import scanner  # the rules live with the scanner
 
     suffixes = scanner.TEXT_EXT if suffixes is None else suffixes
     files: list[Path] = []
+    oversize: list[str] = []
     skipped_files = skipped_dirs = 0
     for dirpath, dirs, names in os.walk(root):
         here, present = Path(dirpath), set(names)
@@ -57,9 +67,10 @@ def _walk(root: Path, suffixes: set[str] | None) -> tuple[list[Path], int, int]:
                 continue
             if path.stat().st_size > scanner.MAX_BYTES:
                 skipped_files += 1
+                oversize.append(path.suffix.lower())
                 continue
             files.append(path)
-    return files, skipped_files, skipped_dirs
+    return files, skipped_files, skipped_dirs, oversize
 
 
 def read(path: Path) -> str | None:
