@@ -185,6 +185,37 @@ def test_the_prefix_classifier(text, ruby, unsafe):
     assert fixscope.unsafe_entry(src, 0, key, end, src.skip_scalar(1, ""), strict=True) is unsafe
 
 
+# --- Ruby heredocs: their bodies are text (review item a) ---------------------------------------
+
+
+def test_review_r5_a_call_inside_a_heredoc_body_is_never_edited(tmp_path):
+    text = RB + "DOC = <<~EOS\n  Example:\n  Stripe::Subscription.update('sub_1', billing_cycle_anchor: 'now')\nEOS\n"
+    plan = plan_v2(tmp_path, {"a.rb": text})
+    assert plan.fixes == [] and whys(plan) == [("billing_cycle_anchor", "in_string")], plan.to_dict()
+
+
+def test_a_call_after_the_heredoc_ends_is_still_fixed(tmp_path):
+    text = RB + ("DOC = <<-EOS\n  Stripe::Subscription.update('sub_1', billing_cycle_anchor: 'now')\n  EOS\n"
+                 "Stripe::Subscription.update('sub_2', billing_cycle_anchor: 'now')\n")
+    plan = plan_v2(tmp_path, {"a.rb": text})
+    assert [(s.line, s.target) for f in plan.fixes for s in f.sites] == [(6, "billing_cycle_anchor")]
+    assert whys(plan) == [("billing_cycle_anchor", "in_string")]
+    assert "update('sub_2', billing_cycle_anchor: { type: 'now' })" in plan.fixes[0].content
+    assert "update('sub_1', billing_cycle_anchor: 'now')" in plan.fixes[0].content
+
+
+@pytest.mark.parametrize("text,bodies", [
+    ("a = <<~EOS\n  x\nEOS\nb\n", ["  x\nEOS\n"]),
+    ("a = <<EOS\nx\n  EOS\nEOS\nb\n", ["x\n  EOS\nEOS\n"]),  # without ~ or - the closer must start the line
+    ("f(<<~A, <<~B)\n  one\nA\n  two\nB\nc\n", ["  one\nA\n", "  two\nB\n"]),
+    ("a = <<~'EOS'\n  #{x}\nEOS\n", ["  #{x}\nEOS\n"]),
+    ("a = <<~EOS\n  never closed\n", ["  never closed\n"]),
+    ("a = b << c\n", []),
+])
+def test_heredoc_bodies(text, bodies):
+    assert [text[a:b] for a, b in fixscope.ruby_heredocs(text)] == bodies
+
+
 # --- renames: the same guard (review item b) ------------------------------------------------
 
 PI = "stripe.paymentIntents.create({ %s });\n"

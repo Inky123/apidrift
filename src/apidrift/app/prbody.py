@@ -34,6 +34,7 @@ UNFIXABLE_WHY = {
     "cap": "the repository has more files to fix than one pull request carries",
     "unsupported_key_form": "the key is written in a form apidrift does not rewrite",
     "sdk_no_rewrite": "stripe-go models this field its own way and apidrift has no verified rewrite for it",
+    "in_string": "the call sits inside a heredoc or string, so it is text rather than code",
     "unbounded": "the code around this call can change variables in ways apidrift cannot follow, or the file "
     "cannot be read with certainty",
     "helper_shared": "the parameters come from a helper whose result is also used for something other than this "

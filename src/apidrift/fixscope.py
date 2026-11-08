@@ -135,6 +135,38 @@ def _line_start(text: str, i: int) -> bool:
     return j < 0 or text[j] in "\r\n"
 
 
+HEREDOC = re.compile(r"<<([~-]?)([\"'`]?)([A-Za-z_]\w*)\2")
+
+
+def ruby_heredocs(text: str) -> list[tuple[int, int]]:
+    """(start, end) of every Ruby heredoc body: text the scanner may read as code but that is a string, so
+    nothing in it may be edited. Every ``<<WORD`` outside a body already found counts, even one in a string
+    or comment, or an ``a <<B`` append: reading too much as a heredoc only refuses edits."""
+    out: list[tuple[int, int]] = []
+    last_line = -1
+    for m in HEREDOC.finditer(text):
+        if any(a <= m.start() < b for a, b in out):
+            continue
+        nl = text.find("\n", m.end())
+        line_of = text.rfind("\n", 0, m.start())
+        # a second opener on the same line (``f(<<~A, <<~B)``): its body follows the first one's
+        start = out[-1][1] if out and line_of == last_line else (nl + 1 if nl >= 0 else len(text))
+        last_line = line_of
+        squiggly, word, i = m.group(1) in ("~", "-"), m.group(3), start
+        end = len(text)
+        while i < len(text):
+            j = text.find("\n", i)
+            line = text[i : j if j >= 0 else len(text)].rstrip("\r")
+            if (line.strip() if squiggly else line) == word:
+                end = j + 1 if j >= 0 else len(text)
+                break
+            if j < 0:
+                break
+            i = j + 1
+        out.append((start, end))
+    return out
+
+
 def _unsafe_interpolations(src: Source, i: int, end: int, *, strict: bool) -> bool:
     """Interpolations (``${...}``, Ruby ``#{...}``) in the string at ``i`` hold code: scan it the same way."""
     text, quote = src.text, src.text[i]
