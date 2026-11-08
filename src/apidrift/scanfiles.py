@@ -54,12 +54,17 @@ def iter_files(root: Path, suffixes: set[str]) -> tuple[list[Path], int, int]:
     return files, skipped_files, skipped_dirs
 
 
+BOM = b"\xef\xbb\xbf"
+
+
 def read(path: Path) -> str | None:
-    """The file's text, or None when it cannot be read or is binary (a NUL in its first 8 KB)."""
+    """The file's text, or None when it cannot be read or is binary (a NUL in its first 8 KB). A UTF-8 byte
+    order mark is dropped: Python's parser rejects it and the other readers would see it as a character
+    (lines are unchanged; the fixer reads the file itself and places its edits in what it read)."""
     try:
         raw = path.read_bytes()
     except OSError:
         return None
     if b"\x00" in raw[:8192]:
         return None
-    return raw.decode("utf-8", errors="replace")
+    return raw[3:].decode("utf-8", errors="replace") if raw.startswith(BOM) else raw.decode("utf-8", errors="replace")

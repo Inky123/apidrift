@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import crosstable, goparse, httplit, httpurl, httpwrap, jsparse, phpparse, phpvendor, pyparse, pyrepo, scanfiles
+from . import crosstable, goparse, httplit, httpurl, httpwrap, jsparse, phpparse, phpvendor, pyparse, pyrepo, pysyntax, scanfiles
 from .scanfiles import BUILD_DIRS, MAX_BYTES, PROJECT_FILES, SKIP_DIRS, SKIP_NAMES  # noqa: F401 - the scan's file rules
 from .sdkmap import Resolved, SdkIndex
 
@@ -231,7 +231,7 @@ def scan_text(
     found: list[Usage] = []
     unread_name: str | None = None
     if language == "python":
-        found, missing = _scan_python(text, rel, index, reads, table, repo=repo)
+        found, missing, unread_name = _scan_python(text, rel, index, reads, table, repo=repo)
     elif language == "go":
         found, missing, unread_name = _scan_go(text, rel, index, table)
     elif language:
@@ -320,12 +320,15 @@ def _resolve(index: SdkIndex, chain: list[str]) -> Resolved | None:
 
 
 def _scan_python(text: str, rel: str, index: SdkIndex, reads: frozenset[str], table=None, *, repo=None):
-    found, missing = pyparse.extract(text, lambda chain: _resolve(index, chain), table, rel, repo=repo)
+    try:
+        found, missing = pyparse.extract(text, lambda chain: _resolve(index, chain), table, rel, repo=repo, strict=True)
+    except pysyntax.Unparsable:  # a syntax this Python rejects, a NUL byte, nesting too deep: say it was not read
+        return [], [], "Python (unparsable)"
     usages = [
         Usage(rel, f.line, f.resolved.method, f.resolved.path, f.call, frozenset(f.fields), f.complete, "python", reads, f.hidden)
         for f in found
     ]
-    return usages, [(rel, line, call) for line, call in missing]
+    return usages, [(rel, line, call) for line, call in missing], None
 
 
 # --- Go -----------------------------------------------------------------------

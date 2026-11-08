@@ -19,6 +19,10 @@ OPEN, CLOSE = "([{", ")]}"
 UNPARSABLE = (SyntaxError, ValueError, RecursionError, MemoryError)  # MemoryError: too deeply nested to parse
 
 
+class Unparsable(Exception):
+    """The file could not be read at all (``pyparse.calls(strict=True)``): the scan counts it as unread."""
+
+
 def parse(text: str) -> ast.Module | None:
     """The module, or None when it cannot be read (the caller then reads nothing in it)."""
     try:

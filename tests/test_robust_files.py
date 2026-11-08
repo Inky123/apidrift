@@ -38,3 +38,38 @@ def test_a_fifo_or_socket_named_like_source_is_skipped_not_read(tmp_path, monkey
         result = scan_repo(tmp_path, index)
     assert sorted(u.file for u in result.usages) == ["real/real.js", "real/real.py"]
     assert result.skipped_files == 2 and result.files_scanned == 2
+
+
+def test_a_utf8_byte_order_mark_is_dropped_before_every_reader(tmp_path, index):
+    write(tmp_path, {"src/bom.py": "﻿" + PY, "src/bom.js": "﻿" + JS, "src/bom.php": "﻿" + PHP})
+    result = scan_repo(tmp_path, index)
+    assert sorted((u.file, u.line, u.path) for u in result.usages) == [
+        ("src/bom.js", 2, "/v1/charges"), ("src/bom.php", 3, "/v1/charges"), ("src/bom.py", 2, "/v1/charges"),
+    ]
+    assert result.unread == {} and all(u.fields == {"amount", "currency"} for u in result.usages)
+
+
+def test_a_python_file_the_parser_rejects_is_counted_as_unread_not_dropped(tmp_path, index):
+    late_nul = (PY + "x = 1\n" * 2000).encode() + b"\x00" * 100 + PY.encode()  # a NUL after the first 8 KB
+    write(tmp_path, {"src/latenul.py": late_nul, "src/bad.py": "import stripe\ndef (:\n", "src/ok.py": PY})
+    result = scan_repo(tmp_path, index)
+    assert [u.file for u in result.usages] == ["src/ok.py"]
+    assert result.unread == {"Python (unparsable)": 2} and result.skipped_files == 0
+    assert "2 Python (unparsable) files mention Stripe and were not checked" in __import__("apidrift.scanner").scanner.render_scan_text(result)
+
+
+def test_fixes_in_bom_files_place_their_edits_in_the_bytes_on_disk(tmp_path):
+    """The fixer reads the file itself, mark included, and the App re-derives the content from the same bytes:
+    the mark stays and the edit lands on the right key. Python's parser rejects the mark, so there the fix is
+    refused rather than guessed."""
+    from test_fixer import NEW, OLD, changed_lines, plan_for
+
+    js = "﻿const stripe = require('stripe')('sk');\n" f"stripe.paymentIntents.create({{amount: 1, {OLD}: ['card']}});\n"
+    py = "﻿import stripe\n" f"stripe.PaymentIntent.create(amount=1, {OLD}=['card'])\n"
+    plan = plan_for(tmp_path, {"src/pay.js": js, "src/pay.py": py})
+    assert [f.file for f in plan.fixes] == ["src/pay.js"]
+    fix = plan.fixes[0]
+    assert fix.content.startswith("﻿") and changed_lines(fix) == {
+        2: (f"stripe.paymentIntents.create({{amount: 1, {OLD}: ['card']}});", f"stripe.paymentIntents.create({{amount: 1, {NEW}: ['card']}});")
+    }
+    assert [(u.file, u.why) for u in plan.unfixable] == [("src/pay.py", "not_found")]
