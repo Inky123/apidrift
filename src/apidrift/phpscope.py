@@ -224,6 +224,8 @@ class Bindings:
         head = WORD_BEFORE.search(text, max(0, opener - 40), src.back_space(opener))
         word = head.group(1) if head else ""
         if text[opener] == "(":
+            if word == "catch":
+                return True  # ``catch (\Exception $e)``: assigned the exception
             if word == "foreach":
                 return re.search(r"\bas\b", text[opener:pos]) is not None
             if word in BY_REF and src.skip_space(opener + 1) == pos:

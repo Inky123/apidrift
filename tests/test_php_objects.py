@@ -439,3 +439,49 @@ def test_what_takes_the_arguments_by_value_changes_nothing(tmp_path, index, writ
 ])
 def test_no_dispatch_without_the_whole_rule(tmp_path, index, change):
     assert [c for c, _, _, _ in dispatch(tmp_path, index, **change) if c.startswith("edds")] == []
+
+
+# --- names PHP resolves against the file's namespace, catch variables, guarded wrappers ---------------
+
+
+@pytest.mark.parametrize("head,found", [
+    ("namespace App;\n", False),  # App\Stripe\PaymentIntent
+    ("namespace App;\nuse Stripe\\PaymentIntent;\n", True),
+    ("namespace App;\nuse Stripe;\n", True),  # Stripe\PaymentIntent through the imported namespace
+    ("", True),  # no namespace: the global Stripe\PaymentIntent
+])
+def test_a_relative_class_name_is_stripes_only_through_a_use_or_without_a_namespace(index, head, found):
+    typed = "PaymentIntent" if "PaymentIntent;" in head else "Stripe\\PaymentIntent"
+    text = head + f"function f({typed} $pi) {{\n  $pi->confirm(['payment_method_types' => ['card']]);\n}}\n"
+    assert bool(read(text, index)) is found
+    static = "PaymentIntent" if "PaymentIntent;" in head else "Stripe\\PaymentIntent"
+    assert bool(read(head + f"{static}::create(['amount' => 1]);\n", index)) is found
+
+
+def test_a_relative_name_inside_the_vendored_namespace_is_the_vendored_class(tmp_path, index):
+    files = {**vendored(), "app/a.php": H + "// Stripe\nnamespace EDD\\Vendor;\nStripe\\Charge::create(['amount' => 1]);\n",
+             "app/b.php": H + "// Stripe\nnamespace EDD\\Vendor\\Stripe;\nCharge::create(['amount' => 2]);\n"}
+    assert [(f, label) for f, _, _, label, _, _ in scan(tmp_path, files, index) if f.startswith("app/")] == [
+        ("app/a.php", "POST /v1/charges"), ("app/b.php", "POST /v1/charges"),
+    ]
+
+
+def test_a_caught_exception_is_a_binding_of_its_variable(index):
+    text = (
+        "function f($id) {\n"
+        "  try { $pi = \\Stripe\\PaymentIntent::retrieve($id); } catch (\\Exception $pi) { }\n"
+        "  $pi->confirm(['payment_method_types' => ['card']]);\n"
+        "}\n"
+    )
+    assert [c for c, _ in labels(text, index)] == ["\\Stripe\\PaymentIntent::retrieve"]
+
+
+def test_a_second_definition_anywhere_in_the_checkout_drops_the_wrapper(tmp_path, index):
+    mock = H + "function edds_api_request($o, $m, $a = null) { return null; }\n"  # no call_user_func, no ...$
+    assert [c for c, _, _, _ in dispatch(tmp_path, index, **{"tests/mock.php": mock}) if c.startswith("edds")] == []
+
+
+def test_a_wrapper_declared_behind_function_exists_is_still_a_wrapper(tmp_path, index):
+    guarded = FORWARD.replace("function edds_api_request", "if (!function_exists('edds_api_request')) {\nfunction edds_api_request")
+    found = dispatch(tmp_path, index, **{"inc/functions.php": guarded + "}\n"})
+    assert [c for c, _, _, _ in found if c.startswith("edds")][:1] == ["edds_api_request('Charge', 'create')"]

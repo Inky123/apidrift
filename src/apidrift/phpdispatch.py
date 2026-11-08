@@ -163,35 +163,60 @@ def _find(root) -> dict[str, Dispatcher]:
     from .scanner import _iter_files  # the scanner builds on this module
 
     fns: list[_Fn] = []
-    for path in _iter_files(root)[0]:
-        if path.suffix.lower() != ".php":
-            continue
-        try:
-            raw = path.read_bytes()
-        except OSError:
-            continue
-        if b"call_user_func" not in raw and b"...$" not in raw:
-            continue
-        fns += _functions(raw.decode("utf-8", errors="replace"))
-    counts: dict[tuple, int] = {}
-    for fn in fns:
-        counts[fn.key] = counts.get(fn.key, 0) + 1
+    paths = [p for p in _iter_files(root)[0] if p.suffix.lower() == ".php"]
+    for path in paths:
+        raw = _read(path)
+        if raw is not None and (b"call_user_func" in raw or b"...$" in raw):
+            fns += _functions(raw.decode("utf-8", errors="replace"))
+    once: dict[tuple, bool] = {}
+
+    def unique(key) -> bool:  # defined once in every PHP file of the checkout, not only those read above
+        if key not in once:
+            once[key] = _definitions(key, paths) == 1
+        return once[key]
+
     known: dict[tuple, Dispatcher] = {}
     for fn in fns:
-        d = _core(fn) if counts[fn.key] == 1 else None
-        if d is not None:
+        d = _core(fn)
+        if d is not None and unique(fn.key):
             known[fn.key] = d
     for _ in range(MAX_FORWARDS):
         added = False
         for fn in fns:
-            if fn.key in known or counts[fn.key] != 1:
+            if fn.key in known:
                 continue
             d = _forward(fn, known)
-            if d is not None:
+            if d is not None and unique(fn.key):
                 known[fn.key], added = d, True
         if not added:
             break
     return {k[1]: d for k, d in known.items() if k[0] == "func"}
+
+
+def _read(path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _definitions(key: tuple, paths) -> int:
+    """How many times the function (or the class of the method) ``key`` names is declared in ``paths``."""
+    short = key[1] if key[0] == "func" else key[1].rsplit("\\", 1)[-1]
+    count = 0
+    for path in paths:
+        raw = _read(path)
+        if raw is None or short.encode() not in raw.lower():
+            continue
+        src = Lex(raw.decode("utf-8", errors="replace"))
+        if key[0] == "func":
+            count += sum(1 for m in NAMED_FUNC.finditer(src.code) if m.group(1).lower() == short)
+        else:
+            spaces = NAMESPACE.findall(src.code)
+            space = spaces[0] if len(set(spaces)) == 1 else None
+            count += sum(1 for m in CLASS_NAME.finditer(src.code) if _fq(space, m.group(1)) == key[1])
+            count += 1 if len(set(spaces)) > 1 and short in src.code.lower() else 0  # several namespaces: not sure
+    return count
 
 
 def _functions(text: str) -> list[_Fn]:
@@ -227,13 +252,25 @@ def _functions(text: str) -> list[_Fn]:
             if f.namespace is None and spaces:
                 continue
             key = ("method", _fq(f.namespace, classes[holder]), name)
-        elif holder < 0:
+        elif holder < 0 or _guarded(f, holder, classes):
             key = ("func", name)
         else:
             continue  # a function declared inside another: not reachable by name for certain
         out.append(_Fn(key, params, j, src.pairs[j], f))
     f.defs = {fn.key: fn.params for fn in out}
     return out
+
+
+def _guarded(f: _File, brace: int, classes: dict) -> bool:
+    """A function declared inside top-level ``if`` blocks only: ``if (!function_exists('f')) { function f() }``."""
+    src = f.src
+    while brace >= 0:
+        if src.text[brace] != "{" or brace in classes or brace in f.scopes.bodies:
+            return False
+        if f.bindings._head(brace) not in ("if", "else", "elseif"):
+            return False
+        brace = src.parent.get(brace, -1)
+    return True
 
 
 def _fq(namespace: str | None, name: str) -> str:

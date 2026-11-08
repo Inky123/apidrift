@@ -26,6 +26,7 @@ VERB = re.compile(r"(\?->|->|::)\s*([A-Za-z_]\w*)\s*\(")
 NEW = re.compile(r"new\s+(\\?[A-Za-z_][\w\\]*)")
 USE_HEAD = re.compile(r"(?<![\w$>:\\])use\s+(?!function\b|const\b)")
 USE_STOP = re.compile(r"[;(){}]")
+NAMESPACE_DECL = re.compile(r"(?<![\w$>:\\])namespace\s+([A-Za-z_][\w\\]*)\s*[;{]")
 USE_REACH = 4000  # an import statement longer than this is not read
 CLIENT = re.compile(
     r"(?:\$this\s*->\s*|\$)([A-Za-z_]\w*)\s*=\s*new\s+(\\?[A-Za-z_][\w\\]*)"  # $stripe = new StripeClient(
@@ -247,6 +248,9 @@ def _uses(src: Lex) -> dict[str, list[str]]:
             parts = [p for p in name.strip().split("\\") if p]
             if parts and all(re.fullmatch(r"\w+", p) for p in parts):
                 out[alias.strip() or parts[-1]] = parts
+    spaces = {m.group(1) for m in NAMESPACE_DECL.finditer(code)}
+    if spaces:  # under "": the file's namespace, which a name no ``use`` covers is relative to
+        out[""] = [p for p in spaces.pop().split("\\") if p] if len(spaces) == 1 else ["?"]
     return out
 
 
@@ -256,7 +260,9 @@ def _qualify(name: str, uses: dict[str, list[str]]) -> list[str]:
     parts = [p for p in name.split("\\") if p]
     if name.startswith("\\") or not parts:
         return phpvendor.unprefix(parts)
-    return phpvendor.unprefix(uses.get(parts[0], [parts[0]]) + parts[1:])
+    if parts[0] in uses:
+        return phpvendor.unprefix(uses[parts[0]] + parts[1:])
+    return phpvendor.unprefix(uses.get("", []) + parts)  # ``namespace App; Stripe\X`` is App\Stripe\X
 
 
 def _clients(src: Lex, uses: dict[str, list[str]]) -> set[str]:
