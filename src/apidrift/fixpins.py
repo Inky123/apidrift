@@ -26,7 +26,12 @@ PIN_HEAD = re.compile(
     r"""|\bsetApiVersion\("""
 )
 VERSION = re.compile(r"(\d{4}-\d{2}-\d{2}(?:\.[A-Za-z]\w*)?)(?:;[^\n]*)?")  # the whole string; a beta suffix after ";"
-CONTINUES = ("?", ":", "||", "&&", "??", ".", "+", "or ", "and ", "if ", "else", "unless ")
+# A line break continues the value only after an operator that cannot end a statement (or before one that
+# cannot start a statement, in JS-like languages). Never on words (``if``, ``unless``, ``else``, ``or``): in Ruby
+# and Python those start or modify a new statement. Ruby/Python ``?``/``:`` end method names and block heads.
+TRAILING = {"any": ("||", "&&", "+", "-", "*", "\\"), "js": ("||", "&&", "??", "+", "-", "*", "?", ":", "\\")}
+LEADING_JS = ("?", ":", "||", "&&", "??")
+JS_LIKE = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".vue", ".svelte", ".php"}
 
 
 KINDS = ("server", "test", "browser")
@@ -93,28 +98,34 @@ class Kinds:
         return "server"
 
 
-def pin_versions(text: str) -> list[tuple[int, str]]:
-    """(offset, version) of every pinned version string in ``text``, in order, once per statement."""
+def pin_versions(text: str, js: bool = True) -> list[tuple[int, str]]:
+    """(offset, version) of every pinned version string in ``text``, in order, once per statement. ``js``: a
+    language where a line break never ends a statement on its own (JS/TS, PHP); False for Ruby and Python."""
     out: list[tuple[int, str]] = []
     for m in PIN_HEAD.finditer(text):
+        line = text[text.rfind("\n", 0, m.start()) + 1 : m.start()].lstrip()
+        if line.startswith(("//", "#", "*", "/*", "--")):
+            continue  # a commented-out line: not a pin
         seen: set[str] = set()
-        for pos, version in _strings(text, m.end()):
+        for pos, version in _strings(text, m.end(), js):
             if version not in seen:
                 seen.add(version)
                 out.append((pos, version))
     return out
 
 
-def _strings(text: str, i: int) -> list[tuple[int, str]]:
+def _strings(text: str, i: int, js: bool = True) -> list[tuple[int, str]]:
     """Version strings in the expression starting at ``i``."""
     n = len(text)
     while i < n and text[i] in " \t":
         i += 1
     if i < n and text[i] in "=~>":  # ``api_version == x``, ``=~``: a comparison, not an assignment
         return []
-    stop, depth, found = min(n, i + MAX_EXPRESSION), 0, []
+    stop, depth, found, code_end = min(n, i + MAX_EXPRESSION), 0, [], i  # code_end: past the last code character
     while i < stop:
         c = text[i]
+        if not c.isspace() and c != "#" and not text.startswith(("//", "/*"), i):
+            code_end = i + 1
         if c in "'\"`":
             end = _string_end(text, i)
             if end < 0:
@@ -122,7 +133,7 @@ def _strings(text: str, i: int) -> list[tuple[int, str]]:
             m = VERSION.fullmatch(text, i + 1, end)
             if m:
                 found.append((i, m.group(1)))
-            i = end + 1
+            i = code_end = end + 1
         elif c in "([{":
             depth += 1
             i += 1
@@ -135,11 +146,14 @@ def _strings(text: str, i: int) -> list[tuple[int, str]]:
             break
         elif c == "=" and depth == 0 and text[i - 1] not in "=!<>" and text[i + 1 : i + 2] not in ("=", ">", "~"):
             break  # a second assignment: another statement
+        elif text.startswith("/*", i):
+            close = text.find("*/", i + 2)
+            i = n if close < 0 else close + 2
         elif c == "#" or text.startswith("//", i):
             nl = text.find("\n", i)
             i = n if nl < 0 else nl
         elif c == "\n" and depth == 0:
-            if not _continues(text, i):
+            if not _continues(text, code_end, i, js):
                 break
             i += 1
         else:
@@ -163,13 +177,17 @@ def _string_end(text: str, i: int) -> int:
     return -1
 
 
-def _continues(text: str, nl: int) -> bool:
-    """A line break inside the value: the line ends in an operator, or the next line starts with one."""
-    before = text[:nl].rstrip()
-    if before.endswith(("?", ":", "||", "&&", "??", "(", "+", " or", " and", " if", " else", "\\")):
+def _continues(text: str, code_end: int, nl: int, js: bool) -> bool:
+    """A line break inside the value: the code before it ends in a binary operator, or (JS-like) the next line
+    starts with one. ``code_end``: just past the last code character before the break (comments excluded)."""
+    if text[max(0, code_end - 2) : code_end].endswith(TRAILING["js" if js else "any"]):
         return True
-    after = text[nl + 1 :].lstrip(" \t")
-    return after.startswith(CONTINUES)
+    if not js:
+        return False
+    j = nl + 1
+    while j < len(text) and text[j] in " \t":
+        j += 1
+    return text.startswith(LEADING_JS, j)
 
 
 def find_pins(root: Path, fixed: list[str]) -> list[Pin]:
@@ -200,7 +218,7 @@ def find_pins(root: Path, fixed: list[str]) -> list[Pin]:
             continue
         rel = path.relative_to(base).as_posix()
         kinds = None
-        for pos, version in pin_versions(text):
+        for pos, version in pin_versions(text, path.suffix.lower() in JS_LIKE):
             kinds = kinds or Kinds(rel, text)  # once per file
             pins.append(Pin(rel, text.count("\n", 0, pos) + 1, version, kinds.of(pos)))
             if len(pins) >= MAX_PINS:

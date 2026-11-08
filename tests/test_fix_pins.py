@@ -52,6 +52,34 @@ def test_strings_outside_the_pin_statement_are_not_pins(text):
     assert versions(text) == []
 
 
+@pytest.mark.parametrize("text,js", [
+    # review item 5: a statement keyword or a method name ending in ? does not continue the pin's statement
+    ('Stripe.api_version = ENV.fetch("STRIPE_API_VERSION")\nif Rails.env.test?\n  Timecop.freeze(Date.parse("2024-01-01"))\nend\n',
+     False),
+    ('Stripe.api_version = ENV["V"] if Rails.env.test?\nTimecop.freeze(Date.parse("2024-01-01"))\n', False),
+    ('stripe.api_version = os.environ["STRIPE_API_VERSION"]\nif settings.DEBUG:\n    logger.info("x %s", "2024-01-01")\n',
+     False),
+    ("stripe.api_version = settings.V or\nlog('2024-01-01')\n", False),  # a word is never a continuation
+    ('const stripe = new Stripe(key, { apiVersion: process.env.V })\n.on("x", () => track("2024-01-01"))\n', True),
+    ("const o = { apiVersion: v }\nunless('2024-01-01')\n", True),
+    ("// apiVersion: '2020-08-27' was the old one\nconst stripe = new Stripe(key)\n", True),
+    ("# Stripe.api_version = '2020-08-27'\n", False),
+])
+def test_an_unrelated_next_line_is_not_part_of_the_pin(text, js):
+    assert pin_versions(text, js) == []
+
+
+@pytest.mark.parametrize("text,js,want", [
+    ("Stripe.api_version = ENV.fetch('V') ||\n  '2023-10-16'\n", False, ["2023-10-16"]),
+    ("stripe.api_version = os.environ.get('V') \\\n    or '2023-10-16'\n", False, ["2023-10-16"]),
+    ("stripe.api_version = os.environ.get(\n    'V', '2023-10-16'\n)\n", False, ["2023-10-16"]),
+    ("const s = new Stripe(k, { apiVersion: test ?\n  '2023-10-16' :\n  '2024-04-10' })\n", True, ["2023-10-16", "2024-04-10"]),
+    ("const s = new Stripe(k, { apiVersion: /* don't */ '2020-08-27' })\n", True, ["2020-08-27"]),
+])
+def test_a_value_continued_by_an_operator_or_bracket(text, js, want):
+    assert [v for _, v in pin_versions(text, js)] == want
+
+
 def test_find_pins_reports_the_gumroad_server_pin(tmp_path):
     (tmp_path / "Gemfile").write_text("gem 'stripe'\n")
     init = tmp_path / "config" / "initializers"
