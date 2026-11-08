@@ -14,6 +14,8 @@ import re
 from . import httpurl, httpwrap
 
 RAW = {"raw_request", "raw_request_async"}
+CALL = re.compile(r"([A-Za-z_]\w*)\s*\(")
+IMPORT_LINE = re.compile(r"(?m)^\s*from\s+\S+\s+import\s+\(?([^)\n]*)")
 OPTIONS = {
     "stripe_version", "stripe_account", "stripe_context", "api_key", "idempotency_key", "api_mode", "headers",
     "max_network_retries", "usage", "base_address", "options",
@@ -233,7 +235,10 @@ def _parse(text: str):
 
 def survey(text: str, rel: str):
     defined = set(re.findall(r"(?m)^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)", text))
-    called = set(re.findall(r"([A-Za-z_]\w*)\s*\(", text)) if defined or "(" in text else set()
+    called = httpwrap.called_names(text, CALL) if "(" in text else {}
+    for m in IMPORT_LINE.finditer(text):  # ``from .api import post as stripe_post``: the wrapper's own name
+        for name in re.findall(r"[A-Za-z_]\w*", m.group(1)):
+            called.setdefault(name, True)
     if "stripe.com" not in text:
         return [], defined, called
     tree = _parse(text)
@@ -250,16 +255,24 @@ def sites(text: str, rel: str, index, reads: frozenset[str], language: str, regi
     consts = _consts(tree)
     out = _raw_sites(tree, text, rel, index, reads, language, consts) if "raw_request" in text else []
     here = _wrappers(tree, rel, consts)
+    names, modules = _imports(tree, rel)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         f = node.func
         for w in here + known:
-            if isinstance(f, ast.Name) and f.id == w.name and not w.is_method:
-                if w.rel != rel and not (registry and registry.unique("python", w.name)):
+            if w.is_method:  # ``self.call(...)`` in the wrapper's own class only
+                if not (isinstance(f, ast.Attribute) and f.attr == w.name and isinstance(f.value, ast.Name)
+                        and f.value.id == "self" and w.rel == rel):
                     continue
-            elif isinstance(f, ast.Attribute) and f.attr == w.name and w.is_method:
-                if not (isinstance(f.value, ast.Name) and f.value.id == "self" and w.rel == rel):
+            elif isinstance(f, ast.Name):
+                if w.rel == rel:
+                    if f.id != w.name or f.id in names:
+                        continue  # an imported name shadows the local function
+                elif not (f.id in names and names[f.id][1] == w.name and _same(names[f.id][0], w.rel)):
+                    continue  # ``from hubspot import post`` is not this wrapper
+            elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.attr == w.name:
+                if not (f.value.id in modules and _same(modules[f.value.id], w.rel)):
                     continue
             else:
                 continue
@@ -267,6 +280,40 @@ def sites(text: str, rel: str, index, reads: frozenset[str], language: str, regi
             if u is not None:
                 out.append(u)
     return out
+
+
+def _imports(tree: ast.Module, rel: str) -> tuple[dict[str, tuple[tuple[str, ...], str]], dict[str, tuple[str, ...]]]:
+    """(name -> (module, imported name)) for ``from m import n as a``, (alias -> module) for ``import m as a``;
+    relative imports resolved against this file's directory (a leading "" marks a resolved path)."""
+    here = rel.split("/")[:-1]
+    names, modules = {}, {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            parts = tuple((node.module or "").split(".")) if node.module else ()
+            if node.level:
+                up = here[: len(here) - (node.level - 1)] if node.level - 1 <= len(here) else None
+                if up is None:
+                    continue
+                parts = ("",) + tuple(up) + parts
+            for a in node.names:
+                names[a.asname or a.name] = (parts, a.name)
+                modules.setdefault(a.asname or a.name, parts + (a.name,))  # ``from pkg import module``
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.asname or "." not in a.name:
+                    modules[a.asname or a.name] = tuple(a.name.split("."))
+    return names, modules
+
+
+def _same(module: tuple[str, ...], rel: str) -> bool:
+    """Whether an imported module is the file ``rel``: a resolved relative path is equal, an absolute
+    module name is the tail of the path (``app.stripe_api`` for ``src/app/stripe_api.py``)."""
+    parts = rel[: -len(".py")].split("/") if rel.endswith(".py") else rel.split("/")
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+    if module and module[0] == "":
+        return list(module[1:]) == parts
+    return bool(module) and parts[-len(module):] == list(module)
 
 
 def _call_site(node: ast.Call, w: httpwrap.Wrapper, text, rel, index, reads, language, consts):

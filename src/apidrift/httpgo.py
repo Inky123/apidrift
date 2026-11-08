@@ -13,16 +13,43 @@ from __future__ import annotations
 
 import json
 import re
+from typing import NamedTuple
 
-from . import httpurl, httpwrap
+from . import httpgoform, httpurl, httpwrap
 from .golex import ID, OP, SEMI, STR, GoSource
 
 HTTP_CALLS = {"NewRequest": (0, 1, 2), "NewRequestWithContext": (1, 2, 3), "Get": (None, 0, None),
               "Post": (None, 0, 2), "PostForm": (None, 0, 1), "Head": (None, 0, None)}  # (method, url, body)
 FIXED = {"Get": "get", "Post": "post", "PostForm": "post", "Head": None}
-TRIMS = {"TrimRight", "TrimSuffix", "TrimSpace", "TrimPrefix", "TrimLeft", "Trim"}
+TRIMS = {"TrimRight", "TrimSuffix", "TrimSpace"}  # shape-keeping: only a "/" or space comes off
 FUNC_NAME = re.compile(r"(?m)^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)")
 VERB = re.compile(r"%[-+# 0]*\d*(?:\.\d+)?([a-zA-Z%])")
+
+
+def field_base(assigns, owner: str, field: str) -> str | None:
+    values = {v for t, f, v in assigns if f == field and t in (owner, "")}
+    if not any(t == owner for t, f, v in assigns if f == field) or None in values or len(values) != 1:
+        return None
+    return values.pop()
+
+
+class GoFunc(NamedTuple):
+    name: str
+    method: bool
+    params: tuple[str, ...]
+    lo: int  # body ``{``
+    hi: int  # its ``}``
+    recv_var: str = ""
+    recv_type: str = ""
+    types: tuple[str, ...] = ()  # each parameter's type name (``*Config`` -> ``Config``), "" when unknown
+
+
+def _type_name(g, a: int, b: int) -> str:
+    """The named type a type expression ends in: ``*Config`` / ``pay.Config`` -> ``Config``; "" otherwise."""
+    toks = [g.tok[k] for k in range(a, b) if g.tok[k] not in ("*", "&")]
+    if not toks or g.kind[a + (b - a) - 1] != ID or any(t in ("[", "]", "map", "func", "chan") for t in toks):
+        return ""
+    return toks[-1]
 
 
 def _str(tok: str) -> str:
@@ -39,36 +66,97 @@ class File:
         self.text = text
         self.g = g = GoSource(text)
         self.consts: dict[str, str] = {}
-        self.fields: dict[str, set[str | None]] = {}
+        self.assigns: list[tuple[str, str, str | None]] = []  # (struct type or "", field, the Stripe base it is set to)
+        self.base_field: tuple[str, str] | None = None  # the last field :meth:`value` read a base from
         for i in range(g.n - 3):
             if g.kind[i] == ID and g.tok[i + 1] == "=" and g.kind[i + 2] == STR and g.func_of(i) < 0:
                 if g.kind[i + 3] == SEMI or g.tok[i + 3] == ")":
                     if i == 0 or g.tok[i - 1] != ".":
                         self.consts.setdefault(g.tok[i], _str(g.tok[i + 2]))
-        for i in range(1, g.n - 2):
-            if g.tok[i - 1] == "." and g.kind[i] == ID and g.tok[i + 1] == "=":
-                j = i + 2
-                end = g.stmt_end(j)
-                if not any(g.tok[k] == g.tok[i] and g.tok[k - 1] == "." for k in range(j, end)):
-                    # ``c.URL = strings.TrimRight(c.URL, "/")`` only reshapes what it held
-                    self.fields.setdefault(g.tok[i], set()).add(self.value(j, end))
-        self.funcs: list[tuple[str, bool, tuple[str, ...], int, int]] = []  # name, method, params, body {, }
+        self.funcs: list[GoFunc] = []
         for brace, f in g.funcs.items():
             j = f + 1
             method = g.tok[j] == "("
+            recv_var = recv_type = ""
             if method:
-                j = g.match[j] + 1
+                close = g.match[j]
+                if g.kind[j + 1] == ID and close - (j + 1) > 1:
+                    recv_var = g.tok[j + 1]
+                    recv_type = _type_name(g, j + 2, close)
+                elif close - (j + 1) >= 1:
+                    recv_type = _type_name(g, j + 1, close)
+                j = close + 1
             if g.kind[j] != ID or g.tok[j + 1] != "(":
                 continue
             paren = j + 1
             groups = g.split(paren + 1, g.match[paren])
             named = any(b - a > 1 and g.tok[a] != "..." for a, b in groups)
             params = tuple(g.tok[a] if named and g.kind[a] == ID else "" for a, b in groups)
-            self.funcs.append((g.tok[j], method, params, brace, g.match[brace]))
+            types, last = [], ""
+            for a, b in reversed(groups):  # ``method, path string``: a name alone shares the next type
+                if named and b - a > 1:
+                    last = _type_name(g, a + 1, b)
+                types.append(last if named else _type_name(g, a, b))
+            self.funcs.append(GoFunc(g.tok[j], method, params, brace, g.match[brace], recv_var, recv_type,
+                                     tuple(reversed(types))))
+        for i in range(1, g.n - 2):
+            if g.tok[i - 1] == "." and g.kind[i] == ID and g.tok[i + 1] == "=" and g.kind[i - 2] == ID:
+                j = i + 2
+                end = g.stmt_end(j)
+                if any(g.tok[k] == g.tok[i] and g.tok[k - 1] == "." for k in range(j, end)):
+                    continue  # ``c.URL = strings.TrimRight(c.URL, "/")`` only reshapes what it held
+                fn = self.func_at(i)
+                owner = self.type_of(g.tok[i - 2], fn, i) if fn else ""
+                self.assigns.append((owner, g.tok[i], self._base(self.value(j, end, typed=False))))
+            elif g.brace.get(i) == "lit" and g.kind[i - 1] == ID:  # ``&Paypal{BaseURL: u}``
+                owner = g.tok[i - 1]
+                for x, y in g.split(i + 1, g.match[i]):
+                    if g.kind[x] == ID and g.tok[x + 1] == ":":
+                        self.assigns.append((owner, g.tok[x], self._base(self.value(x + 2, y, typed=False))))
 
-    def value(self, a: int, b: int, depth: int = 0) -> str | None:
-        """The string an expression holds when it is a literal, a constant, a field always set to one
-        Stripe base, or a ``strings.Trim*`` of one."""
+    @staticmethod
+    def _base(value: str | None) -> str | None:
+        return value if value is not None and httpurl.is_base(value.rstrip("/") + "/") else None
+
+    def func_at(self, i: int) -> GoFunc | None:
+        inside = [fn for fn in self.funcs if fn.lo < i < fn.hi]
+        return max(inside, key=lambda fn: fn.lo) if inside else None
+
+    def type_of(self, var: str, fn: GoFunc | None, at: int) -> str:
+        """The named type of a receiver, parameter or local (``x := &T{}``, ``var x *T``); "" when unknown."""
+        g = self.g
+        if fn is None:
+            return ""
+        if var == fn.recv_var:
+            return fn.recv_type
+        if var in fn.params:
+            return fn.types[fn.params.index(var)] if fn.params.index(var) < len(fn.types) else ""
+        defs = self.assignments(var, fn, at)
+        if len(defs) != 1:
+            return ""
+        i, op, span = defs[0]
+        if span is None:
+            if g.tok[i - 1] == "var":
+                return _type_name(g, i + 1, g.stmt_end(i + 1))
+            return ""
+        a, b = span
+        if g.tok[a] == "&":
+            a += 1
+        if g.tok[a] == "new" and g.tok[a + 1] == "(":
+            return _type_name(g, a + 2, g.match[a + 1])
+        k = a
+        while k + 2 < b and g.tok[k + 1] == ".":
+            k += 2
+        return g.tok[k] if g.kind[k] == ID and g.brace.get(k + 1) == "lit" else ""
+
+    def field_base(self, owner: str, field: str, evidence=None) -> str | None:
+        """The one Stripe base every assignment of ``owner.field`` sets (this file's, or the package's
+        when ``evidence`` is given); an assignment through a value of unknown type counts against it."""
+        return field_base(self.assigns if evidence is None else evidence, owner, field)
+
+    def value(self, a: int, b: int, depth: int = 0, typed: bool = True, fn=None) -> str | None:
+        """The string an expression holds when it is a literal, a constant, a field of a struct type only
+        ever set to a Stripe base (``typed``), or a ``strings.Trim*`` of one."""
         g = self.g
         if depth > 4:
             return None
@@ -82,17 +170,18 @@ class File:
             opener = g.match[b - 1]
             if opener - 1 >= a and g.tok[opener - 1] in TRIMS and opener - 3 >= a and g.tok[opener - 3] == "strings":
                 args = g.split(opener + 1, b - 1)
-                if args:
-                    inner = self.value(*args[0], depth + 1)
+                cut = "".join(g.tok[x] for x, y in args[1:2] for x in range(x, y)) if len(args) > 1 else '"/"'
+                if args and (g.tok[opener - 1] == "TrimSpace" or cut in ('"/"', "`/`")):
+                    inner = self.value(*args[0], depth + 1, typed, fn)
                     if inner is not None and httpurl.is_base(inner.rstrip("/") + "/"):
                         return inner.rstrip("/")
             return None
-        if b - a >= 3 and all(g.tok[k] == "." for k in range(a + 1, b, 2)) and g.kind[b - 1] == ID:
-            values = self.fields.get(g.tok[b - 1], set())
-            got = set(values)
-            if values and None not in got and len(got) == 1:
-                one = got.pop()
-                return one if httpurl.is_base(one.rstrip("/") + "/") else None
+        if typed and b - a == 3 and g.tok[a + 1] == "." and g.kind[a] == ID and g.kind[b - 1] == ID:
+            owner = self.type_of(g.tok[a], fn or self.func_at(a), a)
+            got = self.field_base(owner, g.tok[b - 1]) if owner else None
+            if got is not None:
+                self.base_field = (owner, g.tok[b - 1])
+            return got
         return None
 
     def operand_start(self, k: int) -> int:
@@ -192,15 +281,17 @@ class File:
         return g.tok[b + 1] if g.tok[b + 1] in (":=", "=") else None
 
 
-def _direct(f: File, name: str, method_: bool, params: tuple[str, ...], lo: int, hi: int, rel: str):
-    g = f.g
+def _direct(f: File, fn: GoFunc, rel: str):
+    g, params, lo, hi = f.g, fn.params, fn.lo, fn.hi
     for k in range(lo, hi):
         if not (g.kind[k] == OP and g.tok[k] == "+" and g.kind[k + 1] == ID and g.tok[k + 1] in params):
             continue
         if g.tok[k + 2] in (".", "[", "(") or g.tok[k - 1] in ("+",):
             continue
         start = f.operand_start(k)
-        base = f.value(start, k)
+        f.base_field = None
+        base = f.value(start, k, fn=fn)
+        field = f.base_field
         if base is None or not httpurl.is_base(base):
             continue
         path = params.index(g.tok[k + 1])
@@ -226,26 +317,39 @@ def _direct(f: File, name: str, method_: bool, params: tuple[str, ...], lo: int,
                     body = used.pop()
                 else:
                     body_seen = False
-        adds, rewrites = (_writes(f, params[body], lo, opener) if body is not None else (set(), False))
+        adds, rewrites, maybe = set(), False, ()
+        if body is not None:
+            adds, rewrites, maybe = httpgoform.writes(f, params[body], lo, opener, fn, params[path])
         return httpwrap.Wrapper(
-            "go", rel, name, "", base, path, method, method_param, body, body_seen, rewrites, frozenset(adds),
-            tuple(None for _ in params), method_, g.line(lo),
+            "go", rel, fn.name, fn.recv_type if fn.method else "", base, path, method, method_param, body, body_seen,
+            rewrites, frozenset(adds), tuple(None for _ in params), fn.method, g.line(lo), field=field, maybe=maybe,
         )
     return None
+
+
+def _is_http(f: File, p: int) -> bool:
+    """The call at ``(`` ``p`` is net/http's (``http.NewRequest``, ``http.Get``) or a client's
+    (``client.Get``, ``c.httpClient.Post``), not ``cache.Get``."""
+    g = f.g
+    if f.callee(p) not in HTTP_CALLS or p < 3 or g.tok[p - 2] != ".":
+        return False
+    owner = g.tok[p - 3]
+    return owner == "http" or (f.callee(p) not in ("NewRequest", "NewRequestWithContext")
+                               and re.search(r"client|http", owner, re.I) is not None)
 
 
 def _consumer(f: File, start: int, end: int, lo: int, hi: int) -> tuple[int, str] | None:
     """The HTTP call whose URL argument is the join at ``[start, end)``, directly or through a local."""
     g = f.g
     p = g.parent[start]
-    if p >= 0 and g.tok[p] == "(" and f.callee(p) in HTTP_CALLS:
+    if p >= 0 and g.tok[p] == "(" and _is_http(f, p):
         return p, f.callee(p)
     if start >= 2 and g.tok[start - 1] in (":=", "=") and g.kind[start - 2] == ID:
         var = g.tok[start - 2]
         for i in g.ids(var):
             if end < i < hi:
                 q = g.parent[i]
-                if q >= 0 and g.tok[q] == "(" and f.callee(q) in HTTP_CALLS:
+                if q >= 0 and g.tok[q] == "(" and _is_http(f, q):
                     args = g.split(q + 1, g.match[q])
                     ui = HTTP_CALLS[f.callee(q)][1]
                     if ui < len(args) and args[ui] == (i, i + 1):
@@ -273,106 +377,22 @@ def _params_in(f: File, a: int, b: int, params, scope, skip) -> set[int]:
     return out
 
 
-def _writes(f: File, name: str, lo: int, hi: int) -> tuple[set[str], bool]:
-    """(field paths added with literal keys, changed in a way that is not visible) for a form ``name``."""
-    g, adds, hidden = f.g, set(), False
-    for i in g.ids(name):
-        if not (lo < i < hi) or (i > 0 and g.tok[i - 1] == "."):
-            continue
-        nxt = g.tok[i + 1] if i + 1 < g.n else ""
-        if nxt == "." and g.tok[i + 2] in ("Set", "Add") and g.tok[i + 3] == "(":
-            args = g.split(i + 4, g.match[i + 3])
-            key = _key(f, args[0]) if args else None
-            if key is None:
-                hidden = True
-            else:
-                adds |= set(key)
-        elif nxt == "[" and g.tok[g.match[i + 1] + 1] == "=":
-            key = _key(f, (i + 2, g.match[i + 1]))
-            hidden = hidden or key is None
-            adds |= set(key or ())
-        elif nxt in ("=", ":=") and g.starts_stmt(i):
-            hidden = True
-        elif nxt == "." and g.tok[i + 2] in ("Encode", "Get", "Has", "Del"):
-            continue
-        elif nxt in (",", ")") and g.parent[i] >= 0 and g.tok[g.parent[i]] == "(":
-            if f.callee(g.parent[i]) not in ("NewReader", "Encode", "len") and "Encode" not in g.tok[i + 1 : i + 3]:
-                hidden = True  # handed to another function, which may add keys
-    return adds, hidden
-
-
-def _key(f: File, span: tuple[int, int]) -> list[str] | None:
-    g = f.g
-    a, b = span
-    if b - a == 1 and g.kind[a] == STR:
-        return httpurl.form_paths(_str(g.tok[a]))
-    if b - a >= 5 and g.tok[a] == "fmt" and g.tok[a + 2] == "Sprintf":
-        args = g.split(a + 4, g.match[a + 3])
-        if args and g.kind[args[0][0]] == STR and args[0][1] - args[0][0] == 1:
-            text = _str(g.tok[args[0][0]])
-            if re.search(r"%(?!d)", text):
-                return None
-            return httpurl.form_paths(text.replace("%d", "0"))
-    return None
-
-
-def _values_literal(f: File, a: int) -> tuple[set[str], bool] | None:
-    """Keys of ``url.Values{...}`` starting at ``a`` (or ``make(url.Values)``): (paths, all visible)."""
-    g = f.g
-    if g.tok[a : a + 4] == ["url", ".", "Values", "{"]:
-        brace = a + 3
-        paths, visible = set(), True
-        for x, y in g.split(brace + 1, g.match[brace]):
-            if g.kind[x] == STR and g.tok[x + 1] == ":":
-                got = httpurl.form_paths(_str(g.tok[x]))
-                if got is None:
-                    visible = False
-                else:
-                    paths |= set(got)
-            else:
-                visible = False
-        return paths, visible
-    if g.tok[a : a + 6] == ["make", "(", "url", ".", "Values", ")"]:
-        return set(), True
-    return None
-
-
-def _body_fields(f: File, span: tuple[int, int], fn, at: int) -> tuple[set[str], bool]:
-    g = f.g
-    a, b = span
-    if b - a == 1 and g.tok[a] == "nil":
-        return set(), True
-    got = _values_literal(f, a)
-    if got is not None and g.match[a + 3 if g.tok[a] == "url" else a + 1] + 1 == b:
-        return got
-    if b - a == 1 and g.kind[a] == ID:
-        name = g.tok[a]
-        defs = f.assignments(name, fn, at)
-        if len(defs) == 1 and defs[0][1] != "+=":
-            i, _, span = defs[0]
-            if span is None:
-                declared = g.tok[i - 1] == "var" and g.tok[i + 1 : i + 4] == ["url", ".", "Values"]
-                got = (set(), True) if declared else None
-            else:
-                got = _values_literal(f, span[0])
-                if got is not None and g.match[span[0] + 3 if g.tok[span[0]] == "url" else span[0] + 1] + 1 != span[1]:
-                    got = None
-            if got is not None:
-                adds, hidden = _writes(f, name, i + 1, at)
-                return got[0] | adds, got[1] and not hidden
-    return set(), False
-
-
 def survey(text: str, rel: str):
-    defined = set(FUNC_NAME.findall(text))
-    called = set(re.findall(r"([A-Za-z_]\w*)\s*\(", text)) if defined or "(" in text else set()
+    """Wrappers of a Go file. Only a file that names a Stripe host is read: callers are found per package
+    directory (:class:`httpwrap.Registry`), so no other file needs a survey."""
     if "stripe.com" not in text:
-        return [], defined, called
-    return _wrappers(File(text), rel), defined, called
+        return [], set(), set()
+    f = File(text)
+    return _wrappers(f, rel), set(), set()
+
+
+def evidence(text: str) -> list[tuple[str, str, str | None]]:
+    """Struct field assignments in a Go file: (type, field, the Stripe base it is set to or None)."""
+    return File(text).assigns if "=" in text or ":" in text else []
 
 
 def _wrappers(f: File, rel: str) -> list[httpwrap.Wrapper]:
-    return [w for name, m, params, lo, hi in f.funcs if (w := _direct(f, name, m, params, lo, hi, rel)) is not None]
+    return [w for fn in f.funcs if (w := _direct(f, fn, rel)) is not None]
 
 
 def sites(text: str, rel: str, index, reads: frozenset[str], language: str, registry) -> list:
@@ -384,7 +404,10 @@ def sites(text: str, rel: str, index, reads: frozenset[str], language: str, regi
     f = File(text)
     g = f.g
     here = _wrappers(f, rel)
-    names = {fn[0] for fn in f.funcs}
+    if registry is not None:  # a field base holds only if the whole package sets that field to it
+        package = registry.go_evidence.get(directory)
+        here = [w for w in here if w.field is None or package is None or field_base(package, *w.field) == w.base]
+    names = {fn.name for fn in f.funcs if not fn.method}
     out = []
     for w in here + known:
         for i in g.ids(w.name):
@@ -393,12 +416,14 @@ def sites(text: str, rel: str, index, reads: frozenset[str], language: str, regi
             dotted = i > 0 and g.tok[i - 1] == "."
             if dotted != w.is_method:
                 continue
-            if dotted and not (registry.unique_in(directory, w.name) if registry is not None else
-                               sum(1 for fn in f.funcs if fn[0] == w.name) == 1):
-                continue
-            if not dotted and w.rel != rel and w.name in names:
+            fn = f.func_at(i)
+            if dotted:  # ``c.do(...)``: only on a value of the wrapper's own receiver type
+                if g.kind[i - 2] != ID or (i > 2 and g.tok[i - 3] == ".") or not w.owner:
+                    continue
+                if f.type_of(g.tok[i - 2], fn, i) != w.owner:
+                    continue
+            elif w.rel != rel and w.name in names:
                 continue  # shadowed by a function of this file
-            fn = next((x for x in f.funcs if x[3] < i < x[4]), None)
             paren = i + 1
             args = g.split(paren + 1, g.match[paren])
             if w.path >= len(args) or any(g.tok[a] == "..." or g.tok[b - 1] == "..." for a, b in args):
@@ -411,7 +436,7 @@ def sites(text: str, rel: str, index, reads: frozenset[str], language: str, regi
                 method = httpurl.method_word(_str(word) if g.kind[a] == STR else word)
             fields, visible = set(), True
             if w.body is not None and w.body < len(args):
-                fields, visible = _body_fields(f, args[w.body], fn, i) if fn else (set(), False)
+                fields, visible = httpgoform.body_fields(f, args[w.body], fn, i) if fn else (set(), False)
             start = i - 2 if dotted else i
             u = httpwrap.build(text, rel, index, w, g.line(start), w.name, pieces, method, fields,
                                set() if visible else {""}, reads, language)

@@ -182,7 +182,8 @@ def test_php_wrapper_calls_in_another_file_are_call_sites_at_the_callers_line(tm
     assert pi.call == "My_Stripe_API::request('payment_intents')"
     assert got[(7, "get", "/v1/payment_intents/{intent}")].fields == {"expand"}
     l3 = got[(8, "post", "/v1/payment_intents/{intent}")]
-    assert l3.fields == {"amount", "level3"} and l3.complete  # the wrapper's own literal key is sent too
+    # review item 7: the wrapper writes level3 only past its early return, so it may or may not be sent
+    assert l3.fields == {"amount"} and not l3.complete and l3.hidden == {"level3"}
     token = got[(6, "get", "/v1/tokens/{token}")]
     assert token.fields == frozenset() and token.complete
 
@@ -211,7 +212,7 @@ def test_php_form_encoded_keys_map_to_field_paths(index):
 
 
 def test_a_wrapper_that_rewrites_the_body_keeps_the_visible_keys_but_hides_the_rest(index):
-    src = API.replace("        return wp_remote_post(", "        $request = apply_filters('body', $request, $api);\n        return wp_remote_post(", 1)
+    src = API.replace("        return wp_remote_post(", "        $request = self::strip($request);\n        return wp_remote_post(", 1)
     src += "My_Stripe_API::request(['payment_method_types' => ['card']], 'payment_intents');\n"
     u = one(src, "a.php", index)
     assert u.fields == {OLD} and not u.complete and "" in u.hidden
