@@ -112,10 +112,14 @@ def _site(site: dict) -> dict:
     }
 
 
-LOCKFILE_RE = re.compile(
-    r"Gemfile\.lock|composer\.lock|go\.mod|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|package\.json|poetry\.lock"
-    r"|uv\.lock|Pipfile\.lock|requirements[A-Za-z0-9_.-]{0,40}\.txt"
-)
+LOCKFILE_RE = {  # each SDK's own lockfiles and manifests: a lock is believed only from its ecosystem's file
+    "stripe-ruby": re.compile(r"Gemfile\.lock"),
+    "stripe-php": re.compile(r"composer\.lock"),
+    "stripe-go": re.compile(r"go\.mod"),
+    "stripe-node": re.compile(r"package-lock\.json|yarn\.lock|pnpm-lock\.yaml|package\.json"),
+    "stripe-python": re.compile(r"poetry\.lock|uv\.lock|Pipfile\.lock|requirements[A-Za-z0-9_.-]{0,40}\.txt"),
+}
+VENDORED = {"node_modules", "vendor"}  # a dependency's own lockfile is not the project's
 
 
 PIN_VERSION_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?:\.[A-Za-z][A-Za-z0-9_]{0,30})?")
@@ -164,7 +168,8 @@ def sdk_locks(items: object, fixes: list[dict]) -> list[dict]:
             continue
         if not isinstance(file, str) or not issue.valid_path(file) or file != PurePosixPath(file).as_posix():
             continue
-        if not LOCKFILE_RE.fullmatch(PurePosixPath(file).name) or any(p in ("", ".", "..") for p in PurePosixPath(file).parts):
+        parts = PurePosixPath(file).parts
+        if not LOCKFILE_RE[sdk].fullmatch(parts[-1]) or any(p in ("", ".", "..") or p in VENDORED for p in parts):
             continue
         if isinstance(line, bool) or not isinstance(line, int) or not 1 <= line <= 10_000_000:
             continue
