@@ -12,6 +12,7 @@ import ast
 from dataclasses import dataclass
 from typing import Callable
 
+from . import pyreach
 from .sdkmap import Resolved
 
 OPTION_KWARGS = {
@@ -70,7 +71,7 @@ def calls(
         return [], []
     aliases = _import_aliases(tree)
     scopes = _PyScopes(tree)
-    binders = pyalias.Binders(tree)
+    binders = scopes.binders
     scopes.options = lambda value: pyself.options_only(value, binders, scopes.parents, repo, OPTION_KWARGS)
     found: list[PyCall] = []
     unresolved: list[tuple[int, str]] = []
@@ -134,6 +135,7 @@ class _PyScopes:
         self.touches: dict[ast.AST | None, dict[str, list[tuple[int, str]]]] = {None: {}}  # reads/deletes of a key
         self.calls: list[tuple[ast.Call, ast.AST | None]] = []
         self.tree = tree
+        self._binders = None
         self.options: Callable[[ast.expr], bool] = lambda value: False  # set by calls(): **self.<request options>
         self._visit(tree, None)
 
@@ -221,6 +223,8 @@ class _PyScopes:
             if candidates or scope is None:
                 break
             scope = self.parent[scope]
+        if self.unmodelled(name, fn, scope):
+            return [], scope, False  # a loop / comprehension / with target (...) may be what the call sees
         enclosing = self._lists_enclosing(call)
         out: list[Binding] = []
         dominated = False
@@ -230,6 +234,24 @@ class _PyScopes:
                 dominated = True
                 break
         return out, scope, dominated
+
+    @property
+    def binders(self):
+        """Every binding form of every name, per real scope (:class:`pyalias.Binders`), built on first use."""
+        if self._binders is None:
+            from .pyalias import Binders  # pyalias builds on this module
+
+            self._binders = Binders(self.tree)
+        return self._binders
+
+    def unmodelled(self, name: str, fn: ast.AST | None, upto: ast.AST | None) -> bool:
+        """``name`` is bound in ``fn`` or a scope out to ``upto`` by a form not followed (:meth:`pyalias.Binders.unmodelled`)."""
+        chain, current = [], fn
+        while True:
+            chain.append(current if current is not None else self.tree)
+            if current is upto or current is None:
+                return self.binders.unmodelled(name, chain)
+            current = self.parent[current]
 
     def shadowed_by_parameter(self, name: str, fn: ast.AST | None, scope: ast.AST | None, dominated: bool) -> bool:
         """A function enclosing the call takes ``name`` as a parameter and no unconditional binding inside it
@@ -309,11 +331,13 @@ class _PyLookup:
 
     def get(self, name: str) -> ast.expr | None:
         if self.at is not None:
-            return self._reaching(name)
+            return pyreach.reaching_literal(self.scopes, name, self.at, self.fn)  # every reaching literal
         scope = self.fn
         while True:
             found = self._in(scope, name)
             if found is not None:
+                if self.scopes.unmodelled(name, self.fn, scope):
+                    return None
                 bound_line, value, _ = found
                 if _as_dict(value, _NOTHING) is None:
                     return None  # bound to something that is not a literal (a call, a parameter)
@@ -322,26 +346,6 @@ class _PyLookup:
             if scope is None:
                 return None
             scope = self.scopes.parent[scope]
-
-    def _reaching(self, name: str) -> ast.expr | None:
-        """The union of every dict literal that can be bound to ``name`` at the call (``if a: p = {...} else:
-        p = {...}``), with later writes folded in, and an unknown entry when one of the bindings is not a
-        literal; None when none is, or a parameter of an enclosing function shadows the name. A binding after
-        the call in a loop that holds the call reaches it too."""
-        s = self.scopes
-        bindings, scope, dominated = s.reaching(name, self.at, self.fn)
-        if not bindings or s.shadowed_by_parameter(name, self.fn, scope, dominated):
-            return None
-        values = [value for _, value, _ in bindings] + s.loop_rebindings(name, self.at, scope)
-        readable = [v for v in values if _as_dict(v, _NOTHING) is not None]
-        if not readable:
-            return None
-        if len(readable) < len(values):  # read what can be read; the rest may send anything (a ``**`` entry)
-            readable.append(ast.Dict(keys=[None], values=[ast.Constant(None)]))
-        value = readable[0] if len(readable) == 1 else _union(readable)
-        first = min(line for line, _, _ in bindings)
-        mutations = [m for m in s.mutations[scope].get(name, ()) if m[0] > first]
-        return _with_mutations(value, mutations) if mutations else value
 
     def _in(self, scope: ast.AST | None, name: str) -> Binding | None:
         candidates = self.scopes.bindings[scope].get(name, [])
@@ -380,20 +384,6 @@ def _constant_keys(node: ast.expr) -> list[str]:
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "dict":
         return [kw.arg for kw in node.keywords if kw.arg]
     return []
-
-
-def _union(values: list[ast.expr]) -> ast.Dict:
-    """One synthetic dict holding every entry of several literals (read for field names only, never edited)."""
-    keys: list[ast.expr | None] = []
-    vals: list[ast.expr] = []
-    for v in values:
-        if isinstance(v, ast.Dict):
-            keys += v.keys
-            vals += v.values
-        else:  # dict(k=v, **rest)
-            keys += [ast.Constant(kw.arg) if kw.arg else None for kw in v.keywords]
-            vals += [kw.value for kw in v.keywords]
-    return ast.Dict(keys=keys, values=vals)
 
 
 def _with_mutations(value: ast.expr, mutations: list[MutationRec]) -> ast.expr:

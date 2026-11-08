@@ -104,6 +104,9 @@ class Binders:
             for child in node.body:
                 self._visit(child, inner)
             return
+        if isinstance(node, ast.AnnAssign) and node.value is None and isinstance(node.target, ast.Name):
+            self._visit(node.annotation, chain)  # ``params: dict``: declares, binds no value
+            return
         if isinstance(node, (ast.Assign, ast.AnnAssign)) and self._simple_assign(node):
             target = node.targets[0] if isinstance(node, ast.Assign) else node.target
             self._bind(scope, target.id, "assign", node)
@@ -148,6 +151,16 @@ class Binders:
                 self.setattr_any = True
 
     # --- reading ---------------------------------------------------------------------------
+
+    def unmodelled(self, name: str, scopes: list[ast.AST]) -> bool:
+        """``name`` is bound in one of ``scopes`` other than by plain assignment or as a parameter: a ``for`` /
+        comprehension / ``with`` / ``except`` target, tuple unpacking, a walrus, an import, ``del``, a nested
+        ``def`` / ``class``, or it is named by ``global`` / ``nonlocal``. The reader follows none of those."""
+        if name in self.declared:
+            return True
+        return any(
+            kind not in ("assign", "param") for scope in scopes for kind, _ in self.by_scope.get(scope, {}).get(name, ())
+        )
 
     def binding(self, name: ast.Name) -> tuple[str, ast.AST] | None:
         """The one binding a loaded name can have, or None (several, none, or declared global/nonlocal)."""
