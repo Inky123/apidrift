@@ -4,6 +4,7 @@ import pytest
 from test_fixer import NEW, OLD, changed_lines, plan_for
 
 from apidrift.app.prbody import _kept
+from apidrift.fixer import render_fix_text
 
 HOOKS = (
     "<?php\n"
@@ -30,6 +31,8 @@ def test_a_webhook_handlers_tested_reads_are_kept_and_the_request_is_fixed(tmp_p
     assert plan.kept == [("Hooks.php", 9)] and plan.leftovers == []
     assert plan.to_dict()["kept"] == [{"file": "Hooks.php", "line": 9}]
     assert "Kept on purpose (reads of a webhook or response payload, unchanged)" in _kept(plan.to_dict(), "o/r", "s")[1]
+    text = render_fix_text(plan, str(tmp_path))  # ``apidrift fix`` lists them too
+    assert "kept on purpose (reads of a webhook or response payload, unchanged):\n  Hooks.php:9" in text
 
 
 REFUSED = [

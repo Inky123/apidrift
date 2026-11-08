@@ -487,6 +487,9 @@ def render_fix_text(plan: FixPlan, root: str) -> str:
     if plan.tests:
         lines += ["", "tests that name the old field (update those that expect the old request):"]
         lines += [f"  {f}:{line}" for f, line in plan.tests]
+    if plan.kept:
+        lines += ["", "kept on purpose (reads of a webhook or response payload, unchanged):"]
+        lines += [f"  {f}:{line}" for f, line in plan.kept]
     if plan.leftovers:
         lines += ["", "still mentions the old name:"]
         lines += [f"  {f}:{line}" for f, line in plan.leftovers]
