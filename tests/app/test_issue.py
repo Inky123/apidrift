@@ -307,3 +307,17 @@ def test_unread_names_are_validated_and_escaped_before_any_body_or_title():
     assert title == "apidrift cannot read Go, C#, C++, .NET or Objective-C call sites in this repository yet"
     assert "<img" not in body and "Heading" not in body
     assert "\n# Heading" not in body
+
+
+def test_cross_file_notes_from_the_child_are_validated_escaped_and_put_in_the_footer():
+    note = "cross-file: 2 wrappers not followed (cap: too many callers), e.g. src/[pay](x).ts:5 createIntent"
+    line = issue.notes_note({"notes": [note]})
+    assert line.startswith("Not every wrapper was followed across files: cross-file\\: 2 wrappers not followed")
+    assert "\\[pay\\]\\(x\\)" in line and "](" not in line and line.endswith(".")
+    for bad in ({}, {"notes": []}, {"notes": "x"}, {"notes": ["ok"] * 21}, {"notes": ["a\x00b"]}, {"notes": [""]}, {"notes": [1]}, {"notes": ["x" * 301]}):
+        assert issue.notes_note(bad) == "", bad
+    _, body = issue.render_issue(
+        [], full_name="octo/shop", sha="b" * 40, old_version="2026-01-01.a", new_version="2026-02-01.b",
+        call_sites=3, fingerprint="f" * 64, unread="apidrift does not read Go call sites yet.", notes=line,
+    )
+    assert body.index("does not read Go") < body.index("Not every wrapper was followed") < body.index(issue.marker("f" * 64))

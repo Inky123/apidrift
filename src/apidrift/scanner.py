@@ -16,16 +16,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import crosstable, goparse, httplit, httpurl, httpwrap, jsparse, phpparse, phpvendor, pyparse, pyrepo
+from . import crosstable, goparse, httplit, httpurl, httpwrap, jsparse, phpparse, phpvendor, pyparse, pyrepo, pysyntax, scanfiles
+from .scanfiles import BUILD_DIRS, MAX_BYTES, PROJECT_FILES, SKIP_DIRS, SKIP_NAMES  # noqa: F401 - the scan's file rules
 from .sdkmap import Resolved, SdkIndex
 
-SKIP_DIRS = {"node_modules", "vendor", "site-packages", "__pycache__"}  # skipped anywhere
-BUILD_DIRS = {"dist", "build", "coverage", "target", "tmp"}  # skipped at the repo root or next to a project file
-PROJECT_FILES = {
-    "package.json", "pyproject.toml", "setup.py", "Gemfile", "Cargo.toml", "go.mod", "pom.xml", "composer.json",
-    "tsconfig.json",
-}
-SKIP_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "Pipfile.lock", "Gemfile.lock"}
 LANGUAGES = {
     ".py": "python",
     ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
@@ -51,7 +45,6 @@ DOC_EXT = {".md", ".txt", ".yml", ".yaml", ".json", ".env"}
 DOC_DIRS = {"docs", "doc", "fixtures", "__fixtures__", "cassettes"}
 TEST_DIRS = {"spec", "specs", "test", "tests", "__tests__", "__mocks__", "e2e", "cypress"}
 TEST_FILE = re.compile(r"(?:^test_.*\.py|.*_test\.py|.*_spec\.rb|.*_test\.rb|.*_test\.go|.*\.(?:test|spec)\.[cm]?[jt]sx?)$")
-MAX_BYTES = 1_500_000
 STRIPE_HINT = re.compile(r"stripe", re.I)
 URL_RE = re.compile(r"api\.stripe\.com(/v\d+(?:/[^\s'\"`<>)\],;?]+)+)")
 VERB_RE = re.compile(r"\b(get|post|delete)\b", re.I)
@@ -144,6 +137,7 @@ class ScanResult:
     reader: Reader = Reader()  # the vendor the scan was for
     pyrepo: object | None = field(default=None, repr=False, compare=False)  # pyrepo.Repo: the fixer reads with it too
     table: crosstable.Table | None = field(default=None, repr=False, compare=False)  # wrappers followed across files
+    notes: list[str] = field(default_factory=list)  # cross-file caps the scan ran into (crosstable.cap_notes)
 
     @property
     def counted(self) -> list[Usage]:
@@ -175,7 +169,7 @@ def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> Scan
     if not (root.is_file() or root.is_dir()):
         raise SystemExit(f"apidrift: {root} is not a file or directory")
     if root.is_file():
-        files, base, skipped_files, skipped_dirs = [root], root.parent, 0, 0
+        files, base, skipped_files, skipped_dirs = [root], scanfiles.repo_root(root), 0, 0
     else:
         files, skipped_files, skipped_dirs = _iter_files(root)
         base = root
@@ -218,7 +212,7 @@ def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> Scan
     usages.sort(key=lambda u: (u.file, u.line, u.path))
     return ScanResult(
         str(root), usages, len(per_file), unresolved, skipped_files, skipped_dirs, dict(sorted(unread.items())), reader,
-        pyrepo=repo, table=table,
+        pyrepo=repo, table=table, notes=crosstable.cap_notes(table) if table is not None else [],
     )
 
 
@@ -238,11 +232,11 @@ def scan_text(
     found: list[Usage] = []
     unread_name: str | None = None
     if language == "python":
-        found, missing = _scan_python(text, rel, index, reads, table, repo=repo)
+        found, missing, unread_name = _scan_python(text, rel, index, reads, table, repo=repo)
     elif language == "go":
         found, missing, unread_name = _scan_go(text, rel, index, table)
     elif language:
-        found, missing = _scan_dynamic(text, rel, index, reads, language, table)
+        found, missing, unread_name = _scan_dynamic(text, rel, index, reads, language, table)
     else:
         missing = []
         unread_name = UNREAD_LANGUAGES.get(suffix)
@@ -276,43 +270,11 @@ def unread_sentence(unread: dict[str, int], vendor: str = "Stripe") -> str:
 
 def _iter_files(root: Path, suffixes: set[str] | None = None) -> tuple[list[Path], int, int]:
     """The files a scan reads (``suffixes``: of these extensions instead of every text file), with the
-    counts of files and directories left out. Every walk over a checkout goes through here, so the same
-    files are read on every machine whatever is installed (dependency and build directories are skipped)."""
-    suffixes = TEXT_EXT if suffixes is None else suffixes
-    files: list[Path] = []
-    skipped_files = skipped_dirs = 0
-    for dirpath, dirs, names in os.walk(root):
-        here, present = Path(dirpath), set(names)
-        keep = []
-        for d in sorted(dirs):
-            if d.startswith("."):
-                continue
-            if d in SKIP_DIRS or (d in BUILD_DIRS and (here == root or present & PROJECT_FILES)):
-                skipped_dirs += 1
-                continue
-            keep.append(d)
-        dirs[:] = keep
-        for name in sorted(names):
-            path = here / name
-            if name in SKIP_NAMES or name.endswith((".min.js", ".map")) or path.suffix.lower() not in suffixes:
-                continue
-            if path.is_symlink():
-                continue
-            if path.stat().st_size > MAX_BYTES:
-                skipped_files += 1
-                continue
-            files.append(path)
-    return files, skipped_files, skipped_dirs
+    counts of files and directories left out (:func:`scanfiles.iter_files`)."""
+    return scanfiles.iter_files(root, TEXT_EXT if suffixes is None else suffixes)
 
 
-def _read(path: Path) -> str | None:
-    try:
-        raw = path.read_bytes()
-    except OSError:
-        return None
-    if b"\x00" in raw[:8192]:
-        return None
-    return raw.decode("utf-8", errors="replace")
+_read = scanfiles.read
 
 
 def _doc_like(rel: str, suffix: str) -> bool:
@@ -359,12 +321,15 @@ def _resolve(index: SdkIndex, chain: list[str]) -> Resolved | None:
 
 
 def _scan_python(text: str, rel: str, index: SdkIndex, reads: frozenset[str], table=None, *, repo=None):
-    found, missing = pyparse.extract(text, lambda chain: _resolve(index, chain), table, rel, repo=repo)
+    try:
+        found, missing = pyparse.extract(text, lambda chain: _resolve(index, chain), table, rel, repo=repo, strict=True)
+    except pysyntax.Unparsable:  # a syntax this Python rejects, a NUL byte, nesting too deep: say it was not read
+        return [], [], "Python (unparsable)"
     usages = [
         Usage(rel, f.line, f.resolved.method, f.resolved.path, f.call, frozenset(f.fields), f.complete, "python", reads, f.hidden)
         for f in found
     ]
-    return usages, [(rel, line, call) for line, call in missing]
+    return usages, [(rel, line, call) for line, call in missing], None
 
 
 # --- Go -----------------------------------------------------------------------
@@ -388,18 +353,27 @@ def _scan_go(text: str, rel: str, index: SdkIndex, table=None):
 # --- JavaScript / TypeScript / Ruby / PHP ---------------------------------------
 
 
+TOO_DEEP = {lang: f"{name} (nested too deeply)" for lang, name in
+            (("javascript", "JavaScript"), ("typescript", "TypeScript"), ("ruby", "Ruby"), ("php", "PHP"))}
+
+
 def _scan_dynamic(text: str, rel: str, index: SdkIndex, reads: frozenset[str], language: str, table=None):
+    """A call whose arguments nest too deeply is read as hidden (jsfound, phpparse); a file whose brackets or
+    blocks nest too deeply to walk at all is not read, and the report says so (``unread``)."""
     resolve = lambda chain: _resolve(index, chain)  # noqa: E731
-    if language == "php":
-        found, missing = phpparse.extract(text, resolve, table, rel)
-    else:
-        found, missing = jsparse.extract(text, index, ruby=language == "ruby", resolve=resolve, table=table, rel=rel)
+    try:
+        if language == "php":
+            found, missing = phpparse.extract(text, resolve, table, rel)
+        else:
+            found, missing = jsparse.extract(text, index, ruby=language == "ruby", resolve=resolve, table=table, rel=rel)
+    except RecursionError:
+        return [], [], TOO_DEEP[language]
     usages = [
         Usage(rel, f.line, f.resolved.method, f.resolved.path, f.call, frozenset(f.fields.paths), f.fields.complete,
               language, reads, frozenset(f.fields.hidden), switched=frozenset(getattr(f.fields, "switched", ())))
         for f in found
     ]
-    return usages, [(rel, line, call) for line, call in missing]
+    return usages, [(rel, line, call) for line, call in missing], None
 
 
 # --- Literal URLs -------------------------------------------------------------
@@ -463,6 +437,7 @@ def render_scan_text(result: ScanResult) -> str:
         )
     if result.unread:
         lines.append("not read: " + unread_sentence(result.unread, words.vendor))
+    lines += result.notes
     for u in counted:
         lines.append(f"{u.where}  {u.label}  via {u.call}")
         shown = ", ".join(sorted(u.fields)[:8])
@@ -490,6 +465,7 @@ def render_scan_json(result: ScanResult) -> str:
         "skipped_files": result.skipped_files,
         "skipped_dirs": result.skipped_dirs,
         "unread": result.unread,
+        "notes": result.notes,
         "usages": [u.to_dict() for u in result.usages],
         "unresolved": [{"file": f, "line": line, "call": call} for f, line, call in result.unresolved],
     }

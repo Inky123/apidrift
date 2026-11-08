@@ -99,6 +99,24 @@ class Table:
         self.notes.append(f"{w.file}:{w.line} {w.name}: {why}")
 
 
+NOTE_RE = re.compile(r"^(.*?:\d+ [^\s:]+): (.*)$")  # "file:line name: why"
+
+
+def cap_notes(table: Table) -> list[str]:
+    """One line per cross-file cap this scan ran into, for the report: past a cap that language's wrappers are
+    not followed, which otherwise reads exactly like a checkout with no wrappers. The notes about one
+    candidate (a name too common, several definitions) stay in ``table.notes``."""
+    by_cap: dict[str, list[str]] = {}
+    for note in table.notes:
+        m = NOTE_RE.match(note)
+        if m and m.group(2).startswith("cap"):
+            by_cap.setdefault(m.group(2), []).append(m.group(1))
+    return [
+        f"cross-file: {len(ws)} wrapper{'s' if len(ws) != 1 else ''} not followed ({why}), e.g. {ws[0][:120]}"
+        for why, ws in sorted(by_cap.items())
+    ]
+
+
 def single(table: Table, language: str) -> dict[tuple[str, str], Wrapper]:
     """The candidates of ``language`` whose name only one SDK-forwarding function has, past the name rules."""
     out: dict[tuple[str, str], Wrapper] = {}

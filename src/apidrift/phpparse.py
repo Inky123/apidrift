@@ -33,10 +33,8 @@ CLIENT = re.compile(
     r"|(?<![\w\\])(\\?[A-Za-z_][\w\\]*)\s+\$([A-Za-z_]\w*)"  # a typed property or parameter: StripeClient $stripe
 )
 MERGE = re.compile(r"(?:array_merge|array_replace|array_merge_recursive|array_replace_recursive|array_filter)\s*\(")
-VARIABLE = re.compile(r"\$([A-Za-z_]\w*)")
-PLAIN_KEY = re.compile(r"'([A-Za-z_]\w*)'|\"([A-Za-z_]\w*)\"")
-INTEGER = re.compile(r"\d+")
-WORD = re.compile(r"[A-Za-z_]\w*$")
+VARIABLE, PLAIN_KEY = re.compile(r"\$([A-Za-z_]\w*)"), re.compile(r"'([A-Za-z_]\w*)'|\"([A-Za-z_]\w*)\"")
+INTEGER, WORD = re.compile(r"\d+"), re.compile(r"[A-Za-z_]\w*$")
 NOT_CALLED = {  # ``return (new StripeClient($k))->...``: the parenthesis after these is not a call
     "return", "echo", "print", "yield", "throw", "and", "or", "xor", "case", "else", "clone", "await", "from",
     "include", "include_once", "require", "require_once",
@@ -98,7 +96,10 @@ def extract(text: str, resolve, table=None, rel: str = "") -> tuple[list[Found],
     found, helpers = [], PhpHelpers(parsed)
     for c in parsed.calls:
         fields, via = Fields(), Via(helpers)
-        collect(parsed, c, fields, via)
+        try:
+            collect(parsed, c, fields, via)
+        except RecursionError:  # arguments nested too deeply to read: the call, with nothing visible
+            fields = Fields(complete=False, hidden={""})
         if c.saved is not None and fields.complete and not fields.paths:
             continue  # ``save()`` with nothing assigned sends no request
         found.append(Found(c.line, c.call + via.suffix, c.resolved, fields))

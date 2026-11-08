@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import fixhelpers, fixreads, fixscope, fixsdk, fixtestedit, fixtests, gofix, goowned, migrations
-from . import phpfix, phplex, phpvendor
+from . import phpfix, phplex, phpvendor, scanfiles
 from .diff import BREAKING, Change
 from .fixedit import Edit, Locator, apply
 from .fixpins import Pin, find_pins
@@ -132,7 +132,7 @@ Planned = tuple[Impact, Migration, bool]  # the bool: a wrap_type edit wrote the
 @phpvendor.within_repo  # the re-scans and the PHP locator see the scan's vendored stripe-php prefixes
 def plan_fixes(result: ScanResult, impacts: list[Impact], index: SdkIndex, root: Path) -> FixPlan:
     root = Path(root).resolve()
-    base = root.parent if root.is_file() else root
+    base = scanfiles.repo_root(root) if root.is_file() else root  # the scan's base: its file paths are relative to it
     plan = FixPlan(root=base, pyrepo=getattr(result, "pyrepo", None), table=getattr(result, "table", None))
     by_file: dict[str, list[Candidate]] = {}
     fixable = [

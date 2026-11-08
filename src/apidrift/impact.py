@@ -157,14 +157,19 @@ def _request_impact(change: Change, usage: Usage) -> Impact | None:
 def _value_impact(change: Change, usage: Usage, target: str, action: str) -> Impact | None:
     """A change to the values a field accepts, at a call whose reader collected the values it sends: it
     hits when a value sent is one no longer accepted, cannot be ruled out when a value is not a visible
-    literal, and misses when every value sent is still accepted."""
+    literal, and misses when every value sent is still accepted. The reason names the value only when the
+    change lists it (a withdrawn value) or it is an SDK enum member: the App's index keeps other values as
+    hashes it cannot turn back into text, and its replay must word the finding as the full check does."""
     gone = action == "enum_removed"
     listed = [str(v) for v in (change.old if gone else change.new) or ()]
     sent = [value for path, value in usage.values if path == target]
     for value in sorted(v for v in sent if v is not None):
         among = _flat(value) in {_flat(v) for v in listed} if value.startswith("~") else value in listed
         if among == gone:
-            return Impact(usage, change, AFFECTED, f"{target} is sent here as {value.lstrip('~')}")
+            if gone or value.startswith("~"):
+                return Impact(usage, change, AFFECTED, f"{target} is sent here as {value.lstrip('~')}")
+            since = change.introduced or "the new version"
+            return Impact(usage, change, AFFECTED, f"{target} is sent here with a value {since} does not accept")
     if not sent or None in sent:
         return Impact(usage, change, POSSIBLE, f"{target} is sent here; its value is not visible")
     return None
@@ -310,6 +315,7 @@ def render_impact_text(
     ]
     if result.unread:
         lines.append("not read: " + unread_sentence(result.unread, words.vendor))
+    lines += result.notes
     for sev in (BREAKING, WARNING, INFO):
         group = [i for i in counted if i.severity == sev]
         if not group:
@@ -353,6 +359,7 @@ def render_impact_json(result: ScanResult, impacts: list[Impact], old_label: str
         "call_sites": len(result.counted),
         "documentation_matches": len(result.docs),
         "unread": result.unread,
+        "notes": result.notes,  # cross-file caps the scan ran into; not part of the index
         "summary": summary(counted),
         "impacts": [i.to_dict() for i in impacts],  # documentation hits included, tagged language "doc"
     }

@@ -373,7 +373,8 @@ def _reconcile(
     fp, hashes = issue.fingerprint(impacts), issue.finding_hashes(impacts)
     previous = json.loads(repo["issue_items"]) if repo["issue_items"] else None
     render = dict(full_name=full_name, sha=sha, old_version=old_version, new_version=new_version,
-                  call_sites=int(payload.get("call_sites", 0)), fingerprint=fp, unread=issue.unread_note(payload))
+                  call_sites=int(payload.get("call_sites", 0)), fingerprint=fp, unread=issue.unread_note(payload),
+                  notes=issue.notes_note(payload))
     title, body = issue.render_issue(items, **render)
     gained = set(hashes) - set(previous) if previous is not None else set()
     version_changed = repo["issue_version"] is not None and repo["issue_version"] != new_version

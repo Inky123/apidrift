@@ -210,9 +210,13 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
         return
     for path in mentioned:
         rel, text = path.relative_to(base).as_posix(), scanner._read(path)
-        ctx = Context(text) if text is not None else None
+        try:
+            ctx = Context(text) if text is not None else None
+            found = {w.key: list(uses(ctx, w, rel, table)) if ctx else [(0, -1, None)] for w in followed}
+        except RecursionError:  # nested too deeply to walk: its uses cannot be accounted for, like an unread file's
+            found = {w.key: [(0, -1, None)] for w in followed}
         for w in followed:
-            for line, _, visible in (uses(ctx, w, rel, table) if ctx else [(0, -1, None)]):
+            for line, _, visible in found[w.key]:
                 crosstable.record(table, w, rel, line, visible is not None)
     crosstable.settle(table, LANG)
 

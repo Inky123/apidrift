@@ -45,14 +45,15 @@ class PyCall:
 
 
 def extract(
-    text: str, resolve: Callable[[list[str]], Resolved | None], table=None, rel: str = "", *, repo=None
+    text: str, resolve: Callable[[list[str]], Resolved | None], table=None, rel: str = "", *, repo=None, strict=False
 ) -> tuple[list[PyFound], list[tuple[int, str]]]:
     """Stripe SDK calls in a Python source, plus (line, call) pairs that matched no endpoint. ``repo`` (a
     :class:`pyrepo.Repo`) lets calls and spreads through ``self`` be followed (:mod:`pyself`); ``table``
-    (:mod:`crosstable`): wrappers followed across files, for the file at ``rel``."""
+    (:mod:`crosstable`): wrappers followed across files, for the file at ``rel``. With ``strict`` a file that
+    cannot be parsed raises :class:`pysyntax.Unparsable` instead of reading as empty."""
     from . import pyhelpers  # builds on this module
 
-    resolved_calls, unresolved = calls(text, resolve, repo=repo)
+    resolved_calls, unresolved = calls(text, resolve, repo=repo, strict=strict)
     found: list[PyFound] = []
     helpers =pyhelpers.PyHelpers(resolved_calls[0].scopes) if resolved_calls else None
     for c in resolved_calls:
@@ -69,20 +70,26 @@ def extract(
 
 
 def calls(
-    text: str, resolve: Callable[[list[str]], Resolved | None], *, repo=None
+    text: str, resolve: Callable[[list[str]], Resolved | None], *, repo=None, strict=False
 ) -> tuple[list[PyCall], list[tuple[int, str]]]:
     """Resolved SDK calls (arguments not yet read), plus the (line, call) pairs that matched no endpoint."""
+    from . import pysyntax
+
     try:
-        return _calls(text, resolve, repo)
+        return _calls(text, resolve, repo, strict)
     except RecursionError:  # nested too deeply to walk: not read, like a file that does not parse
+        if strict:
+            raise pysyntax.Unparsable from None
         return [], []
 
 
-def _calls(text: str, resolve, repo) -> tuple[list[PyCall], list[tuple[int, str]]]:
+def _calls(text: str, resolve, repo, strict=False) -> tuple[list[PyCall], list[tuple[int, str]]]:
     from . import pyalias, pyself, pysyntax  # pyalias and pyself build on this module
 
     tree = pysyntax.parse(text)
     if tree is None:
+        if strict:
+            raise pysyntax.Unparsable
         return [], []
     aliases = _import_aliases(tree)
     scopes = _PyScopes(tree)
