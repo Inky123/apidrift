@@ -159,7 +159,7 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
             return
         path, text = item
         defs.update(m.group(1).lower() for m in definition.finditer(text))
-        rel = path.relative_to(base).as_posix()
+        rel = scanner.rel_path(path, base)
         if path.resolve() in source and not scanner._doc_like(rel, path.suffix.lower()) and mention.search(text):
             mentioned.append(path)
     for key, w in names.items():
@@ -174,7 +174,7 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
             table.followed.pop(w.key)
         return
     for path in mentioned:
-        rel, text = path.relative_to(base).as_posix(), scanner._read(path)
+        rel, text = scanner.rel_path(path, base), scanner._read(path)
         if text is None:  # binary: its uses are not known
             for w in followed:
                 crosstable.record(table, w, rel, 0, False)

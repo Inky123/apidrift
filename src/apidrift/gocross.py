@@ -167,7 +167,7 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
             table.followed.pop(w.key)
         return
     for path in mentioned:
-        rel, text = path.relative_to(base).as_posix(), scanner._read(path)
+        rel, text = scanner.rel_path(path, base), scanner._read(path)
         f = goparse.calls(text, index.go)[2] if text is not None else None
         for w in followed:
             for line, _, visible in (uses(f, text, w, rel, table) if f is not None else [(0, -1, None)]):

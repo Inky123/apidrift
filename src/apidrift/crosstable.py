@@ -126,7 +126,7 @@ def walk(base: Path, suffixes: set[str], skip=None, needles: tuple[bytes, ...] =
 
     files = size = 0
     for path in scanner._iter_files(base, suffixes)[0]:
-        if skip is not None and skip(path.relative_to(base).as_posix()):
+        if skip is not None and skip(scanner.rel_path(path, base)):
             continue
         files += 1
         try:

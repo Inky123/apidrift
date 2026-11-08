@@ -55,6 +55,17 @@ def per_repo(key: str, compute):
     return repo.cache[key]
 
 
+def memo(key, compute):
+    """``compute()`` once per checkout scan or fix planning (:func:`within_repo`), for work whose answer
+    cannot change while one runs (a walk over the checkout's files); outside one, every call computes."""
+    repo = _REPO.get()
+    if repo is None:
+        return compute()
+    if key not in repo.cache:
+        repo.cache[key] = compute()
+    return repo.cache[key]
+
+
 _REPO: ContextVar[_Repo | None] = ContextVar("apidrift_php_repo", default=None)
 
 

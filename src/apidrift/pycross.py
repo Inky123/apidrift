@@ -190,7 +190,7 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
                 table.note(w, "cap: too many Python files")
             return
         path, text = item
-        facts.files.add(path.relative_to(base).as_posix())
+        facts.files.add(scanner.rel_path(path, base))
         for m in definition.finditer(text):
             defs[m.group(1)] = defs.get(m.group(1), 0) + 1
         if "class" in text:
@@ -220,7 +220,7 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
             table.followed.pop(w.key)
         return
     for path in mentioned:
-        rel, text = path.relative_to(base).as_posix(), scanner._read(path)
+        rel, text = scanner.rel_path(path, base), scanner._read(path)
         ctx = Module(text, rel) if text is not None else None
         for w in followed:
             for line, _, visible in (uses(ctx, w, table) if ctx is not None and ctx.tree is not None else [(0, None, None)]):
