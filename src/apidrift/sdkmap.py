@@ -255,7 +255,11 @@ def without_id(resolve, resolved: Resolved | None) -> Resolved | None:
     if resolved is None or "{" not in resolved.path:
         return resolved
     single = resolve([*resolved.key.split("."), NO_ID])
-    return Resolved(single.method, single.path, resolved.key) if single is not None else resolved
+    if single is None or single.key != f"{resolved.key}.{NO_ID}":
+        return resolved  # only the alias itself: a shorter one (Account.retrieve under FinancialConnections) is another resource
+    if single.method != resolved.method or _id_form(single.path) != _ITEM.sub("/{}", resolved.path):
+        return resolved  # the singleton of another resource
+    return Resolved(single.method, single.path, resolved.key)
 
 
 def _strip_helpers(chain: tuple[str, ...]) -> tuple[str, ...]:

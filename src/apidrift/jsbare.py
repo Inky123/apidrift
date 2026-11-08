@@ -34,6 +34,7 @@ RUBY_WORDS = {
 POSITIONAL = re.compile(r"[ \t]+(?=[@$\"']|:[A-Za-z_]|[0-9]|([A-Za-z_]\w*))")
 CALLED = re.compile(r"[ \t]*\(")
 NIL = {"nil", "null", "undefined"}
+RUBY_ID = re.compile(r"(?:id\s*:(?!:)|:id\s*=>|[\"']id[\"']\s*=>)")
 
 
 def is_verb(name: str) -> bool:
@@ -75,14 +76,22 @@ def calls(src: jsparse.Source, mask: jsparse.Mask, eligible, resolve, taken: set
 
 
 def no_id(src: jsparse.Source, spans: list[tuple[int, int]], *, ruby: bool) -> bool:
-    """The call passes no id: no argument, ``nil``/``null``/``undefined``, or a hash or options object first."""
+    """The call passes no id: no argument, ``nil``/``null``/``undefined``, or a hash or options object first.
+    In Ruby a hash or keywords that hold ``id:`` pass one: stripe-ruby takes it out (``Util.normalize_id``)."""
     if not spans:
         return True
     a, b = spans[0]
     first = src.text[a:b].strip()
-    if first in NIL or first.startswith("{"):
+    if first in NIL:
         return True
-    return ruby and jsparse.RUBY_KEYWORD.match(first) is not None
+    if not ruby:
+        return first.startswith("{")
+    if first.startswith("{"):
+        keys = jsparse.parse_object(src, src.skip_space(a) + 1).paths
+        return "id" not in keys
+    if jsparse.RUBY_KEYWORD.match(first):
+        return not any(RUBY_ID.match(src.text[x:y].strip()) for x, y in spans)
+    return False
 
 
 def by_id(resolve, resolved, src: jsparse.Source, spans: list[tuple[int, int]], *, ruby: bool):

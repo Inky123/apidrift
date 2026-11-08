@@ -99,3 +99,35 @@ def test_old_names_are_found_in_code(index):
     labels, unresolved = found(index, text, "a.js")
     assert labels == [(2, "DELETE /v1/subscriptions/{subscription_exposed_id}"), (3, "POST /v1/accounts/{account}/login_links")]
     assert unresolved == []
+
+
+def test_the_singleton_is_asked_for_only_by_the_full_alias_of_the_same_resource(index):
+    fca = index.resolve(["Stripe", "FinancialConnections", "Account", "retrieve"])
+    assert fca.label == "GET /v1/financial_connections/accounts/{account}"
+    # Account.retrieve.(no id) is a shorter alias of the same chain: another resource's singleton
+    assert without_id(index.resolve, fca) == fca
+    text = (
+        "a = Stripe::FinancialConnections::Account.retrieve(expand: [\"ownership\"])\n"
+        "b = Stripe::FinancialConnections::Account.retrieve\n"
+    )
+    assert [label for _, label in found(index, text, "a.rb")[0]] == ["GET /v1/financial_connections/accounts/{account}"] * 2
+    js = "const stripe = new Stripe(k);\nstripe.financialConnections.accounts.retrieve({ expand: ['x'] });\n"
+    assert [label for _, label in found(index, js, "a.js")[0]] == ["GET /v1/financial_connections/accounts/{account}"]
+
+
+def test_a_ruby_hash_or_keywords_holding_id_pass_the_id(index):
+    text = (
+        "a = Stripe::Account.retrieve(id: account_id)\n"
+        "b = Stripe::Account.retrieve({id: account_id, expand: [\"x\"]})\n"
+        "c = Stripe::Account.retrieve(expand: [\"x\"], id: account_id)\n"
+        "d = Stripe::Account.retrieve id: account_id\n"
+        "e = Stripe::Account.retrieve(stripe_account: account_id)\n"
+        "f = Stripe::Account.retrieve({ :id => account_id })\n"
+        "g = Stripe::Account.retrieve({ expand: [\"x\"] })\n"
+        "h = Stripe::Account.retrieve(customer: { id: 1 })\n"  # a nested id is not the id
+    )
+    assert [label for _, label in found(index, text, "a.rb")[0]] == [
+        "GET /v1/accounts/{account}", "GET /v1/accounts/{account}", "GET /v1/accounts/{account}",
+        "GET /v1/accounts/{account}", "GET /v1/account", "GET /v1/accounts/{account}", "GET /v1/account",
+        "GET /v1/account",
+    ]
