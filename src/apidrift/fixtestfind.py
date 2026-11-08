@@ -251,29 +251,52 @@ def _python(text: str) -> list[Expect]:
     except (SyntaxError, ValueError):
         return []
     offsets, out = _Offsets(text), []
-    for fn in ast.walk(tree):
-        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+
+    def visit(node: ast.AST, inherited: dict[str, str | None]) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                names = _patched(child, inherited)
+                for call in _own(child):  # each call once, with the bindings of the function it is written in
+                    f = call.func if isinstance(call, ast.Call) else None
+                    if not (isinstance(f, ast.Attribute) and f.attr in PY_ASSERTS and isinstance(f.value, ast.Name)):
+                        continue
+                    head = _stripe_tail(names.get(f.value.id))
+                    start = offsets.at(f.end_lineno, f.end_col_offset)
+                    if head and text[start : start + 1] == "(":
+                        out.append(Expect("mock", head, start, offsets.at(call.end_lineno, call.end_col_offset), head, ""))
+                visit(child, names)
+            elif not isinstance(child, ast.Lambda):
+                visit(child, inherited)
+
+    visit(tree, {})
+    return sorted(out, key=lambda e: e.lo)
+
+
+def _own(fn: ast.AST):
+    """The nodes of ``fn`` outside the bodies of the functions, lambdas and classes nested in it (a nested
+    definition itself is yielded: it binds its name here)."""
+    todo = [n for n in ast.iter_child_nodes(fn) if n not in getattr(fn, "decorator_list", ())]
+    while todo:
+        node = todo.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            if not isinstance(node, ast.Lambda):
+                yield node
             continue
-        names = _patched(fn)
-        for node in ast.walk(fn):
-            f = node.func if isinstance(node, ast.Call) else None
-            if not (isinstance(f, ast.Attribute) and f.attr in PY_ASSERTS and isinstance(f.value, ast.Name)):
-                continue
-            head = _stripe_tail(names.get(f.value.id))
-            start = offsets.at(f.end_lineno, f.end_col_offset)
-            if head and text[start : start + 1] == "(":
-                out.append(Expect("mock", head, start, offsets.at(node.end_lineno, node.end_col_offset), head, ""))
-    return out
+        yield node
+        todo += ast.iter_child_nodes(node)
 
 
-def _patched(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str | None]:
-    """Mock names in ``fn`` and the dotted target each one patches (None: bound more than one way)."""
+def _patched(fn: ast.FunctionDef | ast.AsyncFunctionDef, inherited: dict[str, str | None] | None = None) -> dict[str, str | None]:
+    """Mock names visible in ``fn`` and the dotted target each one patches (None: bound more than one way). A
+    closure sees its enclosing function's mocks unless it binds the name itself."""
     out: dict[str, str | None] = {}
 
     def bind(name: str, dotted: str | None) -> None:
         out[name] = dotted if name not in out or out[name] == dotted else None
 
-    params = [a.arg for a in fn.args.posonlyargs + fn.args.args]
+    args = fn.args
+    params = [a.arg for a in args.posonlyargs + args.args]
+    every = params + [a.arg for a in args.kwonlyargs] + [a.arg for a in (args.vararg, args.kwarg) if a]
     if params[:1] in (["self"], ["cls"]):
         params = params[1:]
     injected: list[str | None] = []
@@ -287,7 +310,10 @@ def _patched(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str | None
         return {}
     for name, dotted in zip(params, injected):
         bind(name, dotted)
-    for node in ast.walk(fn):
+    for name in every:
+        if name not in out:
+            bind(name, None)  # a plain parameter hides an enclosing function's mock of that name
+    for node in _own(fn):
         if isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
                 kind, dotted = _patch(item.context_expr)
@@ -302,7 +328,16 @@ def _patched(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str | None
                     bind(t.id, dotted if kind == "inject" else None)
         elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr)) and isinstance(node.target, ast.Name):
             bind(node.target.id, None)
-    return out
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            for t in ast.walk(node.target):
+                if isinstance(t, ast.Name):
+                    bind(t.id, None)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bind(node.name, None)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            for name in node.names:
+                bind(name, None)
+    return {**{k: v for k, v in (inherited or {}).items() if k not in out}, **out}
 
 
 def _patch(node: ast.AST, mocker: bool = False, only_mocker: bool = False) -> tuple[str, str | None]:
