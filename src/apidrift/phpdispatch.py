@@ -208,7 +208,10 @@ def _definitions(key: tuple, paths) -> int:
         raw = _read(path)
         if raw is None or short.encode() not in raw.lower():
             continue
-        src = lex(raw.decode("utf-8", errors="replace"))
+        text = raw.decode("utf-8", errors="replace")
+        if not _may_define(key[0], short, text):
+            continue  # nothing below could count: the lex is spared
+        src = lex(text)
         if key[0] == "func":
             count += sum(1 for m in NAMED_FUNC.finditer(src.code) if m.group(1).lower() == short)
         else:
@@ -217,6 +220,27 @@ def _definitions(key: tuple, paths) -> int:
             count += sum(1 for m in CLASS_NAME.finditer(src.code) if _fq(space, m.group(1)) == key[1])
             count += 1 if len(set(spaces)) > 1 and short in src.code.lower() else 0  # several namespaces: not sure
     return count
+
+
+OPAQUE_START = r"(?:/\*|//|#|['\"`]|<<<|\?>)"  # what begins a span the lex blanks out of the code
+CLASS_HEAD = re.compile(r"(?:class|trait)\s+([A-Za-z_]\w*)")
+CLASS_THEN_OPAQUE = re.compile(rf"(?:class|trait)\s*{OPAQUE_START}")
+FUNC_HEAD = re.compile(r"function\s*&?\s*([A-Za-z_]\w*)")
+FUNC_THEN_OPAQUE = re.compile(rf"function[\s&]*{OPAQUE_START}")
+
+
+def _may_define(kind: str, short: str, text: str) -> bool:
+    """False only when :func:`_definitions` would count nothing in ``text``, read from the text alone.
+
+    The counts are taken on the lexed code (strings and comments blanked to spaces, offsets kept), so a
+    counted ``class Name`` / ``function name`` is in the text too, either as written, or with a blanked span
+    (a comment, a string, inline HTML) between the keyword and the name, which then begins right after
+    the keyword and any whitespace. The several-namespaces count needs two ``namespace`` keywords."""
+    if kind == "func":
+        return any(m.lower() == short for m in FUNC_HEAD.findall(text)) or FUNC_THEN_OPAQUE.search(text) is not None
+    if any(m.lower() == short for m in CLASS_HEAD.findall(text)) or CLASS_THEN_OPAQUE.search(text) is not None:
+        return True
+    return text.count("namespace") >= 2 and short in text.lower()
 
 
 def _functions(text: str) -> list[_Fn]:
