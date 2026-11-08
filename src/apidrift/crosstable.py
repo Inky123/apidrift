@@ -197,8 +197,9 @@ def settle(table: Table, language: str) -> None:
 def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
     """Pass 2: decide what is followed. ``sources`` are the files the scan reads (vendored and build
     directories already left out); ``resolve`` is the scan's chain resolver."""
-    from . import jscross, phpcross
+    from . import jscross, phpcross, pycross
 
     table.collecting, table.base = False, base
     phpcross.finish(table, base, sources, resolve)
     jscross.finish(table, base, sources, resolve)
+    pycross.finish(table, base, sources, resolve)

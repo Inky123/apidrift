@@ -231,6 +231,8 @@ class Locator:
     # --- Python -----------------------------------------------------------------
 
     def _py(self, usage: Usage, m: Migration) -> Sites:
+        if fixcross.is_cross(usage.call):
+            return fixcross.py_sites(self, usage, m)  # a caller of a wrapper (pycross)
         matches = [
             c for c in self.py_calls
             if c.node.lineno == usage.line and c.call == fixhelpers.plain_call(usage.call) and c.resolved.path == usage.path

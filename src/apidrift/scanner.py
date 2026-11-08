@@ -221,7 +221,7 @@ def scan_text(
     found: list[Usage] = []
     unread_name: str | None = None
     if language == "python":
-        found, missing = _scan_python(text, rel, index, reads)
+        found, missing = _scan_python(text, rel, index, reads, table)
     elif language == "go":
         found, missing, unread_name = _scan_go(text, rel, index)
     elif language:
@@ -329,8 +329,8 @@ def _resolve(index: SdkIndex, chain: list[str]) -> Resolved | None:
 # --- Python -----------------------------------------------------------------
 
 
-def _scan_python(text: str, rel: str, index: SdkIndex, reads: frozenset[str]):
-    found, missing = pyparse.extract(text, lambda chain: _resolve(index, chain))
+def _scan_python(text: str, rel: str, index: SdkIndex, reads: frozenset[str], table=None):
+    found, missing = pyparse.extract(text, lambda chain: _resolve(index, chain), table, rel)
     usages = [
         Usage(rel, f.line, f.resolved.method, f.resolved.path, f.call, frozenset(f.fields), f.complete, "python", reads, f.hidden)
         for f in found

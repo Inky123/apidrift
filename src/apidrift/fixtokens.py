@@ -109,9 +109,10 @@ def app_names(text: str, language: str, found: list[Token]) -> set[int]:
 
 
 def _py_names(text: str, positions: set[int], *, class_fields: bool = True) -> set[int]:
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError, ValueError):
+    from .pysyntax import parse  # Python 3.14 syntax read in place, as the scanner reads it
+
+    tree = parse(text)
+    if tree is None:
         return set()
     offsets = _Offsets(text)
     members: set[int] = set()

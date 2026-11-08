@@ -42,8 +42,11 @@ class PyCall:
     scopes: "_PyScopes"
 
 
-def extract(text: str, resolve: Callable[[list[str]], Resolved | None]) -> tuple[list[PyFound], list[tuple[int, str]]]:
-    """Stripe SDK calls in a Python source, plus (line, call) pairs that matched no endpoint."""
+def extract(
+    text: str, resolve: Callable[[list[str]], Resolved | None], table=None, rel: str = ""
+) -> tuple[list[PyFound], list[tuple[int, str]]]:
+    """Stripe SDK calls in a Python source, plus (line, call) pairs that matched no endpoint.
+    ``table`` (:mod:`crosstable`): wrappers followed across files, for the file at ``rel``."""
     from . import pyhelpers  # builds on this module
 
     resolved_calls, unresolved = calls(text, resolve)
@@ -53,14 +56,18 @@ def extract(text: str, resolve: Callable[[list[str]], Resolved | None]) -> tuple
         via = pyhelpers.Via(helpers, c)
         fields, hidden = _py_fields(c.node, c.scopes.lookup(c.node.lineno, c.fn), via)
         found.append(PyFound(c.node.lineno, c.call + via.suffix, c.resolved, fields, not hidden, frozenset(hidden)))
+    if table is not None:  # wrappers defined in other files (pycross builds on this module)
+        from . import pycross
+        found = pycross.extend(text, table, rel, found, resolved_calls)
     return found, unresolved
 
 
 def calls(text: str, resolve: Callable[[list[str]], Resolved | None]) -> tuple[list[PyCall], list[tuple[int, str]]]:
     """Resolved SDK calls (arguments not yet read), plus the (line, call) pairs that matched no endpoint."""
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError, ValueError):
+    from . import pysyntax  # Python 3.14's ``except A, B:`` too
+
+    tree = pysyntax.parse(text)
+    if tree is None:
         return [], []
     aliases = _import_aliases(tree)
     scopes = _PyScopes(tree)

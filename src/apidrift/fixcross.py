@@ -17,6 +17,7 @@ caller's file with the same table.
 
 from __future__ import annotations
 
+import ast
 import re
 
 from . import fixhelpers, phpcross, phpparse
@@ -117,4 +118,48 @@ def js_sites(loc, usage, m):
     loc._js_variable(SimpleNamespace(bindings=ctx.bindings), variable, i, False, m, out)
     if ctx.bindings.escapes(variable, i):
         out.why = out.why or fixhelpers.SHARED  # the caller's object is also used elsewhere
+    return out
+
+
+def py_sites(loc, usage, m):
+    """The edit sites of a Python caller of a wrapper (:mod:`pycross`): the keywords it passes, and the dict
+    literal (or the one local, every reaching binding a literal) it spreads, as for a direct call. Refused
+    (``helper_shared``) when the wrapper itself reads or writes the key, names a parameter after it, or the
+    caller's dict is also used elsewhere."""
+    from types import SimpleNamespace
+
+    from . import pycallers, pycross
+    from .fixedit import Sites
+
+    table = getattr(loc, "table", None)
+    got = THROUGH_FILE.search(usage.call)
+    if table is None or got is None or table.collecting:
+        return Sites(found_call=False)
+    rel = (getattr(loc, "context", None) or (None, ""))[1]
+    ctx = pycallers.Module(loc.text, rel)
+    name, file, line = got.group(1), got.group(2), int(got.group(3))
+    wrappers = [w for w in table.wrappers(pycross.LANG) if (w.name, w.file, w.line) == (name, file, line)
+                and w.resolved.path == usage.path and w.resolved.method == usage.method]
+    if ctx.tree is None or len(wrappers) != 1:
+        return Sites(found_call=False)
+    w = wrappers[0]
+    shape = table.facts.get(pycross.SHAPES, {}).get((w.file, w.line, w.name))
+    found = [call for at, call, visible in pycallers.uses(ctx, w, table) if visible is not None and at == usage.line]
+    if shape is None or len(found) != 1:
+        return Sites(found_call=False)
+    call, out, segs = found[0], Sites(), m.target.split(".")
+    if segs[0] in shape.touched or segs[0] in shape.params or segs[0] in shape.added:
+        out.why = fixhelpers.SHARED  # the wrapper reads or sets the key itself: a rename at the caller changes it
+        return out
+    c = SimpleNamespace(node=call, fn=ctx.fn.get(id(call)), scopes=ctx.scopes)
+    loc._call = c
+    values = [kw.value for kw in call.keywords if kw.arg is None] if shape.kwargs else [
+        (call.args[shape.params.index(shape.forwarded)] if shape.params.index(shape.forwarded) < len(call.args)
+         else next(kw.value for kw in call.keywords if kw.arg == shape.forwarded))]
+    if shape.kwargs:
+        loc._py_walk(call, segs, m, out)  # the caller's own keywords
+    for value in values:
+        if isinstance(value, ast.Name) and ctx.scopes.escapes(value.id, c.scopes.reaching(value.id, call, c.fn)[1], value):
+            out.why = out.why or fixhelpers.SHARED  # the caller's dict is also used elsewhere
+        loc._py_value(c, value, segs, m, out)
     return out
