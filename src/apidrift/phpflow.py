@@ -162,7 +162,7 @@ def _registered(root) -> set[str]:
         except OSError:
             continue
         if b"add_filter" in raw:
-            texts[str(path)] = raw.decode("utf-8", errors="replace")
+            texts[path.relative_to(root).as_posix()] = raw.decode("utf-8", errors="replace")
     return phpfilters.registered(texts)
 
 

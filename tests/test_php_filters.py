@@ -27,6 +27,12 @@ def test_registered_hooks_are_the_literal_names_add_filter_names():
     }
 
 
+def test_registrations_in_test_fixture_and_doc_files_do_not_count():
+    texts = {"tests/unit/hooks.php": "add_filter('one', 'f');", "fixtures/a.php": "add_filter($x, 'f');",
+             "docs/example.php": "add_filter('two', 'f');", "src/real.php": "add_filter('three', 'f');"}
+    assert phpfilters.registered(texts) == {"three"}
+
+
 @pytest.mark.parametrize("hook,hooks,ok", [
     ("h", set(), True), ("h", {"other"}, True), ("h", {"h"}, False), ("h", {phpfilters.ANY}, False),
     (None, set(), False), ("h", None, False),
@@ -55,3 +61,9 @@ def test_a_filter_is_pass_through_unless_this_checkout_registers_on_it(tmp_path,
     found = scan(tmp_path, {"app/Pay.php": CALL.replace("@HOOK@", hook), "app/hooks.php": H + elsewhere + "\n"})
     fields = ["amount", "currency"] if hook.startswith("'") else []
     assert found == [(fields, complete)]
+
+
+def test_a_test_files_registration_leaves_the_filter_pass_through(tmp_path):
+    found = scan(tmp_path, {"app/Pay.php": CALL.replace("@HOOK@", "'pay_args'"),
+                            "tests/HooksTest.php": H + "add_filter('pay_args', 'stub');\n"})
+    assert [(f, c) for f, c in found if f] == [(["amount", "currency"], True)]
