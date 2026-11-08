@@ -380,6 +380,32 @@ def go(i):
     assert got[(10, "post", "/v1/payment_intents")].fields == {"amount"}
 
 
+PYW = '''import requests
+STRIPE = "https://api.stripe.com/v1/"
+
+def call(path, params=None, method="post", **extra):
+    return requests.request(method, STRIPE + path, data=params)
+
+def change(path, params):
+    params["expand[]"] = "latest_invoice"
+    return requests.post(STRIPE + path, data=params)
+'''
+
+
+@pytest.mark.parametrize("line,method,fields,complete", [
+    ("call('subscriptions/' + i, method='delete')", "delete", set(), True),  # review item 2: keywords by name
+    ("call(path='charges', params={'amount': 1})", "post", {"amount"}, True),
+    ("call('charges', params=build())", "post", set(), False),
+    ("call('charges', {'amount': 1}, timeout=3)", None, {"amount"}, False),  # a keyword no parameter takes
+    ("call('charges', {'metadata[order]': '1', 'expand[]': 'x'})", "post", {"metadata", "metadata.order", "expand"}, True),
+    ("change('charges', {'amount': 1})", "post", {"amount"}, False),  # review item 8: the wrapper writes the body
+])
+def test_python_wrapper_arguments_by_position_and_keyword(index, line, method, fields, complete):
+    u = one(PYW + line + "\n", "app/pay.py", index)
+    assert (u.fields, u.complete) == (fields, complete)
+    assert u.method == (method or "?")
+
+
 # --- the fixer never edits them -----------------------------------------------------------------
 
 

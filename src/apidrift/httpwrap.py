@@ -49,6 +49,7 @@ class Wrapper:
     defaults: tuple[str | None, ...] = ()  # each parameter's default as source text, None for none
     is_method: bool = False  # a method (``$this->x()`` / ``self.x()`` / ``c.x()``), not a plain function
     line: int = 0
+    names: tuple[str, ...] = ()  # parameter names, for arguments passed by keyword (Python)
 
 
 @dataclass
