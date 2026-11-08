@@ -233,3 +233,35 @@ def test_every_provider_declares_the_questions_its_index_answers():
             assert arity >= 1 and all(part.isidentifier() and not part.startswith("_") for part in name.split("."))
             if not holders:
                 assert callable(getattr(owner, method)), name
+
+
+def test_a_value_kept_only_as_a_hash_is_judged_and_worded_alike_by_the_full_check_and_the_replay(tmp_path, monkeypatch, conn, repo_row):
+    """A call sends ``language: 'de'`` while the field is a free string; no change lists that value, so the index
+    keeps it only as a hash. When a later release turns the field into an enum without it, the replay cannot
+    name the value, and the full check must not either: the two word the finding the same way, so the digests
+    agree and the index is kept."""
+    monkeypatch.setenv("APIDRIFT_DATA", str(tmp_path / "data"))
+    tree = tmp_path / "repo"
+    tree.mkdir()
+    (tree / "link.ts").write_text(textwrap.dedent(NODE).replace("language: 'en'", "language: 'de'"))
+    old = save(plaid_doc(), "2020-09-14_1.0.0", 1)
+    second = plaid_doc()
+    _unrelated(second)
+    new = save(second, "2020-09-14_1.1.0", 2)
+    first = full_check(tree, old, new)
+    assert ["language", "#" + inventory.name_hash("de")] in [s["sent"] for s in first["index"]["sites"] if s["path"] == "/link/token/create"][0]
+    assert indexcheck.record(conn, plaid_snaps(old), 501, 1, SHA, first, old, new, "plaid") is None
+    third_doc = json.loads(json.dumps(snap.load(new)))
+    schemas(third_doc)["LinkTokenCreateRequest"]["properties"]["language"] = {"type": "string", "enum": ["en", "fr"]}
+    third = save(third_doc, "2020-09-14_1.2.0", 3)
+    expected = full_check(tree, old, third)
+    stored = inventory.load(conn, inventory.get(conn, 501, "plaid"))
+    pr = indexcheck.pair(plaid_snaps(old), old, third, "plaid")
+    assert indexcheck.same_answers(pr.index, "plaid", stored.answers)
+    got = indexcheck.payload_of(stored.usages, stored.unread, pr)
+    language = [(i["certainty"], i["reason"]) for i in got["impacts"] if i["change"]["target"] == "language"]
+    assert language == [("affected", "language is sent here with a value 2020-09-14_1.2.0 does not accept")]
+    assert "'de'" not in json.dumps(got["impacts"]) and " de" not in json.dumps(got["impacts"])
+    assert got["impacts"] == expected["impacts"]
+    assert inventory.impacts_digest(got["impacts"]) == inventory.impacts_digest(expected["impacts"])
+    assert indexcheck.record(conn, plaid_snaps(old), 501, 2, SHA, expected, old, third, "plaid") is None
