@@ -67,7 +67,15 @@ def _numbers(version: str) -> tuple[int, int, int] | None:
 
 
 def find_sdks(root: Path, fixed: list[str]) -> list[SdkLock]:
-    """The locked SDK version for each fixed file's language, nearest lockfile first (see the module doc)."""
+    """The locked SDK version for each fixed file's language, nearest lockfile first (see the module doc).
+    Lockfiles are repository bytes: a malformed one means "no lock reported", never a failed check."""
+    try:
+        return _find_sdks(root, fixed)
+    except Exception:  # noqa: BLE001 - any reader failure (RecursionError, MemoryError too) is just "unknown"
+        return []
+
+
+def _find_sdks(root: Path, fixed: list[str]) -> list[SdkLock]:
     root = Path(root).resolve()
     if not fixed or not root.is_dir():
         return []
@@ -122,9 +130,17 @@ def _first_line(text: str, pattern: str) -> int:
 def _json(text: str) -> dict:
     try:
         data = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError, MemoryError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _dict(value: object) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _list(value: object) -> list:
+    return value if isinstance(value, list) else []
 
 
 Hits = list[tuple[str, int]]
@@ -137,7 +153,7 @@ def _gemfile_lock(text: str) -> Hits:
 def _composer_lock(text: str) -> Hits:
     data, out = _json(text), []
     for key in ("packages", "packages-dev"):
-        for pkg in data.get(key) or []:
+        for pkg in _list(data.get(key)):
             if isinstance(pkg, dict) and pkg.get("name") == "stripe/stripe-php" and isinstance(pkg.get("version"), str):
                 out.append((pkg["version"].removeprefix("v"), _first_line(text, r'"name"\s*:\s*"stripe/stripe-php"')))
     return out
@@ -151,11 +167,11 @@ def _go_mod(text: str) -> Hits:
 
 def _package_lock(text: str) -> Hits:
     data, out = _json(text), []
-    for key, pkg in (data.get("packages") or {}).items():
+    for key, pkg in _dict(data.get("packages")).items():
         if (key == "node_modules/stripe" or key.endswith("/node_modules/stripe")) and isinstance(pkg, dict):
             out.append((str(pkg.get("version") or ""), _first_line(text, re.escape(json.dumps(key)) + r"\s*:")))
     if not out:  # lockfileVersion 1
-        dep = (data.get("dependencies") or {}).get("stripe")
+        dep = _dict(data.get("dependencies")).get("stripe")
         if isinstance(dep, dict):
             out.append((str(dep.get("version") or ""), _first_line(text, r'"stripe"\s*:\s*\{')))
     return out
@@ -183,7 +199,7 @@ def _pnpm_lock(text: str) -> Hits:
 def _package_json(text: str) -> Hits:
     data, out = _json(text), []
     for key in ("dependencies", "devDependencies"):
-        v = (data.get(key) or {}).get("stripe") if isinstance(data.get(key), dict) else None
+        v = _dict(data.get(key)).get("stripe")
         if isinstance(v, str) and re.fullmatch(r"\d+\.\d+\.\d+", v):  # an exact version only, never a range
             out.append((v, _first_line(text, r'"stripe"\s*:')))
     return out
@@ -197,7 +213,7 @@ def _toml_lock(text: str) -> Hits:
 def _pipfile_lock(text: str) -> Hits:
     data, out = _json(text), []
     for key in ("default", "develop"):
-        v = ((data.get(key) or {}).get("stripe") or {}).get("version") if isinstance(data.get(key), dict) else None
+        v = _dict(_dict(data.get(key)).get("stripe")).get("version")
         if isinstance(v, str) and v.startswith("=="):
             out.append((v[2:], _first_line(text, r'"stripe"\s*:')))
     return out

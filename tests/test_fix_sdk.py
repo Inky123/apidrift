@@ -137,6 +137,28 @@ def test_no_lockfile_no_language_and_no_escape_from_the_root(tmp_path):
     (tmp_path.parent / "requirements.txt").unlink()
 
 
+@pytest.mark.parametrize("name,text,fixed", [
+    # review item 7: each of these used to raise and fail the whole check
+    ("package-lock.json", '{"packages": [1]}', "a.js"),
+    ("package-lock.json", '{"dependencies": [1]}', "a.js"),
+    ("composer.lock", '{"packages": 5}', "a.php"),
+    ("Pipfile.lock", '{"default": {"stripe": "==1.0"}}', "a.py"),
+    ("package-lock.json", "[" * 200000 + "]" * 200000, "a.js"),
+    ("package.json", '{"dependencies": ["stripe"]}', "a.js"),
+    ("composer.lock", '{"packages": [{"name": "stripe/stripe-php", "version": {"v": 1}}]}', "a.php"),
+    ("package-lock.json", '{"packages": {"node_modules/stripe": {"version": [14]}}}', "a.js"),
+])
+def test_a_malformed_lockfile_reports_no_lock_and_never_raises(tmp_path, name, text, fixed):
+    write(tmp_path, {name: text, fixed: ""})
+    assert find_sdks(tmp_path, [fixed]) == []
+
+
+def test_any_reader_failure_is_no_lock(tmp_path, monkeypatch):
+    write(tmp_path, {"Gemfile.lock": GEMFILE_LOCK, "a.rb": ""})
+    monkeypatch.setitem(fixsdk.READERS, "stripe-ruby", [("Gemfile.lock", lambda *a: 1 / 0)])
+    assert find_sdks(tmp_path, ["a.rb"]) == []
+
+
 def test_one_version_twice_in_a_lockfile_is_one_lock(tmp_path):
     """fxa's yarn.lock lists stripe@npm:22.3.1 and its patched copy stripe@patch:...22.3.1."""
     text = YARN_BERRY.replace("17.7.0", "22.3.1") + '\n"stripe@patch:stripe@npm%3A22.3.1#~/p.patch":\n  version: 22.3.1\n'
