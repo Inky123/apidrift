@@ -255,3 +255,51 @@ def test_a_job_pushes_the_updated_test_in_the_same_commit(scan, installed, conn,
     assert "Tests that name the old field" not in body  # its only listed line was updated
     blobs = [r for r in installed.requests if r.method == "GET" and "/git/blobs/" in r.url.path]
     assert len(blobs) == 2  # the parent read both base blobs itself, the code and the test
+
+
+# --- the order of the checks, and the work cap -----------------------------------------------------
+
+
+def test_the_readers_run_only_on_edits_that_passed_the_cheap_checks(real, monkeypatch):
+    """Shape, line and listing are checked first; a blob whose edit fails them never reaches the (content-
+    dependent) readers, so a hostile blob cannot make the parent read it."""
+    from apidrift import fixtestfind
+
+    root, plan, payload = real
+    calls: list[str] = []
+    original = fixtestfind.find
+
+    def counted(text, language):
+        calls.append(language)
+        return original(text, language)
+
+    monkeypatch.setattr(fixtestfind, "find", counted)
+    _, tests = checked(root, tamper(payload, "spec/pay_spec.rb", text="allowed_payment_method_types; evil"))
+    assert only("spec/pay_spec.rb")(tests) == [] and "ruby" not in calls and len(calls) == 3
+    calls.clear()
+    _, tests = checked(root, tamper(payload, "spec/pay_spec.rb", line=9))
+    assert only("spec/pay_spec.rb")(tests) == [] and "ruby" not in calls
+    calls.clear()
+    _, tests = checked(root, payload)
+    assert len(tests) == 4 and calls.count("ruby") == 1  # the readers run once per blob that passed
+
+
+def test_an_over_cap_test_file_is_refused_not_read(real, monkeypatch, caplog):
+    from apidrift import fixtestfind
+
+    root, plan, payload = real
+    monkeypatch.setattr(fixtestfind, "MAX_EXPECTATIONS", 2)
+    with caplog.at_level("INFO", logger="apidrift.fixpr"):
+        _, tests = checked(root, payload)
+    assert only("spec/pay_spec.rb")(tests) == []  # the spec holds more candidates than the cap
+    assert "more expectations or methods than are read" in caplog.text
+
+
+def test_logs_name_the_repository_by_id_only(real, caplog):
+    root, plan, payload = real
+    bad = tamper(payload, "spec/pay_spec.rb", text="allowed_payment_method_types; evil")
+    with caplog.at_level("INFO", logger="apidrift.fixpr"):
+        gh = Repo(root)
+        fixes = fixcheck.validate(gh, "t", "octo/secret-repo", SHA, bad["fixes"], repo_id=501)
+        fixtestcheck.validate(gh, "t", "octo/secret-repo", SHA, bad, fixes, repo_id=501)
+    assert "repo 501: not pushing one test file" in caplog.text and "octo/secret-repo" not in caplog.text

@@ -21,17 +21,20 @@ That ``payload`` literal is the expected request, and it is tied to the edit onl
 
 from __future__ import annotations
 
-import difflib
+import bisect
 import re
 from collections import Counter
 from dataclasses import dataclass
 
-from .fixtestfind import Expect
+from .fixtestfind import Expect, Overloaded
 from .jsparse import Mask, Source
 
+MAX_DEFS = 2000  # methods in one edited Ruby file; past this its builder specs are listed, never edited
 SPEC = re.compile(r"(?P<pre>(?:.*/)?)spec/(?P<rest>.+)_spec\.rb")
 SCOPE = re.compile(r"(module|class)\s+(?!<<)((?:::)?[A-Z][\w:]*)")
 DEF = re.compile(r"def\s+(?:self\.)?([a-z_]\w*[?!]?)")
+END = re.compile(r"end\b.*")
+TOKEN = re.compile(r"(?<![\w:])[A-Za-z_]\w*[?!]?(?![\w?!])")  # a method name as a bare token (not ``X::name``)
 DESCRIBE = re.compile(r"^(?:RSpec\s*\.\s*)?describe\s*\(?\s*(?:::)?([A-Z][\w:]*)", re.M)
 LET = re.compile(r"\b(?:let!?|subject)\(\s*:(\w+[?!]?)\s*\)\s*(\{|do\b)")
 SENDS = re.compile(r"\s*[\w:.]+\s*\.\s*(?:__send__|send|public_send)\(\s*:(\w+[?!]?)\s*[,)]")
@@ -51,19 +54,22 @@ class Builder:
     head: str  # the fixed call as written (``::Stripe::Checkout::Session.create``)
 
 
-def builders(file: str, original: str, content: str, sites: list[tuple[str, str, int, str]]) -> list[Builder]:
-    """Builder methods of an edited Ruby file: ``sites`` holds (path, target, call line, call head)."""
-    lines, changed = original.splitlines(), set()
-    matcher = difflib.SequenceMatcher(None, lines, content.splitlines(), autojunk=False)
-    for tag, a, b, _, _ in matcher.get_opcodes():
-        if tag != "equal":
-            changed |= set(range(a + 1, b + 1))
+def builders(file: str, original: str, edits: list[tuple[int, int]], sites: list[tuple[str, str, int, str]]) -> list[Builder]:
+    """Builder methods of an edited Ruby file: ``edits`` holds the (start, end) spans the fix rewrites in
+    ``original`` (the lines they touch are the changed lines), ``sites`` (path, target, call line, call head).
+    Linear in the file: the methods, their ends and every bare mention of a name are indexed in one pass each.
+    Raises :class:`fixtestfind.Overloaded` past :data:`MAX_DEFS` methods."""
+    lines = original.splitlines()
+    changed = _changed_lines(original, edits)
     defs = _defs(lines)
+    if len(defs) > MAX_DEFS:
+        raise Overloaded(f"{len(defs)} methods in one file")
     counts = Counter(name for name, *_ in defs)
+    mentioned = _mentions(lines)
     out = []
     for name, start, end, klass in defs:
-        outside = "\n".join(lines[: start - 1] + lines[end:])
-        if counts[name] != 1 or not re.search(rf"(?<![\w:]){re.escape(name)}(?![\w?!])", outside):
+        where = mentioned.get(name, [])  # lines naming it, ascending: a use outside the method itself is needed
+        if counts[name] != 1 or not where or not (where[0] < start or where[-1] > end):
             continue
         for path, target, line, head in sites:
             leaf = re.escape(target.rsplit(".", 1)[-1])
@@ -74,15 +80,46 @@ def builders(file: str, original: str, content: str, sites: list[tuple[str, str,
     return out
 
 
+def _changed_lines(text: str, edits: list[tuple[int, int]]) -> set[int]:
+    """The 1-based lines of ``text`` an edit's span touches (an insertion: the line it is made on)."""
+    newlines = [m.start() for m in re.finditer("\n", text)]
+    out: set[int] = set()
+    for start, end in edits:
+        first = bisect.bisect_left(newlines, start) + 1  # the line holding offset ``start``
+        last = bisect.bisect_left(newlines, max(start, end - 1)) + 1  # ... and the span's last character
+        out.update(range(first, last + 1))
+    return out
+
+
+def _mentions(lines: list[str]) -> dict[str, list[int]]:
+    """Every bare token of each line, by token: the lines (ascending) that mention it."""
+    out: dict[str, list[int]] = {}
+    for n, line in enumerate(lines, 1):
+        for m in TOKEN.finditer(line):
+            found = out.setdefault(m.group(0), [])
+            if not found or found[-1] != n:
+                found.append(n)
+    return out
+
+
 def _defs(lines: list[str]) -> list[tuple[str, int, int, str]]:
-    """(name, def line, end line, enclosing class path) by indentation, the layout rubocop keeps."""
+    """(name, def line, end line, enclosing class path) by indentation, the layout rubocop keeps: a method ends
+    at the first later non-blank line at its indent or less, when that line is its ``end``. One pass, with a
+    stack of the methods still open."""
     scopes: list[tuple[int, str]] = []
+    open_defs: list[tuple[int, str, int, str]] = []  # (indent, name, def line, class path)
     out = []
     for n, line in enumerate(lines, 1):
         stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
+        if not stripped:
             continue
         indent = len(line) - len(line.lstrip())
+        while open_defs and indent <= open_defs[-1][0]:
+            d_indent, name, start, klass = open_defs.pop()
+            if indent == d_indent and END.fullmatch(stripped):
+                out.append((name, start, n, klass))
+        if stripped.startswith("#"):
+            continue
         while scopes and indent <= scopes[-1][0]:
             scopes.pop()
         scope = SCOPE.match(stripped)
@@ -90,17 +127,9 @@ def _defs(lines: list[str]) -> list[tuple[str, int, int, str]]:
             scopes.append((indent, scope.group(2).lstrip(":")))
             continue
         d = DEF.match(stripped)
-        if not d:
-            continue
-        end = next(
-            (k for k in range(n + 1, len(lines) + 1)
-             if lines[k - 1].strip() and len(lines[k - 1]) - len(lines[k - 1].lstrip()) <= indent),
-            None,
-        )
-        if end is not None and re.fullmatch(r"end\b.*", lines[end - 1].strip()) and \
-                len(lines[end - 1]) - len(lines[end - 1].lstrip()) == indent:
-            out.append((d.group(1), n, end, "::".join(name for _, name in scopes)))
-    return out
+        if d:
+            open_defs.append((indent, d.group(1), n, "::".join(name for _, name in scopes)))
+    return sorted(out, key=lambda d: d[1])
 
 
 def find(text: str, file: str, sources: list[Builder]) -> list[Expect]:

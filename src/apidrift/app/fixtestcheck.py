@@ -22,6 +22,12 @@ only when:
 
 The parent then applies the edits to the base text itself. One bad edit rejects the whole file: it stays in
 the pull request's list of tests for a person to check.
+
+The checks run cheapest first: the path and migration checks need no network, the size and shape checks only
+the base blob, and the readers (linear, but the only part whose cost depends on the file's content) run only on
+a blob every other check has passed. A file with more candidate expectations than
+:data:`fixtestfind.MAX_EXPECTATIONS`, or a Ruby code fix with more methods than :data:`fixtestbuild.MAX_DEFS`,
+is refused outright: the child skipped it for the same reason, so it is listed, not updated.
 """
 
 from __future__ import annotations
@@ -39,16 +45,18 @@ MAX_FILES, MAX_EDITS, MAX_TEXT = 25, 50, 2000
 logger = logging.getLogger("apidrift.fixpr")
 
 
-def validate(gh: GitHubClient, token: str, full_name: str, base_sha: str, payload: dict, fixes: list[dict]) -> list[dict]:
+def validate(
+    gh: GitHubClient, token: str, full_name: str, base_sha: str, payload: dict, fixes: list[dict], repo_id: object = None,
+) -> list[dict]:
     """The test files the parent is willing to push, each ``{file, blob_sha, content, edits}``, its content
     built here from the base blob; ``fixes`` are the code fixes :func:`fixcheck.validate` accepted. The code
     fixes and the tests share the commit's caps. A GitHub error raises: no pull request goes out with fewer
-    tests than this check would have updated."""
+    tests than this check would have updated. Logs name the repository by ``repo_id`` only."""
     accepted: list[dict] = []
     total = sum(len(f["content"].encode("utf-8")) for f in fixes)
     for item in claimed(payload, fixes):
         if len(fixes) + len(accepted) >= fixcheck.MAX_FILES:
-            logger.info("repo %s: not pushing one test file (over the size caps)", full_name)
+            logger.info("repo %s: not pushing one test file (over the size caps)", repo_id)
             continue
         file, edits = item["file"], item["edits"]
         text, why = fixcheck.base_text(gh, token, full_name, base_sha, file, item["blob_sha"])
@@ -59,7 +67,7 @@ def validate(gh: GitHubClient, token: str, full_name: str, base_sha: str, payloa
         if why is None:
             why = _check(text, LANGUAGES[PurePosixPath(file).suffix.lower()], edits, file, item["listed"], fixes)
         if why is not None:
-            logger.info("repo %s: not pushing one test file (%s)", full_name, why)
+            logger.info("repo %s: not pushing one test file (%s)", repo_id, why)
             continue
         total += size
         accepted.append({
@@ -139,9 +147,8 @@ def _edits(items: object, changed: set[tuple[str, str]]) -> list[dict] | None:
 def _check(
     text: str, language: str, edits: list[dict], file: str, listed: set[tuple[str, int]], fixes: list[dict],
 ) -> str | None:
-    expects = _expectations(text, language, file, fixes)
-    if expects is None:
-        return "the test file could not be read"
+    """Why the edits are refused, or None. Shape, line and listing first (each a look at the edit's own
+    bytes); the readers run once, last, only when every edit has passed them."""
     for e in edits:
         if e["end"] > len(text):
             return "an edit lies outside the file"
@@ -152,14 +159,18 @@ def _check(
             return f"an edit is not a plain {m.action} of the key"
         if text.count("\n", 0, at) + 1 != e["line"] or (file, e["line"]) not in listed:
             return "an edit's line is not a listed test line"
+    expects, why = _expectations(text, language, file, fixes)
+    if why is not None:
+        return why
+    for e in edits:
         if not any(lo <= e["start"] and e["end"] <= hi for lo, hi in expects):
             return "an edit is not inside an expectation of the call"
     return None
 
 
-def _expectations(text: str, language: str, file: str, fixes: list[dict]) -> list[tuple[int, int]] | None:
+def _expectations(text: str, language: str, file: str, fixes: list[dict]) -> tuple[list[tuple[int, int]], str | None]:
     """The argument spans of the expectations the parent finds itself in the base text (:mod:`fixtestfind`,
-    and for Ruby the builder specs of the code it accepted, :mod:`fixtestbuild`); None when reading fails."""
+    and for Ruby the builder specs of the code it accepted, :mod:`fixtestbuild`), or why reading refused."""
     from .. import fixtestbuild, fixtestfind  # the readers the child used, run here on the bytes GitHub gave
 
     try:
@@ -169,8 +180,11 @@ def _expectations(text: str, language: str, file: str, fixes: list[dict]) -> lis
             for fix in fixes:
                 if LANGUAGES[PurePosixPath(fix["file"]).suffix.lower()] == "ruby":
                     sites = [(s["path"], s["target"], s["line"], "") for s in fix["sites"]]
-                    sources += fixtestbuild.builders(fix["file"], fix["original"], fix["content"], sites)
+                    spans = [(e["start"], e["end"]) for e in fix["edits"]]
+                    sources += fixtestbuild.builders(fix["file"], fix["original"], spans, sites)
             found += fixtestbuild.find(text, file, sources)
+    except fixtestfind.Overloaded:
+        return [], "the file has more expectations or methods than are read"
     except Exception:  # noqa: BLE001 - untrusted bytes: a reader failure only means this test is not updated
-        return None
-    return [(x.lo, x.hi) for x in found]
+        return [], "the test file could not be read"
+    return [(x.lo, x.hi) for x in found], None

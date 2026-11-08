@@ -14,6 +14,10 @@ Each edited test must pass the checks the code does where they apply: the expect
 with the same calls, the field delta at each edited one is exactly the table's and empty at the others, the
 file's own Stripe calls are unchanged, exactly the edited key tokens are gone, the text outside the edits is
 untouched, and Python still parses (PHP: :func:`phplex.same_structure`). Any failure drops the whole file.
+
+A test file with more candidate expectations than :data:`fixtestfind.MAX_EXPECTATIONS`, or a Ruby code file
+with more methods than :data:`fixtestbuild.MAX_DEFS`, is skipped the same way (its tests stay listed): the
+readers are linear, and the cap bounds the work one repository can ask of the child and of the parent.
 """
 
 from __future__ import annotations
@@ -126,8 +130,12 @@ def _builders(plan, impacts, eligible) -> list[fixtestbuild.Builder]:
                      if (i.usage.file, i.usage.line, i.usage.path) == (fix.file, s.line, s.path)}
             if (s.path, s.target) in eligible and len(calls) == 1:
                 sites.append((s.path, s.target, s.line, calls.pop()))
-        if sites:
-            out += fixtestbuild.builders(fix.file, fix.original, fix.content, sites)
+        if not sites:
+            continue
+        try:
+            out += fixtestbuild.builders(fix.file, fix.original, [(e.start, e.end) for e in fix.edits], sites)
+        except fixtestfind.Overloaded:
+            continue  # a file with more methods than the cap: its builder specs stay listed
     return out
 
 
@@ -140,7 +148,10 @@ def _plan_file(base: Path, file: str, eligible, index, sources) -> TestFix | Non
         return None
     if len(raw) > MAX_TEST_BYTES or language is None:
         return None
-    expects = _expects(text, file, language, sources)
+    try:
+        expects = _expects(text, file, language, sources)
+    except fixtestfind.Overloaded:
+        return None  # more candidate expectations than the cap: the file stays listed
     edits: list[tuple[Edit, Migration, int]] = []  # with the index of the expectation
     for n, ex in enumerate(expects):
         found = _expect_edits(ex, text, file, language, eligible, index)
