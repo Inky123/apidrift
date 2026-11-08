@@ -30,7 +30,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from . import phpcross, phpparse, scanner
+from . import phpcross, phpparse, phpvendor, scanner
 from .phphelpers import PhpHelpers, _named
 from .phpscope import BIND, INPLACE, READS_ALL
 
@@ -54,7 +54,8 @@ def php_kept(text: str, tokens, key: str, where: tuple[Path | None, str]) -> set
     out: set[int] = set()
     for t in tokens:
         got = _read(parsed, helpers, t.pos - 1, key) if t.quoted else None
-        if got is not None and _no_literal_callers(root, got, key):
+        # the same (function, parameter, key) question is asked once per token: answered once per fix planning
+        if got is not None and phpvendor.memo(("no_literal_callers", str(root), got, key), lambda: _no_literal_callers(root, got, key)):
             out.add(t.pos)
     return out
 
