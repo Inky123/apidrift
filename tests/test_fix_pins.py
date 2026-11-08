@@ -63,4 +63,33 @@ def test_find_pins_reports_the_gumroad_server_pin(tmp_path):
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "charge.rb").write_text("Stripe::PaymentIntent.create(amount: 1)\n")
     pins = find_pins(tmp_path, ["app/charge.rb"])
-    assert [(p.file, p.line, p.version) for p in pins] == [("config/initializers/003_stripe.rb", 3, "2023-10-16")]
+    assert [(p.file, p.line, p.version, p.kind) for p in pins] == [
+        ("config/initializers/003_stripe.rb", 3, "2023-10-16", "server")]
+
+
+@pytest.mark.parametrize("rel,text,kind", [
+    ("spec/models/charge_spec.rb", "Stripe.api_version = '2023-10-16'\n", "test"),
+    ("app/x.test.ts", "const s = new Stripe(k, { apiVersion: '2023-10-16' });\n", "test"),
+    ("test/fixtures/x.py", "stripe.api_version = '2023-10-16'\n", "test"),
+    ("e2e/setup.js", "const s = new Stripe(k, { apiVersion: '2023-10-16' });\n", "test"),
+    # browser Stripe.js: loadStripe always; the global Stripe() only where the server SDK is never imported
+    ("web/pay.tsx", "const p = loadStripe(pk, {\n  stripeAccount: a,\n  apiVersion: '2023-10-16',\n});\n", "browser"),
+    ("client/card.js", "const stripe = Stripe(publishableKey, { apiVersion: '2020-08-27' });\n", "browser"),
+    ("client/konbini.js", "const stripe = Stripe(pk, {\n  betas: ['b'],\n  apiVersion: '2020-08-27; konbini_beta=v1',\n});\n",
+     "browser"),
+    # the server SDK
+    ("server/a.js", "const stripe = require('stripe')(key, { apiVersion: '2023-10-16' });\n", "server"),
+    ("server/b.ts", "import Stripe from 'stripe';\nconst s = new Stripe(key, { apiVersion: '2023-10-16' });\n", "server"),
+    ("server/c.ts", "import Stripe from 'stripe';\nconst s = Stripe(key, { apiVersion: '2023-10-16' });\n", "server"),
+    ("server/d.js", "const s = new Stripe(key, { apiVersion: '2023-10-16' });\n", "server"),
+    ("server/e.js", "const p = loadStripe(pk);\nconst s = new Stripe(key, { apiVersion: '2023-10-16' });\n", "server"),
+    ("server/f.py", "stripe.api_version = '2023-10-16'  # loadStripe(\n", "server"),
+    ("app/stripe_loader.rb", "Stripe.api_version = '2023-10-16'\n", "server"),
+])
+def test_pin_kind(tmp_path, rel, text, kind):
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("// stripe\n" + text if not rel.endswith((".py", ".rb")) else "# stripe\n" + text)
+    (tmp_path / "package.json").write_text("{}")
+    pins = find_pins(tmp_path, [rel])
+    assert [p.kind for p in pins if p.file == rel] == [kind]

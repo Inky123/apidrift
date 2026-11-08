@@ -51,8 +51,40 @@ def test_deletes_only_is_unchanged():
     assert first_line(body([PAYTO])).endswith(prpins.DELETES_ONLY)
 
 
-def pin(version: str, file: str = "config/stripe.rb", line: int = 3) -> dict:
-    return {"file": file, "line": line, "version": version}
+def pin(version: str, file: str = "config/stripe.rb", line: int = 3, **extra) -> dict:
+    return {"file": file, "line": line, "version": version, **extra}
+
+
+def test_server_pins_first_and_test_and_browser_pins_on_one_counted_line():
+    pins = [
+        pin("2023-10-16", "spec/a_spec.rb", 9, kind="server"),  # the path makes it a test whatever the child says
+        pin("2020-08-27", "client/card.js", 13, kind="browser"),
+        pin("2023-10-16", "config/initializers/stripe.rb", 3, kind="test"),  # not a test path: the server's pin
+        pin("2022-11-15", "app/services/tax.rb", 19),
+    ]
+    lines = section(body([PMT], pins=pins)).split("\n")
+    assert lines[2:4] == [
+        f"- https://github.com/o/r/blob/{SHA}/config/initializers/stripe.rb#L3 pins `2023-10-16`",
+        f"- https://github.com/o/r/blob/{SHA}/app/services/tax.rb#L19 pins `2022-11-15`",
+    ]
+    assert lines[4] == (
+        "Also pinned in tests and browser Stripe.js code, which does not set your server's API version (2): "
+        f"https://github.com/o/r/blob/{SHA}/spec/a_spec.rb#L9 (`2023-10-16`), "
+        f"https://github.com/o/r/blob/{SHA}/client/card.js#L13 (`2020-08-27`)."
+    )
+    assert len(lines) == 5
+
+
+def test_only_test_pins_say_there_is_no_server_pin():
+    text = section(body([ANCHOR], pins=[pin("2023-10-16", "test/a.py", 1), pin("2023-10-16", "test/b.py", 2)]))
+    assert f"No server-side API-version pin older than {ENDIVE} was found in the scanned files." in text
+    assert "Also pinned in tests, which does not set your server's API version (2): " in text
+
+
+def test_a_deletes_only_pull_splits_them_too():
+    text = section(body([PAYTO], pins=[pin("2023-10-16", "client/x.js", 1, kind="browser")]))
+    assert text.split("\n")[1] == ("Also pinned in browser Stripe.js code, which does not set your server's API version "
+                                   f"(1): https://github.com/o/r/blob/{SHA}/client/x.js#L1 (`2023-10-16`).")
 
 
 def section(text: str) -> str:
@@ -75,7 +107,7 @@ def test_a_wrap_pin_says_it_rejects_and_no_older_pin_says_so():
     text = section(body([ANCHOR], pins=[pin("2024-09-30.acacia")]))
     assert f"older than {ENDIVE}, which rejects the new shape; bump them" in text
     text = section(body([ANCHOR], pins=[pin("2026-10-28.endive")]))
-    assert f"No API-version pin older than {ENDIVE} was found in the scanned files." in text and "rejects" not in text
+    assert f"No server-side API-version pin older than {ENDIVE} was found in the scanned files." in text and "rejects" not in text
 
 
 @pytest.mark.parametrize("bad", [
@@ -84,4 +116,4 @@ def test_a_wrap_pin_says_it_rejects_and_no_older_pin_says_so():
 ])
 def test_a_pin_the_parent_cannot_compare_is_dropped(bad):
     text = section(body([PMT], pins=[bad]))
-    assert f"No API-version pin older than {ENDIVE} was found" in text and "2023" not in text
+    assert f"No server-side API-version pin older than {ENDIVE} was found" in text and "2023" not in text

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import scanner
+from .jsparse import Source
 from .scanner import LANGUAGES
 
 MAX_PINS = 100
@@ -28,11 +29,48 @@ VERSION = re.compile(r"(\d{4}-\d{2}-\d{2}(?:\.[A-Za-z]\w*)?)(?:;[^\n]*)?")  # th
 CONTINUES = ("?", ":", "||", "&&", "??", ".", "+", "or ", "and ", "if ", "else", "unless ")
 
 
+KINDS = ("server", "test", "browser")
+JS_SUFFIXES = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".vue", ".svelte"}
+# Stripe.js: ``loadStripe(pk, {apiVersion})`` (@stripe/stripe-js) or the global ``Stripe(pk, {apiVersion})``.
+BROWSER_CALL = re.compile(r"(?<![\w$.])(loadStripe|Stripe)\s*\(")
+SERVER_IMPORT = re.compile(r"""\brequire\(\s*['"]stripe['"]\s*\)|\bfrom\s+['"]stripe['"]|\bimport\s+['"]stripe['"]""")
+
+
 @dataclass(frozen=True)
 class Pin:
     file: str
     line: int
     version: str
+    kind: str = "server"  # one of KINDS: a test file, browser Stripe.js, or anything else (the server)
+
+
+def test_path(rel: str) -> bool:
+    """The scanner's test and fixture rules (directories like ``spec/``, ``__tests__/``, ``fixtures/``; names like
+    ``*_spec.rb``, ``*.test.ts``): such a pin does not set the version the application's requests use."""
+    *dirs, name = rel.split("/")
+    return any(d in scanner.TEST_DIRS or d in scanner.DOC_DIRS for d in dirs) or bool(scanner.TEST_FILE.match(name))
+
+
+def pin_kind(rel: str, text: str, pos: int) -> str:
+    if test_path(rel):
+        return "test"
+    if Path(rel).suffix.lower() in JS_SUFFIXES and _in_browser_call(text, pos):
+        return "browser"
+    return "server"
+
+
+def _in_browser_call(text: str, pos: int) -> bool:
+    """The pin sits in the arguments of ``loadStripe(...)``, or of a bare ``Stripe(...)`` (not ``new Stripe``) in
+    a file that never imports the server SDK (``require('stripe')``, ``from 'stripe'``)."""
+    server = SERVER_IMPORT.search(text) is not None
+    src = None
+    for m in reversed(list(BROWSER_CALL.finditer(text, max(0, pos - 2000), pos))):
+        if m.group(1) == "Stripe" and (server or re.search(r"\bnew\s*$", text[max(0, m.start() - 8) : m.start()])):
+            continue
+        src = src or Source(text)
+        if src.skip_balanced(m.end() - 1) > pos:
+            return True
+    return False
 
 
 def pin_versions(text: str) -> list[tuple[int, str]]:
@@ -142,7 +180,7 @@ def find_pins(root: Path, fixed: list[str]) -> list[Pin]:
             continue
         rel = path.relative_to(base).as_posix()
         for pos, version in pin_versions(text):
-            pins.append(Pin(rel, text.count("\n", 0, pos) + 1, version))
+            pins.append(Pin(rel, text.count("\n", 0, pos) + 1, version, pin_kind(rel, text, pos)))
             if len(pins) >= MAX_PINS:
                 return pins
     return pins

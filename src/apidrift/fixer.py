@@ -103,7 +103,7 @@ class FixPlan:
             "unfixable": [
                 {"file": u.file, "line": u.line, "path": u.path, "target": u.target, "why": u.why} for u in self.unfixable
             ],
-            "pins": [{"file": p.file, "line": p.line, "version": p.version} for p in self.pins],
+            "pins": [{"file": p.file, "line": p.line, "version": p.version, "kind": p.kind} for p in self.pins],
             "sdks": [{"sdk": s.sdk, "version": s.version, "file": s.file, "line": s.line} for s in self.sdks],
             "migrations": [m.to_dict() for m in self.migrations],
             "leftovers": [{"file": f, "line": line} for f, line in self.leftovers],

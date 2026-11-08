@@ -104,7 +104,7 @@ def test_payload_shape_is_the_frozen_contract(sample_plan):
     assert set(data["fixes"][0]) == {"file", "blob_sha", "content", "sites"}
     assert set(data["fixes"][0]["sites"][0]) == {"line", "path", "target", "replacement", "action"}
     assert data["fixes"][0]["sites"][0]["action"] == "rename" and data["possibly_remaining"] == []
-    assert set(data["pins"][0]) == {"file", "line", "version"}
+    assert set(data["pins"][0]) == {"file", "line", "version", "kind"} and data["pins"][0]["kind"] in ("server", "test", "browser")
     assert set(data["migrations"][0]) >= {"method", "path", "target", "replacement", "doc", "note"}
     assert data["migrations"][0]["method"] == "post"
     json.dumps(data)

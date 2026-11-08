@@ -14,7 +14,7 @@ import logging
 import re
 from pathlib import PurePosixPath
 
-from .. import fixsdk, migrations
+from .. import fixpins, fixsdk, migrations
 from ..scanner import LANGUAGES
 from . import issue
 from .github import GitHubClient, GitHubError
@@ -137,7 +137,9 @@ def pin_list(items: object) -> list[dict]:
             continue
         if not isinstance(version, str) or not PIN_VERSION_RE.fullmatch(version):
             continue
-        entry = {"file": file, "line": line, "version": version}
+        # A test path is re-derived here from the path alone; "browser" is the child's reading of the file's text.
+        kind = "test" if fixpins.test_path(file) else ("browser" if item.get("kind") == "browser" else "server")
+        entry = {"file": file, "line": line, "version": version, "kind": kind}
         if entry not in out:
             out.append(entry)
     return out
