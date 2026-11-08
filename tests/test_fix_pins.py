@@ -77,8 +77,29 @@ def test_find_pins_reports_the_gumroad_server_pin(tmp_path):
     ("client/card.js", "const stripe = Stripe(publishableKey, { apiVersion: '2020-08-27' });\n", "browser"),
     ("client/konbini.js", "const stripe = Stripe(pk, {\n  betas: ['b'],\n  apiVersion: '2020-08-27; konbini_beta=v1',\n});\n",
      "browser"),
-    # invoiceninja stripe-browserpay.js: the options object is built first, then passed to the global Stripe()
+    # invoiceninja stripe-browserpay.js: a bare Stripe() alone is not evidence; its public/ copy or Stripe.js is
     ("resources/js/pay.js", "let config = {};\nconfig.apiVersion = '2020-08-27';\nthis.stripe = Stripe(key, config);\n",
+     "server"),
+    ("public/js/pay.js", "let config = {};\nconfig.apiVersion = '2020-08-27';\nthis.stripe = Stripe(key, config);\n",
+     "browser"),
+    ("resources/js/pay2.js", "// <script src=\"https://js.stripe.com/v3/\">\nconfig.apiVersion = '2020-08-27';\n", "browser"),
+    ("static/x.js", "// new Stripe( in a comment is not code\nconst s = Stripe(pk, { apiVersion: '2020-08-27' });\n",
+     "browser"),
+    ("web/y.tsx", "const s = '<loadStripe(pk, {'; const o = { apiVersion: '2020-08-27' };\n", "server"),  # in a string
+    # the server SDK, imported in any form (review item 4)
+    ("server/api.js", "const { default: Stripe } = await import('stripe');\n"
+     "const stripe = Stripe(process.env.SK, { apiVersion: '2020-08-27' });\n", "server"),
+    ("supabase/functions/x/index.ts", "import Stripe from 'npm:stripe@14';\n"
+     "export const stripe = Stripe(Deno.env.get('SK')!, { apiVersion: '2023-10-16' });\n", "server"),
+    ("public/fn/index.ts", "import Stripe from 'https://esm.sh/stripe@14?target=deno';\n"
+     "const stripe = Stripe(key, { apiVersion: '2023-10-16' });\n", "server"),
+    ("client/stripe.js", "const stripeLib = require('stripe');\nconst stripe = stripeLib(key, { apiVersion: '2020-08-27' });\n",
+     "server"),
+    ("config/stripe.js", "export const STRIPE = { apiVersion: '2020-08-27' };\n// used by Stripe(...) in client\n", "server"),
+    ("lib/stripe.js", "const cfg = { apiVersion: '2020-08-27' }\nmodule.exports = (k) => require(\"stripe\")(k, cfg)\n",
+     "server"),
+    ("client/n.js", "import S from 'stripe/lib/stripe.js';\nconst s = S(k, { apiVersion: '2020-08-27' });\n", "server"),
+    ("client/o.js", "import { loadStripe } from '@stripe/stripe-js';\nloadStripe(pk, { apiVersion: '2020-08-27' });\n",
      "browser"),
     # the server SDK
     ("server/g.js", "let config = {};\nconfig.apiVersion = '2020-08-27';\nconst s = new Stripe(key, config);\n", "server"),
@@ -98,3 +119,17 @@ def test_pin_kind(tmp_path, rel, text, kind):
     (tmp_path / "package.json").write_text("{}")
     pins = find_pins(tmp_path, [rel])
     assert [p.kind for p in pins if p.file == rel] == [kind]
+
+
+def test_a_file_is_read_for_kinds_once_however_many_pins_it_has(tmp_path, monkeypatch):
+    """Review item 10: the browser evidence used to be re-read per pin."""
+    from apidrift import fixpins
+
+    made = []
+    real = fixpins.Kinds
+    monkeypatch.setattr(fixpins, "Kinds", lambda rel, text: made.append(rel) or real(rel, text))
+    body = "loadStripe(pk, {\n" + "".join(f"  apiVersion: '2020-08-{i % 28 + 1:02d}',\n" for i in range(80)) + "});\n"
+    (tmp_path / "package.json").write_text("{}")
+    (tmp_path / "a.js").write_text("// stripe\n" + body + "x = 1;\n" * 20000)
+    pins = find_pins(tmp_path, ["a.js"])
+    assert len(pins) == 80 and {p.kind for p in pins} == {"browser"} and made == ["a.js"]

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import scanner
-from .jsparse import Source
+from .jsparse import Mask, Source
 from .scanner import LANGUAGES
 
 MAX_PINS = 100
@@ -31,10 +31,16 @@ CONTINUES = ("?", ":", "||", "&&", "??", ".", "+", "or ", "and ", "if ", "else",
 
 KINDS = ("server", "test", "browser")
 JS_SUFFIXES = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".vue", ".svelte"}
-# Stripe.js: ``loadStripe(pk, {apiVersion})`` (@stripe/stripe-js) or the global ``Stripe(pk, {apiVersion})``.
-BROWSER_CALL = re.compile(r"(?<![\w$.])(loadStripe|Stripe)\s*\(")
+BROWSER_DIRS = {"client", "public", "static"}
+LOAD_STRIPE = re.compile(r"(?<![\w$.])loadStripe\s*\(")  # @stripe/stripe-js: always the browser
 NEW_STRIPE = re.compile(r"\bnew\s+Stripe\s*\(")
-SERVER_IMPORT = re.compile(r"""\brequire\(\s*['"]stripe['"]\s*\)|\bfrom\s+['"]stripe['"]|\bimport\s+['"]stripe['"]""")
+STRIPE_JS_URL = re.compile(r"js\.stripe\.com/")
+# Any import of the server SDK: require/import()/import/from with 'stripe', 'stripe/...', 'npm:stripe@14',
+# 'https://esm.sh/stripe@14?target=deno' (never '@stripe/stripe-js' or 'stripe-js').
+SERVER_IMPORT = re.compile(
+    r"""(?:\brequire\s*\(\s*|\bimport\s*\(\s*|\bfrom\s+|\bimport\s+)(['"`])"""
+    r"""(?:npm:|https?://[^'"`\s]*/)?stripe(?:@[^'"`/?\s]*)?(?:[/?][^'"`\s]*)?\1"""
+)
 
 
 @dataclass(frozen=True)
@@ -53,33 +59,38 @@ def test_path(rel: str) -> bool:
 
 
 def pin_kind(rel: str, text: str, pos: int) -> str:
-    if test_path(rel):
-        return "test"
-    if Path(rel).suffix.lower() in JS_SUFFIXES and _in_browser_call(text, pos):
-        return "browser"
-    return "server"
+    return Kinds(rel, text).of(pos)
 
 
-def _in_browser_call(text: str, pos: int) -> bool:
-    """The pin sits in the arguments of ``loadStripe(...)``, or of a bare ``Stripe(...)`` (not ``new Stripe``) in
-    a file that never imports the server SDK (``require('stripe')``, ``from 'stripe'``); or the file is Stripe.js
-    code throughout: it calls one of those, never imports the server SDK and never writes ``new Stripe(``."""
-    server = SERVER_IMPORT.search(text) is not None
-    if not server and not NEW_STRIPE.search(text) and any(_browser_call(text, m) for m in BROWSER_CALL.finditer(text)):
-        return True  # a Stripe.js file (``config.apiVersion = '...'; Stripe(pk, config)``): no server SDK in it at all
-    src = None
-    for m in reversed(list(BROWSER_CALL.finditer(text, max(0, pos - 2000), pos))):
-        if m.group(1) == "Stripe" and (server or not _browser_call(text, m)):
-            continue
-        src = src or Source(text)
-        if src.skip_balanced(m.end() - 1) > pos:
-            return True
-    return False
+class Kinds:
+    """Which kind each pin in one file is, read once per file. "browser" needs positive evidence and a file that
+    never imports the server SDK in any form: the pin sits in ``loadStripe(...)``'s arguments (outside strings
+    and comments), or the file loads ``js.stripe.com``, or it lives under a client/, public/ or static/
+    directory without writing ``new Stripe(``. Everything else that is not a test file is the server's."""
 
+    def __init__(self, rel: str, text: str) -> None:
+        self.test = test_path(rel)
+        self.js = Path(rel).suffix.lower() in JS_SUFFIXES
+        self.calls: list[tuple[int, int]] = []
+        self.whole = False
+        if self.test or not self.js or SERVER_IMPORT.search(text):
+            self.js = False  # a server file: no browser evidence counts
+            return
+        mask, src = Mask(text, ruby=False), None
+        for m in LOAD_STRIPE.finditer(text):
+            if not mask.covers(m.start()):
+                src = src or Source(text)
+                self.calls.append((m.end() - 1, src.skip_balanced(m.end() - 1)))
+        code_new = any(not mask.covers(m.start()) for m in NEW_STRIPE.finditer(text))
+        dirs = set(rel.split("/")[:-1])
+        self.whole = not code_new and (STRIPE_JS_URL.search(text) is not None or bool(dirs & BROWSER_DIRS))
 
-def _browser_call(text: str, m: re.Match[str]) -> bool:
-    """``loadStripe(``, or ``Stripe(`` that is not ``new Stripe(``."""
-    return m.group(1) == "loadStripe" or not re.search(r"\bnew\s*$", text[max(0, m.start() - 8) : m.start()])
+    def of(self, pos: int) -> str:
+        if self.test:
+            return "test"
+        if self.js and (self.whole or any(a < pos < b for a, b in self.calls)):
+            return "browser"
+        return "server"
 
 
 def pin_versions(text: str) -> list[tuple[int, str]]:
@@ -188,8 +199,10 @@ def find_pins(root: Path, fixed: list[str]) -> list[Pin]:
         if text is None or "stripe" not in text.lower():
             continue
         rel = path.relative_to(base).as_posix()
+        kinds = None
         for pos, version in pin_versions(text):
-            pins.append(Pin(rel, text.count("\n", 0, pos) + 1, version, pin_kind(rel, text, pos)))
+            kinds = kinds or Kinds(rel, text)  # once per file
+            pins.append(Pin(rel, text.count("\n", 0, pos) + 1, version, kinds.of(pos)))
             if len(pins) >= MAX_PINS:
                 return pins
     return pins
