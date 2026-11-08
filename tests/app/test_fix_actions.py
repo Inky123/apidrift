@@ -3,8 +3,10 @@ migration table, and the pull request describes each action in fixed sentences."
 
 from __future__ import annotations
 
+import shutil
+
 import pytest
-from conftest import SHA
+from conftest import SHA, Disk, blob_sha
 from test_fix import CHARGES, charges_migration, claim, scan  # noqa: F401  (fixtures)
 
 from apidrift import migrations
@@ -64,21 +66,32 @@ def test_a_site_that_disagrees_with_the_table_is_rejected(change):
     assert fixcheck.reject_sites([site(PMT), site(change)]) is not None
 
 
-class Meta:
-    """Answers the content-meta lookup as if every file is at the scanned blob."""
+SUB_JS = (
+    "stripe.subscriptions.update(id, { billing_cycle_anchor: 'now' });\n"
+    "stripe.paymentMethods.update(id, { payto: { pay_id: 'x' }, metadata: {} });\n"
+)
 
-    def get_content_meta(self, token, full_name, file, sha):
-        return {"type": "file", "sha": "0" * 40}
+
+def sub_fix(**extra) -> dict:
+    """A real two-site fix of SUB_JS: the wrap and the delete, as edits on the base text."""
+    at, gone = SUB_JS.index("'now'"), "payto: { pay_id: 'x' }, "
+    edits = [{"start": at, "end": at + 5, "text": "{ type: 'now' }", "target": "billing_cycle_anchor"},
+             {"start": SUB_JS.index(gone), "end": SUB_JS.index(gone) + len(gone), "text": "", "target": "payto"}]
+    return {"file": "sub.js", "blob_sha": blob_sha(SUB_JS.encode()), "edits": edits, **extra}
 
 
-def test_validate_rebuilds_each_site_from_the_table_and_drops_child_extras():
-    child = fix(site(ANCHOR, value="{type: 'evil'}", note="@octocat"), site(PAYTO, 9, why="x"), file="sub.js")
-    (accepted,) = fixcheck.validate(Meta(), "t", "o/r", SHA, [child])
+def test_validate_rebuilds_each_site_from_the_table_and_drops_child_extras(tmp_path):
+    (tmp_path / "sub.js").write_text(SUB_JS)
+    child = sub_fix(sites=[site(ANCHOR, 1, value="{type: 'evil'}", note="@octocat"), site(PAYTO, 2, why="x")], extra="@x")
+    (accepted,) = fixcheck.validate(Disk(tmp_path), "t", "o/r", SHA, [child])
     assert accepted["sites"] == [
-        {"line": 3, "path": ANCHOR["path"], "target": "billing_cycle_anchor", "replacement": "billing_cycle_anchor", "action": "wrap_type"},
-        {"line": 9, "path": PAYTO["path"], "target": "payto", "replacement": "", "action": "delete"},
+        {"line": 1, "path": ANCHOR["path"], "target": "billing_cycle_anchor", "replacement": "billing_cycle_anchor", "action": "wrap_type"},
+        {"line": 2, "path": PAYTO["path"], "target": "payto", "replacement": "", "action": "delete"},
     ]
-    assert fixcheck.validate(Meta(), "t", "o/r", SHA, [fix(site(ANCHOR), site(PMT, action="delete", replacement=""))]) == []
+    assert accepted["content"] == SUB_JS.replace("'now'", "{ type: 'now' }").replace("payto: { pay_id: 'x' }, ", "")
+    assert set(accepted) == {"file", "blob_sha", "sites", "edits", "content", "original"}
+    mislabelled = sub_fix(sites=[site(ANCHOR, 1), site(PMT, action="delete", replacement="")])
+    assert fixcheck.validate(Disk(tmp_path), "t", "o/r", SHA, [mislabelled]) == []
 
 
 def test_a_mislabelled_site_pushes_nothing(scan, installed, conn, gh, settings):
@@ -88,9 +101,13 @@ def test_a_mislabelled_site_pushes_nothing(scan, installed, conn, gh, settings):
     assert installed.refs == {} and installed.blobs == {}
 
 
-def test_a_documented_delete_opens_a_pull_described_by_the_parent(scan, installed, conn, gh, settings):
+def test_a_documented_delete_opens_a_pull_described_by_the_parent(scan, installed, conn, gh, settings, tmp_path):
+    shutil.copytree(installed.tree, tmp_path / "tree")
+    installed.tree = tmp_path / "tree"
+    (installed.tree / "sub.js").write_text(SUB_JS)
     installed.grant_writes()
-    scan.payload["fixes"][0]["sites"] = [site(PAYTO, 5)]
+    scan.payload["fixes"] = [sub_fix(sites=[site(PAYTO, 2)])]
+    scan.payload["fixes"][0]["edits"] = scan.payload["fixes"][0]["edits"][1:]  # only the delete
     scan.payload["migrations"] = [dict(PAYTO, method="post", note="cc @octocat", doc="javascript:x", introduced="2099-01-01.x")]
     assert run_job(claim(conn), conn, gh, settings).endswith("pr: opened #2")
     pull = installed.pulls[2]

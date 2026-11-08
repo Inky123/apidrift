@@ -55,3 +55,43 @@ def test_the_pull_request_names_the_tests_to_update():
     assert "Tests that name the old field" in body and "fails until it is updated here" in body
     assert "spec/pay_spec.rb#L7" in body
     assert "Tests that name" not in render({**payload, "tests": []})
+    with_cassettes = render({**payload, "tests": [], "cassettes": [
+        {"file": "spec/cassettes/pay.yml", "line": 9}, {"file": "spec/pay_spec.rb", "line": 1}]})
+    assert "Recorded responses to re-record: https://github.com/octo/shop/blob/" in with_cassettes
+    assert "spec/cassettes/pay.yml#L9" in with_cassettes and "pay_spec.rb#L1" not in with_cassettes  # YAML only
+
+
+def test_only_request_spellings_in_code_of_the_fixed_language_are_listed(tmp_path):
+    write(tmp_path, "spec/pay_spec.rb", (
+        "# payment_method_types is going away\n"
+        "it 'sends payment_method_types' do\n"
+        "  expect(params[:payment_method_types]).to eq(['card'])\n"
+        "  allow(intent).to receive(:payment_method_types).and_return(%w[card])\n"
+        "end\n"))
+    write(tmp_path, "app/javascript/pay.test.tsx", "const options = { payment_method_types: ['card'] };\n")
+    write(tmp_path, "tests/test_pay.py", "PaymentMethodTypes = 1\nassert x['payment_method_types']\n")
+    write(tmp_path, "internal/pay_test.go", "// PaymentMethodTypes: nil,\nwant := Params{PaymentMethodTypes: nil}\n")
+    write(tmp_path, "src/elements.test.ts", "elements.create('payment', { paymentMethodTypes: ['card'] })\n")
+    sites = [("rename", "payment_method_types")]
+    assert stale_tests(tmp_path, sites, {"app/pay.rb"}) == [("spec/pay_spec.rb", 3)]  # a browser test cannot run Ruby
+    assert stale_tests(tmp_path, sites, {"app/pay.py", "srv/pay.go"}) == [("internal/pay_test.go", 2), ("tests/test_pay.py", 2)]
+    assert stale_tests(tmp_path, sites, {"api/pay.js"}) == [("app/javascript/pay.test.tsx", 1)]  # JS and TS are one
+
+
+def test_literal_stripe_objects_are_responses_and_are_not_listed(tmp_path):
+    write(tmp_path, "tests/__init__.py", (
+        "FAKE_SETUP_INTENT = {\n"
+        '    "id": "seti_fake0001",\n'
+        '    "object": "setup_intent",\n'
+        '    "payment_method_types": ["card"],\n'
+        '    "nested": {"payment_method_types": ["card"]},\n'
+        "}\n"
+        'EXPECTED = {"object": "setup_intent", "payment_method_types": ["card"]}\n'
+        'SENT = {"id": some_id, "object": "x", "payment_method_types": ["card"]}\n'
+        "def f():\n"
+        '    m.assert_called_with(payment_method_types=["card"], metadata={"id": "1", "object": "o"})\n'))
+    write(tmp_path, "tests/WebhookTest.php", "<?php\n$e = ['id' => 'pi_1', 'object' => 'payment_intent', 'payment_method_types' => ['card']];\n")
+    write(tmp_path, "spec/hook_spec.rb", "event = { id: 'evt_1', object: 'event', data: { object: { id: 'pi_1', 'object' => 'payment_intent',\n"
+                                         "  payment_method_types: ['card'] } } }\n")
+    found = stale_tests(tmp_path, [("rename", "payment_method_types")], set())
+    assert found == [("tests/__init__.py", 5), ("tests/__init__.py", 7), ("tests/__init__.py", 8), ("tests/__init__.py", 10)]

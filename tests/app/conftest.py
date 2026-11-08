@@ -144,6 +144,29 @@ def blob_sha(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
+class Disk:
+    """GitHub's content lookup and blob fetch for the parent's checks, answered from a checkout on disk (a
+    ``swap`` maps a path to the bytes a lying blob endpoint returns instead)."""
+
+    def __init__(self, root: Path, swap: dict[str, bytes] | None = None) -> None:
+        self.root, self.swap = Path(root), swap or {}
+
+    def get_content_meta(self, token, full_name, file, sha):
+        path = self.root / file
+        if not path.is_file():
+            return {"type": None, "sha": None, "size": None}
+        raw = path.read_bytes()
+        return {"type": "file", "sha": blob_sha(raw), "size": len(raw)}
+
+    def get_blob(self, token, full_name, sha):
+        from apidrift.app.github import GitHubError
+
+        for path in sorted(self.root.rglob("*")):
+            if path.is_file() and blob_sha(path.read_bytes()) == sha:
+                return self.swap.get(path.relative_to(self.root).as_posix(), path.read_bytes())
+        raise GitHubError("Not Found", 404)
+
+
 def _fake_sha(*parts: object) -> str:
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -331,6 +354,13 @@ class FakeGitHub:
                 return httpx.Response(200, json={"sha": sha, "truncated": truncated, "tree": entries})
             if sha in self.trees:
                 return httpx.Response(200, json={"sha": sha, "truncated": False, **self.trees[sha]})
+        if (match := re.fullmatch(r"/git/blobs/([0-9a-f]{40})", rel)) and method == "GET":
+            sha = match.group(1)
+            files = (p.read_bytes() for p in sorted(self.tree.rglob("*")) if p.is_file() and not p.is_symlink())
+            data = self.blobs.get(sha) or next((d for d in files if blob_sha(d) == sha), None)
+            if data is None:
+                return httpx.Response(404, json={"message": "Not Found"})
+            return httpx.Response(200, json={"sha": sha, "encoding": "base64", "content": base64.encodebytes(data).decode()})
         if rel == "/git/blobs" and method == "POST":
             data = base64.b64decode(body["content"]) if body.get("encoding") == "base64" else body["content"].encode()
             sha = blob_sha(data)

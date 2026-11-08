@@ -16,7 +16,7 @@ import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import fixhelpers, fixsdk, fixtests, gofix, goowned, migrations, phpfix, phplex, phpvendor
+from . import fixhelpers, fixsdk, fixtestedit, fixtests, gofix, goowned, migrations, phpfix, phplex, phpvendor
 from .diff import BREAKING, Change
 from .fixedit import Edit, Locator, apply
 from .fixpins import Pin, find_pins
@@ -55,6 +55,7 @@ class Fix:
     content: str
     sites: list[FixSite]
     original: str = field(default="", repr=False)  # for diffs; not part of the payload
+    edits: list[Edit] = field(default_factory=list, repr=False)  # what the App re-derives the content from
 
     def diff(self) -> str:
         lines = difflib.unified_diff(
@@ -84,6 +85,8 @@ class FixPlan:
     not_attempted: list[Unfixable] = field(default_factory=list)  # possible hits, why == NOT_ATTEMPTED
     possibly_remaining: list[dict] = field(default_factory=list)  # deleted keys a spread may still send
     tests: list[tuple[str, int]] = field(default_factory=list)  # test lines that still name a renamed/removed field
+    test_fixes: list[fixtestedit.TestFix] = field(default_factory=list)  # tests that expect the changed request
+    cassettes: list[tuple[str, int]] = field(default_factory=list)  # recorded requests that send a changed field
     root: Path | None = field(default=None, repr=False, compare=False)  # the checkout (the oracle reads Go types)
 
     def to_dict(self) -> dict:
@@ -91,7 +94,7 @@ class FixPlan:
         return {
             "fixes": [
                 {
-                    "file": f.file, "blob_sha": f.blob_sha, "content": f.content,
+                    "file": f.file, "blob_sha": f.blob_sha, "content": f.content, "edits": fixtestedit.edit_dicts(f.edits),
                     "sites": [
                         {"line": s.line, "path": s.path, "target": s.target, "replacement": s.replacement, "action": s.action}
                         for s in f.sites
@@ -111,6 +114,8 @@ class FixPlan:
             ],
             "possibly_remaining": [dict(p) for p in self.possibly_remaining],
             "tests": [{"file": f, "line": line} for f, line in self.tests],
+            "test_fixes": [t.to_dict() for t in self.test_fixes],
+            "cassettes": [{"file": f, "line": line} for f, line in self.cassettes],
         }
 
 
@@ -175,7 +180,9 @@ def plan_fixes(result: ScanResult, impacts: list[Impact], index: SdkIndex, root:
     plan.pins = find_pins(root, [f.file for f in plan.fixes])
     plan.sdks = fixsdk.find_sdks(root, [f.file for f in plan.fixes]) if root.is_dir() else []
     sites = [(s.action, s.target) for f in plan.fixes for s in f.sites]
-    plan.tests = fixtests.stale_tests(base, sites, {f.file for f in plan.fixes}) if sites else []
+    senders = {u.file for u in result.usages if u.language != "doc"}
+    plan.tests = fixtests.stale_tests(base, sites, {f.file for f in plan.fixes}, senders) if sites else []
+    plan.test_fixes, plan.tests, plan.cassettes = fixtestedit.plan_tests(plan, impacts, index, base)
     return plan
 
 
@@ -218,7 +225,7 @@ def _plan_file(
         {"file": file, "line": i.usage.line, "path": i.usage.path, "target": m.target} for i, m in possibly
     ]
     sites = [FixSite(i.usage.line, i.usage.path, m.target, m.replacement, m.action) for i, m in pairs]
-    return Fix(file, "", content, sites, original=text), leftovers
+    return Fix(file, "", content, sites, original=text, edits=sorted(set(edits), key=lambda e: e.start)), leftovers
 
 
 def _candidate_edits(locator: Locator, usage: Usage, migration: Migration) -> tuple[str | None, list[Edit]]:
@@ -425,9 +432,7 @@ def render_fix_text(plan: FixPlan, root: str) -> str:
     if plan.not_attempted:
         lines += ["", "possibly affected, not attempted (arguments not fully visible):"]
         lines += [f"  {u.file}:{u.line}  {u.target}  {u.path}" for u in plan.not_attempted]
-    if plan.tests:
-        lines += ["", "tests that name the old field (update those that expect the old request):"]
-        lines += [f"  {f}:{line}" for f, line in plan.tests]
+    lines += fixtestedit.render_text(plan.test_fixes, plan.tests, plan.cassettes)
     if plan.leftovers:
         lines += ["", "still mentions the old name:"]
         lines += [f"  {f}:{line}" for f, line in plan.leftovers]

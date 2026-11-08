@@ -67,6 +67,14 @@ def _sha(value: object, what: str) -> str:
     return value
 
 
+def _json(response: httpx.Response) -> Any:
+    """The response's JSON; a body that is not JSON is a GitHub error like any other."""
+    try:
+        return response.json()
+    except ValueError:
+        raise GitHubError(f"GitHub returned a body that is not JSON ({response.status_code})") from None
+
+
 def _rate_limit_reset(headers: httpx.Headers, now: float) -> float | None:
     retry_after = headers.get("retry-after")
     if retry_after and retry_after.strip().isdigit():
@@ -182,12 +190,24 @@ class GitHubClient:
     # --- git data and pull requests (the fix step; write-scoped token) ----------------
 
     def get_content_meta(self, token: str, full_name: str, path: str, ref: str) -> dict:
-        """``{sha, type}`` of ``path`` at ``ref``; ``type`` is file, dir, symlink or submodule."""
+        """``{sha, type, size}`` of ``path`` at ``ref``; ``type`` is file, dir, symlink or submodule."""
         encoded = "/".join(quote(segment, safe="") for segment in path.split("/"))
-        data = self._request("GET", f"/repos/{full_name}/contents/{encoded}", bearer=token, params={"ref": ref}).json()
+        data = _json(self._request("GET", f"/repos/{full_name}/contents/{encoded}", bearer=token, params={"ref": ref}))
         if isinstance(data, list):
-            return {"sha": None, "type": "dir"}
-        return {"sha": data.get("sha"), "type": data.get("type")} if isinstance(data, dict) else {"sha": None, "type": None}
+            return {"sha": None, "type": "dir", "size": None}
+        if not isinstance(data, dict):
+            return {"sha": None, "type": None, "size": None}
+        return {"sha": data.get("sha"), "type": data.get("type"), "size": data.get("size")}
+
+    def get_blob(self, token: str, full_name: str, sha: str) -> bytes:
+        """The bytes of blob ``sha`` (the caller checks they hash to it)."""
+        data = _json(self._request("GET", f"/repos/{full_name}/git/blobs/{_sha(sha, 'blob')}", bearer=token))
+        if not isinstance(data, dict) or data.get("encoding") != "base64" or not isinstance(data.get("content"), str):
+            raise GitHubError("GitHub returned a blob that is not base64")
+        try:
+            return base64.b64decode("".join(data["content"].split()), validate=True)  # GitHub wraps the lines
+        except (ValueError, TypeError):
+            raise GitHubError("GitHub returned a blob that is not base64") from None
 
     def get_commit(self, token: str, full_name: str, sha: str) -> dict:
         return self._request("GET", f"/repos/{full_name}/git/commits/{sha}", bearer=token).json()

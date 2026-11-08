@@ -1,7 +1,8 @@
 """The fix pull request: push the files the sandboxed child rewrote and open (or refresh) one PR per repository.
 
 The child computes the fix and returns bytes; this module never parses repository text. Everything it pushes
-goes through :mod:`fixcheck` first. Writes go to one branch, ``apidrift/stripe-<version>``, with a write-scoped
+goes through :mod:`fixcheck` first; an updated test goes through :mod:`fixtestcheck`, which rebuilds it from
+the base blob and the child's edits. Writes go to one branch, ``apidrift/stripe-<version>``, with a write-scoped
 token that is revoked as soon as the step is done; the default branch is never written. Nothing in here fails
 the check: GitHub errors become ``fix_state="failed"`` and the next check tries again.
 
@@ -18,7 +19,7 @@ import logging
 import re
 import sqlite3
 
-from . import db, fixcheck, prbody
+from . import db, fixcheck, fixtestcheck, prbody
 from .config import Settings
 from .github import FIX_PERMISSIONS, GitHubClient, GitHubError, RateLimited, scrub
 
@@ -63,11 +64,14 @@ def gone_comment(sha: str) -> str:
 DIVERGED_NOTE = "This branch has commits apidrift did not make, so the pull request is left open for you to close."
 
 
-def fingerprint(fixes: list[dict], version: str, issue_number: int) -> str:
+def fingerprint(fixes: list[dict], version: str, issue_number: int, tests: list[dict] = ()) -> str:
     """sha256 over the sorted (file, blob_sha, target, replacement[, action]) tuples, the Stripe version and the
     issue. A plain rename keeps the four-element tuple it always had, so pull requests opened before actions
-    existed keep their fingerprint (and stay "unchanged"); every other action adds itself to the tuple."""
+    existed keep their fingerprint (and stay "unchanged"); every other action adds itself to the tuple. Each
+    updated test adds (file, blob_sha, "test", line, target, action), so a pull request without one keeps its
+    fingerprint too."""
     keys = {_fingerprint_key(f, s) for f in fixes for s in f["sites"]}
+    keys |= {(t["file"], t["blob_sha"], "test", str(e["line"]), e["target"], e["action"]) for t in tests for e in t["edits"]}
     text = "\n".join(repr(k) for k in sorted(keys)) + f"\n{version}\n#{issue_number}"
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -203,13 +207,20 @@ def _push(
 ) -> str:
     _settle_pull(conn, gh, token, repo, full_name)
     repo = db.get_repo(conn, repo["id"]) or repo
-    accepted = fixcheck.validate(gh, token, full_name, base_sha, payload.get("fixes"))
     number, state = repo["pr_number"], repo["fix_state"]
+    claims = fixcheck.claimed(payload.get("fixes"))  # no network: an unchanged plan is not fetched again
+    claimed_tests = [{"file": t["file"], "blob_sha": t["blob_sha"], "edits": t["edits"]}
+                     for t in fixtestcheck.claimed(payload, claims)]
+    if number is not None and state == "open" and claims and \
+            fingerprint(claims, version, issue_number, claimed_tests) == repo["pr_fingerprint"]:
+        return f"#{number} unchanged"
+    accepted = fixcheck.validate(gh, token, full_name, base_sha, payload.get("fixes"))
     if not accepted:
         if number is not None and state in CLOSABLE:
             return _close(conn, gh, token, repo, full_name, gone_comment(base_sha))
         return "nothing to push"
-    fp, keys = fingerprint(accepted, version, issue_number), site_keys(accepted)
+    tests = fixtestcheck.validate(gh, token, full_name, base_sha, payload, accepted)  # rebuilt from the base blobs
+    fp, keys = fingerprint(accepted, version, issue_number, tests), site_keys(accepted)
     if number is not None and state == "open" and fp == repo["pr_fingerprint"]:
         return f"#{number} unchanged"
     if state in ("declined", "merged"):
@@ -238,9 +249,10 @@ def _push(
             return f"branch {branch} has commits apidrift did not make; left alone"
         number = int(adopted["number"])
     title, body = prbody.render_pr(
-        payload, accepted, full_name=full_name, sha=base_sha, version=version, issue_number=issue_number, fingerprint=fp
+        payload, accepted, full_name=full_name, sha=base_sha, version=version, issue_number=issue_number, fingerprint=fp,
+        tests=tests,
     )
-    commit = fixcheck.commit(gh, token, full_name, base_sha, accepted, commit_message(version, accepted))
+    commit = fixcheck.commit(gh, token, full_name, base_sha, accepted + tests, commit_message(version, accepted))
     db.update_repo(conn, repo["id"], pr_branch=branch, pr_pending_sha=commit, pr_fingerprint=fp, pr_items=json.dumps(keys))
     if existing is None:
         gh.create_ref(token, full_name, f"refs/{ref}", commit)
