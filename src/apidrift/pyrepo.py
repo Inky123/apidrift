@@ -280,12 +280,17 @@ def collect(tree: ast.Module, *, light: bool = False) -> Facts:
         return built[0]
 
     annotations: set[int] = set()
+    in_all: set[int] = set()  # light: the string constants of an ``__all__`` assignment (what _in_all climbs to)
     resolve = lambda node: _resolve(node, binders())  # noqa: E731
     # One breadth-first walk: a node's parent, and whether it sits in an annotation, were recorded when its
-    # ancestors came off the queue, which is before it does.
+    # ancestors came off the queue, which is before it does. The light collection reads parents only to
+    # tell the strings of ``__all__``, so it notes those at the assignment instead of mapping every node.
     for node in ast.walk(tree):
-        for child in ast.iter_child_nodes(node):
-            parents[child] = node
+        if not light:
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        elif isinstance(node, (ast.Assign, ast.AugAssign)):
+            in_all |= _all_strings(node)
         for ann in (getattr(node, "annotation", None), getattr(node, "returns", None)):
             if isinstance(ann, ast.AST):
                 annotations |= {id(n) for n in ast.walk(ann)}
@@ -302,7 +307,8 @@ def collect(tree: ast.Module, *, light: bool = False) -> Facts:
             facts.classes.append(Klass(node.name, bases, set(binders().by_scope.get(node, {})), decorators, bool(node.keywords)))
         elif isinstance(node, ast.Call):
             _call(node, parents, binders, facts, light)
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and len(node.value) < 300 and not _in_all(node, parents):
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and len(node.value) < 300 and not (
+                id(node) in in_all if light else _in_all(node, parents)):
             facts.strings.add(node.value.rpartition(".")[2].rpartition(":")[2])  # getattr(m, "Cls"), "app.svc.Cls"
         if not light and isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load):
             name = resolve(node)
@@ -361,6 +367,22 @@ def _builds_own_type(func: ast.expr) -> bool:
     if isinstance(func, ast.Call) and isinstance(func.func, ast.Name) and func.func.id == "type":
         return True
     return isinstance(func, ast.Attribute) and func.attr == "__class__"
+
+
+def _all_strings(node: ast.Assign | ast.AugAssign) -> set[int]:
+    """ids of the constants :func:`_in_all` is true for under this statement: those reached from its value
+    through list and tuple displays only, when a target is the name ``__all__``."""
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    if not any(isinstance(t, ast.Name) and t.id == "__all__" for t in targets):
+        return set()
+    out, todo = set(), [node.value]
+    while todo:
+        n = todo.pop()
+        if isinstance(n, (ast.List, ast.Tuple)):
+            todo += n.elts
+        elif isinstance(n, ast.Constant):
+            out.add(id(n))
+    return out
 
 
 def _in_all(node: ast.AST, parents) -> bool:
