@@ -145,3 +145,41 @@ def client_method(f, m, args):
     from .httpphp import client_method as read
 
     return read(f, m, args)
+
+
+def form_array(f, opener: int, path: str, out) -> None:
+    """:func:`phpparse.read_array` that also reads form-encoded keys (``'payment_method_types[0]'``,
+    ``'metadata[order]'``) through :func:`httpurl.form_paths` instead of hiding them."""
+    from . import phpparse
+    from .phplex import STRING
+
+    src, text = f.src, f.text
+    prefix = path + "." if path else ""
+    for el in phpparse.elements(src, opener):
+        span = src.span_at(el.start)
+        raw = None
+        if el.arrow >= 0 and span and span[0] == el.start and span[2] == STRING and src.back_space(el.arrow) == span[1]:
+            raw = text[el.start + 1 : span[1] - 1]
+            raw = None if "$" in raw and text[el.start] == '"' else raw
+        if el.arrow < 0 and path and not text.startswith("...", el.start):  # a list element
+            inner = src.array_open(el.value)
+            if inner is not None:
+                form_array(f, inner, path + "[]", out)
+            continue
+        if raw is None or not re.fullmatch(r"[A-Za-z_][\w\[\]]*", raw):
+            phpparse._hide(out, path)
+            continue
+        if re.fullmatch(r"[A-Za-z_]\w*", raw):
+            child = prefix + raw
+            out.add(child)
+            inner = src.array_open(el.value)
+            if inner is not None:
+                form_array(f, inner, child, out)
+                if src.pairs[inner] + 1 != el.end:
+                    phpparse._hide(out, child)
+            continue
+        got = httpurl.form_paths(raw)
+        if got is None or src.array_open(el.value) is not None:
+            phpparse._hide(out, path)
+            continue
+        out.paths.update(prefix + p for p in got)

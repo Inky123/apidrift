@@ -422,10 +422,14 @@ def sites(text: str, rel: str, index, reads: frozenset[str], language: str, regi
         fields = Fields()
         if w.body is not None:
             if w.body < len(args):
-                call = phpparse.Call(f.line(start), display, None, paren, args, w.body)
-                from .phphelpers import PhpHelpers, Via
+                opener = f.src.array_open(f.src.skip_space(args[w.body][0]))
+                if opener is not None and f.src.pairs[opener] + 1 == f.src.back_space(args[w.body][1]):
+                    httpphppath.form_array(f, opener, "", fields)  # a literal: form-encoded keys read too
+                else:
+                    call = phpparse.Call(f.line(start), display, None, paren, args, w.body)
+                    from .phphelpers import PhpHelpers, Via
 
-                phpparse.collect(f.parsed, call, fields, Via(PhpHelpers(f.parsed)))
+                    phpparse.collect(f.parsed, call, fields, Via(PhpHelpers(f.parsed)))
             elif not _empty(w.defaults[w.body] if w.body < len(w.defaults) else None):
                 fields.hide("")
         paths = set()

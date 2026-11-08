@@ -200,6 +200,16 @@ def _with(doc, path, method):
     return doc
 
 
+def test_php_form_encoded_keys_map_to_field_paths(index):
+    src = API + """My_Stripe_API::request(['payment_method_types[0]' => 'card', 'metadata[order]' => 1, 'expand[]' => 'x',
+  'line_items' => [['price' => 'p', 'quantity' => 1]], $dyn => 1], 'payment_intents');
+"""
+    u = one(src, "a.php", index)
+    assert u.fields == {OLD, "metadata", "metadata.order", "expand", "line_items", "line_items[].price",
+                        "line_items[].quantity"}
+    assert not u.complete and u.hidden == {""}  # only the computed key hides
+
+
 def test_a_wrapper_that_rewrites_the_body_keeps_the_visible_keys_but_hides_the_rest(index):
     src = API.replace("        return wp_remote_post(", "        $request = apply_filters('body', $request, $api);\n        return wp_remote_post(", 1)
     src += "My_Stripe_API::request(['payment_method_types' => ['card']], 'payment_intents');\n"
