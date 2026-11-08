@@ -10,7 +10,7 @@ import ast
 import re
 from dataclasses import dataclass
 
-from . import jsparse, phplex
+from . import jsparse, phplex, textpos
 from .jsparse import QUOTES, Source
 
 PY_MASK = re.compile(
@@ -41,14 +41,15 @@ def tokens(text: str, language: str, key: str) -> list[Token]:
     quoted = {a for a, b in spans if text[a] in "'\"" and text[a + 1 : b - 1] == key}
     out: list[Token] = []
     k = 0
+    lines = textpos.LineCounter(text)
     for m in re.finditer(rf"(?<![\w$]){re.escape(key)}(?![\w$])", text):
         while k < len(spans) and spans[k][1] <= m.start():
             k += 1
         covered = k < len(spans) and spans[k][0] <= m.start() < spans[k][1]
         if not covered:
-            out.append(Token(m.start(), text.count("\n", 0, m.start()) + 1, False))
+            out.append(Token(m.start(), lines.line(m.start()), False))
         elif spans[k][0] in quoted and m.start() == spans[k][0] + 1:
-            out.append(Token(m.start(), text.count("\n", 0, m.start()) + 1, True))
+            out.append(Token(m.start(), lines.line(m.start()), True))
     return out
 
 

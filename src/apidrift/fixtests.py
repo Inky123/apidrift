@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from . import jsparse, phplex
+from . import jsparse, phplex, textpos
 from .fixtokens import PY_MASK, Token, tokens
 from .fixvalue import leaf
 from .scanner import LANGUAGES, TEST_DIRS, TEST_FILE, _iter_files, _read
@@ -95,11 +95,12 @@ def _form_encoded(text: str, language: str, fields: set[str]) -> list[Token]:
     names = "|".join(re.escape(f) for f in sorted(fields))
     form = re.compile(rf"(?:^|(?<=[&?\s'\"`]))(?:{names})(?=\[|=|%5B)", re.I)
     out = []
+    lines = textpos.LineCounter(text)
     for lo, hi in _spans(text, language):
         if text[lo] not in "'\"`":
             continue  # a comment
         for m in form.finditer(text, lo + 1, hi):
-            out.append(Token(m.start(), text.count("\n", 0, m.start()) + 1, False))
+            out.append(Token(m.start(), lines.line(m.start()), False))
     return out
 
 

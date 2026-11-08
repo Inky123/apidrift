@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import re
 
-from . import plaidjs, plaidpy, scanner
+from . import plaidjs, plaidpy, scanner, textpos
 from .plaidmap import PlaidIndex
 from .scanner import GENERIC_NOT_READS, LANGUAGES, Reader, Usage
 
@@ -59,9 +59,10 @@ def _urls(text: str, rel: str, index: PlaidIndex, reads: frozenset[str], taken: 
     """Literal endpoint URLs (``https://sandbox.plaid.com/link/token/create``). Links to the documentation and
     the dashboard name no endpoint and match nothing."""
     usages: list[Usage] = []
+    lines = textpos.LineCounter(text)
     for m in URL_RE.finditer(text):
         spec_path = index.match_path(m.group(1).rstrip("/"))
-        line = text.count("\n", 0, m.start()) + 1
+        line = lines.line(m.start())
         if spec_path is None or line in taken:
             continue
         method = scanner._method_hint(text, m.start(), m.end(), spec_path, index)

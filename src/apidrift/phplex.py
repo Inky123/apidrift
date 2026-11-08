@@ -17,6 +17,8 @@ import bisect
 import functools
 import re
 
+from . import textpos
+
 OPEN_TAG = re.compile(r"<\?(?:php(?=\s|$)|=)", re.I)
 HEREDOC = re.compile(r"<<<[ \t]*(?:\"([A-Za-z_]\w*)\"|'([A-Za-z_]\w*)'|([A-Za-z_]\w*))[ \t]*\r?\n")
 INTERESTING = re.compile(r"[?#/'\"`<()\[\]{}]")
@@ -40,6 +42,7 @@ class Lex:
         self.balanced = True
         self.uncertain = False
         self._old_closers: dict[str, int] = {}  # heredoc marker -> start of its last pre-7.3 closing line
+        self._newlines: list[int] | None = None  # for :meth:`line`, found once
         self._run()
         self.starts = [s[0] for s in self.spans]
         self.opens = sorted(self.pairs)
@@ -195,7 +198,9 @@ class Lex:
         return opener
 
     def line(self, pos: int) -> int:
-        return self.text.count("\n", 0, pos) + 1
+        if self._newlines is None:
+            self._newlines = textpos.newlines(self.text)
+        return textpos.line_of(self._newlines, pos)
 
     # --- cursor moves -----------------------------------------------------------------
 

@@ -31,7 +31,7 @@ import re
 from collections import Counter
 from pathlib import Path
 
-from . import crosstable, jsparse, jsreach, jsroots, scanner
+from . import crosstable, jsparse, jsreach, jsroots, scanner, textpos
 from .crosstable import Table, Wrapper
 from .jshelpers import Helpers
 from .jsparse import Fields, Found, Mask, Source
@@ -249,12 +249,13 @@ def uses(ctx: Context, w: Wrapper, rel: str, table: Table):
     aliases = set() if w.method else {
         k for k, v in ctx.imports.items() if v[0] == w.name and _resolves(base, rel, v[1], w.file)
     }
+    lines = textpos.LineCounter(text)
     for name in sorted({w.name} | aliases):
         for m in re.finditer(rf"(?<![\w$]){re.escape(name)}(?![\w$])", text):
             p = m.start()
             if ctx.comment(p):
                 continue
-            line = text.count("\n", 0, p) + 1
+            line = lines.line(p)
             if ctx.mask.covers(p):
                 yield line, -1, None  # a string naming it: maybe a dynamic call
                 continue

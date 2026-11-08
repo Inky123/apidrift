@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import crosstable, goparse, httplit, httpurl, httpwrap, jsparse, phpparse, phpvendor, pyparse, pyrepo, scanfiles
+from . import crosstable, goparse, httplit, httpurl, httpwrap, jsparse, phpparse, phpvendor, pyparse, pyrepo, scanfiles, textpos
 from .sdkmap import Resolved, SdkIndex
 
 SKIP_DIRS = {"node_modules", "vendor", "site-packages", "__pycache__"}  # skipped anywhere
@@ -371,12 +371,13 @@ def _scan_urls(
     text: str, rel: str, index: SdkIndex, reads: frozenset[str], taken: set[int], language: str = "http"
 ) -> list[Usage]:
     usages: list[Usage] = []
+    lines = textpos.LineCounter(text)
     for m in URL_RE.finditer(text):
         better = httplit.site(text, m.start(), rel, index)  # the whole joined template and the call's own method
         spec_path = better[0] if better else index.match_path(m.group(1))
         if spec_path is None:
             continue
-        line = text.count("\n", 0, m.start()) + 1
+        line = lines.line(m.start())
         if line in taken:
             continue
         if better and better[1]:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from . import textpos
 from .scanner import _iter_files, _read
 
 MAX_CASSETTES = 50
@@ -41,6 +42,7 @@ def recorded(root: Path, changes: list[tuple[str, str, str]]) -> list[tuple[str,
         if text is None or not MARKER.search(text) or "request:" not in text:
             continue
         rel = path.relative_to(root).as_posix()
+        lines = textpos.LineCounter(text)
         for lo, hi in _requests(text):
             block = text[lo:hi]
             method, uri = METHOD.search(block), URI.search(block)
@@ -49,7 +51,7 @@ def recorded(root: Path, changes: list[tuple[str, str, str]]) -> list[tuple[str,
             for want, path_re, key_re in rules:
                 hit = key_re.search(block) if method.group(1).lower() == want and path_re.fullmatch(uri.group(1)) else None
                 if hit:
-                    out.append((rel, text.count("\n", 0, lo + hit.start()) + 1))
+                    out.append((rel, lines.line(lo + hit.start())))
                     break
             if out and out[-1][0] == rel:
                 break  # one line per cassette: it is re-recorded as a whole
