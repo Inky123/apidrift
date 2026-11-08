@@ -74,6 +74,7 @@ class Call:
     start: int = -1  # where the call's chain starts
     saved: tuple[str, int] | None = None  # ``$sub->save()``: (variable, where its tracking starts), see phpinstance
     hidden_by: str = ""  # what may change the parameters after the call site (a dispatch wrapper): never edited
+    extra: tuple[str, ...] = ()  # key paths a dispatch wrapper adds to the parameters (phpdispatch)
 
 
 @dataclass
@@ -451,6 +452,8 @@ def collect(parsed: Parsed, call: Call, out: Fields, helper=None) -> None:
         phpinstance.saved_fields(parsed, call.saved[0], call.saved[1], call.start, out)
     if call.hidden_by:
         out.hide("")
+    for path in call.extra:
+        phpflow.add_path(out, path)
     if call.params is None:
         return
     if any(text.startswith("...", src.skip_space(a)) for a, _ in call.spans[: call.params + 1]):

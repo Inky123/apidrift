@@ -128,4 +128,9 @@ def test_a_dispatched_call_whose_wrapper_passes_its_arguments_unchanged_is_fixed
 
 
 def test_a_dispatched_call_whose_wrapper_writes_into_the_parameters_is_not_edited(tmp_path):
-    assert outcome(tmp_path, _dispatch_files("$args[0]['metadata'] = [];"))[0] in ("not attempted", "refused")
+    assert outcome(tmp_path / "a", _dispatch_files("$args[0] = $more;"))[:2] == ("refused", ["incomplete_binding"])
+    assert outcome(tmp_path / "b", _dispatch_files("$args[0]['" + OLD + "'] = ['card'];"))[:2] == ("refused", ["incomplete_binding"])
+
+
+def test_a_dispatched_call_whose_wrapper_adds_another_key_is_still_fixed(tmp_path):
+    assert outcome(tmp_path, _dispatch_files("$args[0]['metadata']['via'] = 'edd';")) == ("fixed", renamed(CALLER), [])

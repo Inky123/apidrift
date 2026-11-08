@@ -321,11 +321,19 @@ def test_a_dispatch_wrapper_call_with_literal_strings_is_the_static_call(tmp_pat
     ]
 
 
-def test_a_wrapper_that_writes_into_one_argument_hides_only_that_position(tmp_path, index):
-    found = dispatch(tmp_path, index, write="if ($x) { $args[1]['expand'] = ['charges']; }")
-    assert [(c.split("'")[3], complete) for c, _, _, complete in found if c.startswith("edds")] == [
-        ("create", True), ("retrieve", True), ("update", False),
-    ]
+@pytest.mark.parametrize("write,update", [
+    ("if ($x) { $args[1]['expand'] = ['charges']; }", (["description", "expand"], True)),  # a literal key path
+    ("if (!isset($args[1])) { $args[1] = array(); }", (["description"], True)),  # an empty default, when unset
+    ("$args[1] = array();", (["description"], False)),  # unconditional: the caller's array is gone
+    ("$args[1] = $other;", (["description"], False)),
+    ("$args[1][$k] = 1;", (["description"], False)),
+])
+def test_a_wrapper_that_writes_into_one_argument_changes_only_that_position(tmp_path, index, write, update):
+    found = {c.split("'")[3]: (f, ok) for c, _, f, ok in dispatch(tmp_path, index, write=write) if c.startswith("edds")}
+    assert found["create"] == (["amount", "currency"], True) and found["update"] == update
+
+
+def test_a_wrapper_that_rebinds_its_arguments_hides_every_position(tmp_path, index):
     found = dispatch(tmp_path, index, write="$args = array_values($args);")
     assert all(not complete for c, _, _, complete in found if c.startswith("edds") and "retrieve" not in c)
 

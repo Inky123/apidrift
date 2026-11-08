@@ -91,6 +91,13 @@ def written(parsed, write, out: Fields) -> None:
         _hide(out, write.key)
 
 
+def add_path(out: Fields, path: str) -> None:
+    """``a.b.c`` and every parent of it are sent."""
+    parts = path.split(".")
+    for k in range(1, len(parts) + 1):
+        out.add(".".join(parts[:k]))
+
+
 def _whole_statement(src, opener: int) -> bool:
     after = src.skip_space(src.pairs[opener] + 1)
     return after < src.n and src.text[after] == ";"

@@ -47,6 +47,8 @@ FORWARD = re.compile(
     r"\s*\(\s*\$([A-Za-z_]\w*)\s*,\s*\$([A-Za-z_]\w*)\s*,\s*\.\.\.\s*\$([A-Za-z_]\w*)\s*\)\s*;\s*",
 )
 CONCAT = re.compile(r"\s*(['\"])((?:\\\\)?(?:[A-Za-z_]\w*\\\\)+)\1\s*\.\s*\$([A-Za-z_]\w*)\s*;")
+ARG_WRITE = re.compile(r"\s*\[\s*(\d+)\s*\]((?:\s*\[\s*(?:'[A-Za-z_]\w*'|\"[A-Za-z_]\w*\")\s*\])*)\s*=(?![=>])")
+EMPTY = re.compile(r"\s*(?:array\s*\(\s*\)|\[\s*\])\s*;")
 ANY = -1  # in Dispatcher.changes: the wrapper may change any forwarded argument
 MAX_FORWARDS = 4
 
@@ -56,6 +58,7 @@ class Dispatcher:
     cls: int  # which argument names the class
     method: int  # which argument names the method (the forwarded arguments follow both)
     changes: frozenset[int]  # forwarded argument positions the wrapper writes into; ANY: any of them
+    adds: frozenset[tuple[int, str]] = frozenset()  # (position, key path) written by a literal key path
 
 
 def dispatchers() -> dict[str, Dispatcher]:
@@ -109,7 +112,8 @@ def add(parsed, item, resolve, resolved_at: dict, other: dict) -> None:
     ids = resolved.path.count("{")
     params = _params(src, spans[first:], ids, id_only=method == "retrieve" and ids == 1)
     hidden = "" if params is None or not (ANY in d.changes or params in d.changes) else "the wrapper writes into it"
-    c = Call(src.line(start), call, resolved, open_, spans, None if params is None else params + first, start, None, hidden)
+    extra = tuple(sorted(path for k, path in d.adds if k == params))
+    c = Call(src.line(start), call, resolved, open_, spans, None if params is None else params + first, start, None, hidden, extra)
     resolved_at[start] = c
     parsed.calls.append(c)
 
@@ -278,13 +282,22 @@ def _core(fn: _Fn) -> Dispatcher | None:
         if any(u.kind in (BIND, WRITE, OPAQUE) for u in _uses_in(fn, name)):
             return None
     changes: set[int] = set()
+    adds: set[tuple[int, str]] = set()
     for u in _uses_in(fn, variadic):
         if u.kind in (BIND, OPAQUE):
             changes.add(ANY)
         elif u.kind == WRITE:
-            k = re.match(r"\s*\[\s*(\d+)\s*\]", src.text[u.pos + 1 + len(variadic) :])
-            changes.add(int(k.group(1)) if k else ANY)
-    return Dispatcher(shape.index(c.group(3)), shape.index(method), frozenset(changes))
+            w = ARG_WRITE.match(src.text, u.pos + 1 + len(variadic))
+            if w is None:
+                at = re.match(r"\s*\[\s*(\d+)\s*\]", src.text[u.pos + 1 + len(variadic) :])
+                changes.add(int(at.group(1)) if at else ANY)  # ``$args[1][$k] = v``: that position only
+                continue
+            k, keys = int(w.group(1)), re.findall(r"['\"]([A-Za-z_]\w*)['\"]", w.group(2))
+            if keys:  # ``$args[1]['expand'] = ...``: that key path, nothing else (as a caller's own write)
+                adds.add((k, ".".join(keys)))
+            elif not (EMPTY.match(src.text, w.end()) and src.enclosing(u.pos) != fn.lo):
+                changes.add(k)  # only a conditional ``$args[1] = array();`` adds nothing
+    return Dispatcher(shape.index(c.group(3)), shape.index(method), frozenset(changes), frozenset(adds))
 
 
 def _forward(fn: _Fn, known: dict[tuple, Dispatcher]) -> Dispatcher | None:
