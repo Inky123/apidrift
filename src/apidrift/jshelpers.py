@@ -368,8 +368,8 @@ class Helpers:
         from .jsparse import merge, parse_object
 
         reaching = self.bindings.reaching(name, at)
-        if not reaching or any(b.literal is None for b in reaching):
-            return False
+        if not reaching or any(b.literal is None or not stack[-1].open <= b.pos < stack[-1].close for b in reaching):
+            return False  # not a literal bound in this helper: a module-level object another function may change
         for b in reaching:
             merge(out, parse_object(self.src, b.literal + 1))
         self._writes(name, min(b.pos for b in reaching), at, out, stack, seen)

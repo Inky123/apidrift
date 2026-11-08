@@ -15,7 +15,8 @@ release that removes ``old`` falls on the new side; the fields themselves stay a
 A switch is recorded only when all of these hold, else the helper is read as before (both keys, no switch):
 
 - every value the helper returns is an object literal or a ``return cond ? {..} : {..}`` of literals;
-- exactly that choice compares the API version (an operand whose last name contains ``version``) with a release
+- exactly that choice compares the API version the file's Stripe client is configured with (the expression given
+  as ``apiVersion`` to ``new Stripe(..)``, or a ``const`` bound to it: :mod:`jsclientversion`) with a release
   date: a ``'YYYY-MM-DD[.name]'`` literal, or a ``const`` bound once in the file to one, by ``<``, ``<=``, ``>``
   or ``>=``; the branch taken on later versions is the one with ``new``;
 - ``new`` is visibly sent in that branch, and ``old`` (or anything below it, or a hidden prefix over it) is in
@@ -32,6 +33,7 @@ from __future__ import annotations
 import re
 
 from . import jsspread
+from .jsclientversion import configured
 from .jsroots import NAME
 
 DATE = re.compile(r"\d{4}-\d{2}-\d{2}(?:\.[a-z]+)?")
@@ -60,27 +62,35 @@ def mark(helpers, d, values, out) -> None:
 
 def settle(helpers, fields, reread) -> None:
     """Keep the switches of a call's ``fields`` whose old key nothing else sends, each with whether a hidden
-    argument could still send it: ``(old, new, since, hidden)``. ``reread(out)`` reads the call into ``out``."""
-    if helpers is None or not fields.switched:
-        return
-    kept = set()
-    for switch in sorted(fields.switched):
-        old = switch[0]
-        sub = type(fields)()
-        helpers.mute = switch
-        try:
-            reread(sub)
-        finally:
-            helpers.mute = None
-        if any(_below(p, old) for p in sub.paths):
-            continue  # another literal, write or helper sends it as well
-        kept.add((*switch, any(old.startswith(h) for h in sub.hidden)))
-    fields.switched = kept
+    argument could still send it: ``(old, new, since, hidden)``. ``reread(out)`` reads the call into ``out``.
+    The call ends here: the spread reader's budget (jsspread.MAX_WORK) starts again for each re-read and the next call."""
+    reader = helpers.src.spreads if helpers is not None else None
+    try:
+        if helpers is None or not fields.switched:
+            return
+        kept = set()
+        for switch in sorted(fields.switched):
+            old = switch[0]
+            sub = type(fields)()
+            helpers.mute = switch
+            if reader is not None:
+                reader.next_call()
+            try:
+                reread(sub)
+            finally:
+                helpers.mute = None
+            if any(_below(p, old) for p in sub.paths):
+                continue  # another literal, write or helper sends it as well
+            kept.add((*switch, any(old.startswith(h) for h in sub.hidden)))
+        fields.switched = kept
+    finally:
+        if reader is not None:
+            reader.next_call()
 
 
 def rest_excludes(helpers, name: str, at: int) -> bool:
     """While a switch is being settled: ``...name`` at ``at`` cannot send its old key, because ``name`` is the
-    rest of a ``const { old, ...name } = x`` that names it, in scope, and ``name`` is not used between the two."""
+    rest of a ``const { old, ...name } = x`` that names it, in scope, never written, and settled (jsstable)."""
     mute = getattr(helpers, "mute", None)
     if mute is None or not re.fullmatch(NAME, name) or "." in mute[0] or "[" in mute[0] or helpers.bindings.by_name.get(name):
         return False
@@ -97,12 +107,15 @@ def rest_excludes(helpers, name: str, at: int) -> bool:
         return False
     if any(name in helpers.scopes.params.get(fn[0], ()) for fn in helpers.scopes.enclosing(at)):
         return False  # a parameter of an enclosing function shadows it
-    uses = [
-        m.start() for m in re.compile(rf"(?<![\w$.]){n}(?![\w$])").finditer(text, decl.end(), at)
-        if not helpers.mask.covers(m.start())
-    ]
-    if uses:
-        return False  # read, written, passed on or aliased before the spread: it may have gained the key
+    from .jsroots import _mutation_re
+    from .jsstable import settled
+
+    fn = helpers.scopes.innermost(decl.start())
+    lo, hi = (fn[0], fn[1]) if fn else (0, src.n)
+    if not settled(src, helpers.bindings, name, decl.start(), at) or any(
+        not helpers.mask.covers(w.start()) for w in _mutation_re(name).finditer(text, lo, hi)
+    ):
+        return False  # written anywhere (it may gain the key), mentioned in a callback, passed on before the spread
     keys = set()
     for part in decl.group(1).split(","):
         if not part.strip():
@@ -112,6 +125,24 @@ def rest_excludes(helpers, name: str, at: int) -> bool:
             return False  # a computed key or a nested pattern: what it takes out is not visible
         keys.add(key)
     return mute[0] in keys
+
+
+def version_shaped(helpers, d) -> bool:
+    """Helper ``d`` returns a choice whose condition compares something with a release date, whatever it compares:
+    the fixer never edits inside such a helper (a branch renamed would undo the switch the code makes on purpose)."""
+    from .jsspread import returned_choice
+
+    src, text = helpers.src, helpers.src.text
+    for m in re.compile(r"(?<![\w$.])return\b").finditer(text, d.open, d.close):
+        if helpers.mask.covers(m.start()):
+            continue
+        choice = returned_choice(src, src.skip_space(m.end()))
+        if choice is None:
+            continue
+        test = COMPARISON.fullmatch(text, choice[0], choice[1])
+        if test and any(_date(helpers, test.group(g), test.start(g)) for g in (1, 3)):
+            return True
+    return False
 
 
 def holds(since: str, release: str) -> bool:
@@ -167,16 +198,10 @@ def _version_test(helpers, lo: int, hi: int) -> tuple[str, bool] | None:
     date = _date(helpers, right, m.start(3))
     if date is None:
         left, op, right, date = right, FLIP[op], left, _date(helpers, left, m.start(1))
-    if date is None or not _is_version(left):
-        return None
+    if date is None or left[:1] in "'\"" or not configured(helpers, left, m.start(1)):
+        return None  # not the version the file's Stripe client is configured with (jsclientversion)
     later = LATER[op]
     return later + date, op in (">=", ">")
-
-
-def _is_version(operand: str) -> bool:
-    if operand[:1] in "'\"":
-        return False
-    return "version" in re.split(r"\s*\.\s*", operand)[-1].lower()
 
 
 def _date(helpers, operand: str, at: int) -> str | None:

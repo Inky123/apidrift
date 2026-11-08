@@ -22,14 +22,14 @@ from apidrift.report import filter_changes
 from apidrift.scanner import ScanResult, scan_repo
 from apidrift.sdkmap import SdkIndex
 
-JS = "const stripe = require('stripe')('sk');\nconst SINCE = '2026-07-29';\n"
+JS = "const stripe = require('stripe')('sk', { apiVersion: config.apiVersion ?? '2024-04-10' });\nconst SINCE = '2026-07-29';\n"
 HELPER = """
 class Pay {
   params(types) {
     if (!types) {
       return {}
     }
-    const apiVersion = this.options.apiVersion ?? '2024-04-10'
+    const apiVersion = config.apiVersion ?? '2024-04-10'
     return apiVersion >= SINCE
       ? { allowed_payment_method_types: types }
       : { payment_method_types: types }
@@ -242,7 +242,7 @@ ALLOWED, OLD = "{ allowed_payment_method_types: types }", "{ payment_method_type
     ("apiVersion > SINCE", ALLOWED, OLD, ">2026-07-29"),
     ("apiVersion < SINCE", OLD, ALLOWED, ">=2026-07-29"),
     ("SINCE <= apiVersion", ALLOWED, OLD, ">=2026-07-29"),
-    ("this.options.apiVersion >= '2026-09-30.endive'", ALLOWED, OLD, ">=2026-09-30.endive"),
+    ("apiVersion >= '2026-09-30.endive'", ALLOWED, OLD, ">=2026-09-30.endive"),
 ])
 def test_a_choice_by_api_version_that_picks_the_replacement_later_is_a_switch(tmp_path, test, then, other, since):
     text = switched_helper(test, then, other)

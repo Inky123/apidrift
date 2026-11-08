@@ -40,6 +40,8 @@ UNFIXABLE_WHY = {
     "helper_feeds_other_calls": "the parameters come from a helper that also feeds another Stripe call this "
     "change does not cover",
     "helper_used_elsewhere": "the parameters come from a helper that another file also uses or overrides",
+    "helper_version_switch": "the parameters come from a helper that picks the field by Stripe API version; change "
+    "the version it switches at rather than the field",
 }
 NOT_ATTEMPTED_WHY = {"arguments_not_visible": "arguments are not fully visible"}
 UNKNOWN_UNFIXABLE = "apidrift could not rewrite this site safely"

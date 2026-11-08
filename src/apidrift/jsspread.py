@@ -20,11 +20,13 @@ import re
 from dataclasses import replace
 
 from .jsroots import _statement_end
+from .jsstable import settled
 
 EMPTY = {"{}", "undefined", "null", "false", "''", '""', "0", "[]"}  # branches that spread no keys
 RETURNED_EMPTY = {"{}", "undefined", "null"}  # branches of a returned choice that send no keys wherever it goes
 OPERATORS = ("??", "&&", "||", "?", ":")
 MAX_DEPTH = 4  # helpers read through spreads inside one another
+MAX_WORK = 2000  # spreads one call may read (each binding or helper is read once, then remembered); past it: hidden
 
 
 def literal_branches(src, i: int) -> list[int] | None:
@@ -211,21 +213,27 @@ class Reader:
     - ``...urls`` where every binding of ``urls`` that reaches the spread, in the same function, is an object
       literal (with the writes into it before the spread, :func:`jswrites.add_writes`) or a choice of two
       literals (``const p = c ? { a } : { b }``); ``params = { ...params, mode }`` reads the earlier ``params``.
-      ``urls`` must not be used in between other than spread, rebound or written by a plain statement: passed
-      to a function, aliased, or touched in a callback, it may have gained keys.
+      ``urls`` must be settled (:func:`jsstable.settled`): not passed on, aliased or changed in place before the
+      spread, not written after it in a loop, and not mentioned in a nested function or callback.
 
     Returns False (the caller hides the spread) for anything else, for a helper or binding already being read
-    through a spread, and beyond MAX_DEPTH."""
+    through a spread, beyond MAX_DEPTH, and past MAX_WORK spreads for one call. A literal binding's own keys and a
+    helper's object (without a local) are read once per file and remembered, so sibling spreads of the same
+    local cost one reading, not one per path to it."""
 
     def __init__(self, helpers) -> None:
-        self.helpers, self.active = helpers, []
+        self.helpers, self.active, self.memo, self.work = helpers, [], {}, 0
+
+    def next_call(self) -> None:
+        self.work = 0
 
     def __call__(self, src, i: int, prefix: str, out) -> bool:
         from . import jsswitch
         from .jsroots import NAME
 
         helpers = self.helpers
-        if src.ruby or src is not helpers.src:
+        self.work += 1
+        if src.ruby or src is not helpers.src or self.work > MAX_WORK:
             return False
         i = src.skip_space(i)
         b = src.skip_scalar(i)
@@ -238,7 +246,8 @@ class Reader:
             if sub is None:
                 return not prefix and jsswitch.rest_excludes(helpers, name, i)
         else:
-            sub = self._enter(got.helper, lambda: (helpers.read(i, b) or (None, None))[1])
+            remember = ("helper", got.helper.pos) if got.local is None else None  # a local's writes depend on i
+            sub = self._enter(got.helper, lambda: (helpers.read(i, b) or (None, None))[1], remember)
         if sub is None:
             return False
         out.paths |= {prefix + p for p in sub.paths}
@@ -247,36 +256,47 @@ class Reader:
         out.complete = out.complete and sub.complete
         return True
 
-    def _enter(self, key, read):
+    def _enter(self, key, read, remember=None):
+        """``read()`` unless ``key`` is being read already or MAX_DEPTH is reached; remembered under ``remember``
+        (with the switch being settled, which changes what helpers return). Never mutate what it returns."""
+        memo = (remember, getattr(self.helpers, "mute", None)) if remember is not None else None
+        if memo is not None and memo in self.memo:
+            return self.memo[memo]
         if key in self.active or len(self.active) >= MAX_DEPTH:
             return None
         self.active.append(key)
         try:
-            return read()
+            got = read()
         finally:
             self.active.pop()
+        if memo is not None:
+            self.memo[memo] = got
+        return got
 
     def _local(self, src, name: str, at: int):
         """The fields of the local ``name`` spread at ``at``, or None when they are not all visible."""
-        from .jsparse import Fields, merge, parse_object, variable_fields
+        from .jsparse import Fields, merge, parse_object
+        from .jswrites import add_writes
 
         bindings, scopes, text = self.helpers.bindings, self.helpers.scopes, src.text
-        fn = scopes.innermost(at)
         reaching = bindings.reaching(name, at)
         inside = [b for b in reaching if b.literal is not None and b.literal < at < src.skip_balanced(b.literal)]
         if inside:  # ``p = { ...p }`` spreads the value p had before this assignment
             reaching = [b for b in bindings.reaching(name, inside[0].pos) if b not in inside]
-        if not reaching or any(b.value < 0 or scopes.innermost(b.pos) != fn for b in reaching):
-            return None  # a parameter, a rebinding in a loop, or a binding outside this function
-        if not self._only_spread(src, name, min(b.pos for b in reaching), at, fn):
-            return None
+        if not reaching or any(b.value < 0 for b in reaching):
+            return None  # a parameter, or a rebinding later in a loop
         out = Fields()
         for b in reaching:
             if b.literal is not None:
-                sub = self._enter(("binding", b.pos), lambda b=b: variable_fields(src, bindings, b, at))
+                own = self._enter(("binding", b.pos), lambda b=b: parse_object(src, b.literal + 1), ("literal", b.pos))
+                sub = None if own is None else _copy(own)
+                if sub is not None:  # what variable_fields does, on the remembered keys of the literal
+                    if not sub.paths:
+                        sub.hide("")
+                    add_writes(src, bindings, b, at, sub)
             else:
                 opens = _branches(src, b.value, asi_end(src, b.value, _statement_end(src, b.value)))
-                if opens is None or bindings.mutations(name, b.pos, at):
+                if opens is None or bindings.mutations(name, b.pos, at) or not settled(src, bindings, name, b.pos, at):
                     return None
                 sub = Fields()
                 for k in opens:
@@ -286,20 +306,9 @@ class Reader:
             merge(out, sub)
         return out
 
-    def _only_spread(self, src, name: str, after: int, at: int, fn) -> bool:
-        """Between ``after`` and ``at``, ``name`` is only rebound, spread, or written by a statement in ``fn``."""
-        from .jsroots import _mutation_re
 
-        helpers, text = self.helpers, src.text
-        own = {b.pos for b in helpers.bindings.by_name.get(name, ())}
-        writes = {m.start() for m in _mutation_re(name).finditer(text, after, at)}
-        for m in re.compile(rf"(?<![\w$.]){re.escape(name)}(?![\w$])").finditer(text, after, at):
-            p = m.start()
-            if helpers.mask.covers(p) or p in own or text[max(0, p - 3):p] == "...":
-                continue
-            if p in writes and helpers.scopes.innermost(p) == fn:
-                continue
-            if re.match(r"\s*:(?!:)", text[m.end():m.end() + 3]) and text[:p].rstrip()[-1:] in "{,":
-                continue  # a key that shares the name
-            return False
-        return True
+def _copy(fields):
+    """A copy of ``fields`` without spans, safe to add to."""
+    from .jsparse import Fields
+
+    return Fields(set(fields.paths), fields.complete, {}, set(fields.hidden), set(fields.switched))

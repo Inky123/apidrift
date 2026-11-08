@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import re
 
+from . import jsstable
+
 
 def reaching_fields(src, bindings, binding, at: int):
     """Fields of a variable argument whose nearest binding ``binding`` is an object literal: the union of every
@@ -49,6 +51,10 @@ def add_writes(src, bindings, binding, at: int, sub) -> None:
 
     if not _whole(src, binding.literal):
         sub.hide("")  # ``args = { amount: 1 }.merge(options)``, ``p = { a } || other``: more than the literal
+    if not jsstable.settled(src, bindings, binding.name, binding.pos, at):
+        sub.hide("")  # written later in a loop, in a callback, passed on before the call (jsstable)
+    if not src.ruby and not any(binding.literal < p < at for p in jsstable.mentions(bindings, binding.name)):
+        return  # not mentioned between the literal and the call: nothing is written into it
     only = not src.ruby and bindings.reaching(binding.name, at) == [binding]
     for mutation in bindings.mutations(binding.name, binding.literal, at):
         plain = only and mutation.key and mutation.literal is None
