@@ -16,7 +16,7 @@ That ``payload`` literal is the expected request, and it is tied to the edit onl
 - the actual value is a ``let``/``subject`` that is exactly ``<x>.__send__(:builder, ...)`` (or ``send``),
   where ``<x>`` is the described class itself: ``described_class``, the ``describe`` constant, ``subject``
   (unless a bare ``subject`` block builds something else), or a ``let``/``subject(:name)`` whose body is
-  exactly one of those, with at most ``.new(...)`` after it. Another class's same-named builder
+  exactly one of those, with at most ``.new(...)`` and ``.tap { ... }`` after it. Another class's same-named builder
   (``Billing::Link.new.send(:payload)``) is not this fix's, so its literal is left alone;
 - the expected ``let`` is defined once and is one hash literal, and every use of it is ``eq(...)`` against
   such an actual value or the start of a ``merge``/``deep_merge``/``except``/``dup`` whose result is used
@@ -44,6 +44,7 @@ LET = re.compile(r"\b(?:let!?|subject)\(\s*:(\w+[?!]?)\s*\)\s*(\{|do\b)")
 BARE_SUBJECT = re.compile(r"(?<![\w:.])(subject)\s*(\{|do\b)")  # the implicit subject, redefined
 SENDS = re.compile(r"\s*(?P<recv>[\w:.]+)\s*\.\s*(?:__send__|send|public_send)\(\s*:(?P<method>\w+[?!]?)\s*[,)]")
 NEW = re.compile(r"\s*\.\s*new\b")
+TAP = re.compile(r"\s*\.\s*tap\b")
 DERIVES = r"\s*\.\s*(?:merge|deep_merge|except|dup)\b"
 DERIVED_LET = re.compile(r"\s*(\w+)" + DERIVES)
 LOCAL = re.compile(r"(?m)^[ \t]*(\w+)\s*=\s*(\w+)" + DERIVES)
@@ -194,7 +195,8 @@ def _receivers(text: str, src: Source, mask: Mask, described: str, bodies: dict[
 
 
 def _instance(text: str, src: Source, lo: int, hi: int, described: str) -> bool:
-    """The body ``[lo, hi)`` is exactly the described class or a ``.new(...)`` of it."""
+    """The body ``[lo, hi)`` is exactly the described class or a ``.new(...)`` of it, at most followed by
+    ``.tap { ... }`` / ``.tap do ... end`` blocks (``tap`` returns its receiver, whatever the block does)."""
     m = re.compile(rf"\s*(?:described_class|(?:::)?{re.escape(described)})(?![\w:])").match(text, lo)
     if not m or m.end() > hi:
         return False
@@ -205,6 +207,16 @@ def _instance(text: str, src: Source, lo: int, hi: int, described: str) -> bool:
             i = src.skip_balanced(i)
             if text[i - 1 : i] != ")":
                 return False
+    while (t := TAP.match(text, i)) and t.end() <= hi:
+        j = src.skip_space(t.end())
+        if text[j : j + 1] == "{":
+            i = src.skip_balanced(j)
+            if text[i - 1 : i] != "}":
+                return False
+        elif re.match(r"do(?!\w)", text[j:hi]) and re.search(r"(?<!\w)end\s*\Z", text[j:hi]):
+            i = hi  # the block runs to the body's end
+        else:
+            return False
     return src.skip_space(i) >= hi
 
 

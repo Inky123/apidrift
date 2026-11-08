@@ -319,6 +319,8 @@ def test_r30_another_classes_same_named_builder_is_not_this_fix(tmp_path):
     ("subject", True),  # the implicit subject is described_class.new
     ("service", True),  # let(:service) { described_class.new(1) }
     ("built_by_const", True),  # let(:built_by_const) { Billing::Pay.new }
+    ("tapped", True),  # subject(:tapped) do described_class.new.tap { it.x = 1 } end: tap returns its receiver
+    ("tapped_other", False),  # let(:tapped_other) { Billing::Link.new.tap { |l| l.x = 1 } }
     ("Billing::Link.new", False),
     ("Pay.new", False),  # not the constant the spec describes
     ("other", False),  # let(:other) { Billing::Link.new }
@@ -328,9 +330,10 @@ def test_r30_another_classes_same_named_builder_is_not_this_fix(tmp_path):
 def test_r30_only_the_described_class_may_be_the_builders_receiver(tmp_path, receiver, ok):
     spec = R30_SPEC.replace("described_class.new.__send__", f"{receiver}.__send__").replace(
         "  let(:built)", "  let(:service) { described_class.new(1) }\n  let(:built_by_const) { Billing::Pay.new }\n"
-        "  let(:other) { Billing::Link.new }\n  let(:built)")
+        "  let(:other) { Billing::Link.new }\n  subject(:tapped) do\n    described_class.new.tap { it.instance_variable_set(:@x, 1) }\n  end\n"
+        "  let(:tapped_other) { Billing::Link.new.tap { |l| l.x = 1 } }\n  let(:built)")
     plan = plan_for(tmp_path, {"app/billing/pay.rb": R30_APP, "app/billing/link.rb": R30_LINK, "spec/billing/pay_spec.rb": spec})
-    assert edited(plan) == ({"spec/billing/pay_spec.rb": {7}} if ok else {}), receiver
+    assert edited(plan) == ({"spec/billing/pay_spec.rb": {11}} if ok else {}), receiver
 
 
 def test_r30_a_bare_subject_that_builds_another_class_is_not_the_described_one(tmp_path):

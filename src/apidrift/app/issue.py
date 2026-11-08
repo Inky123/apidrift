@@ -494,10 +494,3 @@ FIELD_PATH_RE = re.compile(r"[a-z0-9_]{1,80}(?:\.[a-z0-9_]{1,80}){0,4}")  # a fi
 PATH_RE = re.compile(r"/v[12](?:/[a-z0-9_{}]+)+")
 METHOD_RE = re.compile(r"get|post|delete")
 VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-
-
-def render_pr(*args, **kwargs) -> tuple[str, str]:
-    """The pull request body lives in :mod:`prbody` (which builds on this module); forwarded for convenience."""
-    from .prbody import render_pr as render
-
-    return render(*args, **kwargs)
