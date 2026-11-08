@@ -32,8 +32,13 @@ NEW_REQUEST = {"NewRequest", "NewRequestWithContext", "request", "request_async"
 
 
 def template(pieces: list[str | None]) -> str:
-    """Literal pieces joined, every non-literal one (None) a hole."""
-    return "".join(HOLE if p is None else p for p in pieces)
+    """Literal pieces joined, every run of non-literal ones (None) one hole."""
+    out: list[str] = []
+    for p in pieces:
+        if p is None and out and out[-1] == HOLE:
+            continue
+        out.append(HOLE if p is None else p)
+    return "".join(out)
 
 
 def split(url: str) -> tuple[str, str] | None:

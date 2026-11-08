@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from . import httpurl, httpwrap, phpparse
+from . import httpphppath, httpurl, httpwrap, phpparse
 from .jsparse import Fields
 from .phplex import STRING, Lex
 
@@ -31,7 +31,6 @@ CALLED = re.compile(r"([A-Za-z_]\w*)\s*(?:\(|::)")
 PARAM = re.compile(r"^\s*(?:[\w\\?|]+\s+)?(&\s*)?(\.\.\.)?\s*\$([A-Za-z_]\w*)\s*(?:=\s*(.*?))?\s*$", re.S)
 ENCODERS = re.compile(r"^(?:http_build_query|json_encode|wp_json_encode)\s*\(\s*\$([A-Za-z_]\w*)\s*\)$")
 SELF = {"self", "static"}
-MAX_PATHS = 4  # templates one path argument may stand for before it counts as not visible
 NOT_CALLS = {"function", "fn", "if", "elseif", "while", "for", "foreach", "switch", "array", "list", "isset", "unset",
              "empty", "return", "echo", "print", "new", "catch", "match", "use", "and", "or", "not"}
 
@@ -179,82 +178,6 @@ class File:
             last = m.end()
         if last < len(raw) or not out:
             out.append(("lit", raw[last:].replace('\\"', '"')))
-        return out
-
-    def expand(self, pieces: list[tuple[str, str | None]], at: int, depth: int = 0) -> list[list[str | None]]:
-        """The path templates ``pieces`` can stand for: a variable whose every reaching assignment is a
-        string (``$id = ''`` / ``$id = '/' . $intent->id``), or a same-class method whose every ``return``
-        is a literal or a ternary of two, gives one template per value. At most MAX_PATHS of them."""
-        out: list[list[str | None]] = [[]]
-        for kind, value in pieces:
-            options: list[list[str | None]] = [[value if kind == "lit" else None]]
-            if depth < 2 and kind == "var":
-                options = self._variable(value, at, depth) or options
-            elif depth < 2 and kind == "expr" and value:
-                options = self._returns(*map(int, value.split(":"))) or options
-            out = [a + b for a in out for b in options]
-            if len(out) > MAX_PATHS:
-                return [[None]]
-        return out
-
-    def _variable(self, name: str, at: int, depth: int) -> list[list[str | None]] | None:
-        reaching = self.parsed.bindings.reaching(name, at)
-        if not reaching or any(b.value < 0 or b.literal is not None for b in reaching):
-            return None
-        out = []
-        for b in reaching:
-            end = self.src.skip_scalar(b.value, ";")
-            got = self.pieces(b.value, end)
-            if not got:
-                return None
-            out += self.expand(got, b.value, depth + 1)
-        return out
-
-    def _returns(self, a: int, b: int) -> list[list[str | None]] | None:
-        m = re.fullmatch(r"(?:\$this\s*->|(?:self|static)\s*::)\s*([A-Za-z_]\w*)\s*\(.*\)", self.code[a:b].strip(), re.S)
-        if m is None:
-            return None
-        owner = self.class_at(a)
-        fns = [fn for fn in self.funcs if fn.name == m.group(1) and fn.owner == owner]
-        if len(fns) != 1:
-            return None
-        fn, out = fns[0], []
-        for r in re.finditer(r"(?<![\w$>:\\])return\b", self.code[fn.open : fn.close]):
-            start = self.src.skip_space(fn.open + r.end())
-            end = self.src.skip_scalar(start, ";")
-            if self.func_at(start) is not fn:
-                continue  # a closure's return
-            values = self._literal_or_ternary(start, end)
-            if values is None:
-                return None
-            out += [[v] for v in values]
-        return out or None
-
-    def _literal_or_ternary(self, a: int, b: int) -> list[str] | None:
-        code = self.code
-        depth, q = 0, -1
-        for j in range(a, b):
-            if self.src.masked(j):
-                continue
-            c = code[j]
-            depth += c in "([{"
-            depth -= c in ")]}"
-            if depth == 0 and c == "?" and code[j + 1 : j + 2] not in ("?", "-", ">") and code[j - 1 : j] != "?":
-                q = j
-                break
-        spans = [(a, b)]
-        if q >= 0:
-            colon = next((j for j in range(q + 1, b) if code[j] == ":" and not self.src.masked(j)
-                          and code[j - 1 : j] != ":" and code[j + 1 : j + 2] != ":"), -1)
-            if colon < 0:
-                return None
-            spans = [(q + 1, colon), (colon + 1, b)]
-        out = []
-        for x, y in spans:
-            got = self.pieces(x, y)
-            if len(got) != 1 or got[0][0] != "lit":
-                return None
-            out.append(got[0][1])
         return out
 
     def array_items(self, a: int, b: int) -> dict[str, tuple[int, int]] | None:
@@ -461,7 +384,7 @@ def sites(text: str, rel: str, index, reads: frozenset[str], language: str, regi
     f = File(text)
     here = wrappers_in(f, rel, known) if "stripe.com" in text or known else []
     wrappers = here + [w for w in known if w.rel != rel]
-    out = constant_sites(f, text, rel, index, reads, language) if f.consts else []
+    out = httpphppath.constant_sites(f, text, rel, index, reads, language) if f.consts else []
     for w, start, paren, display in _calls(f, wrappers, rel, registry):
         args = f.src.args(paren)
         if any(phpparse_named(f, a) or f.text.startswith("...", f.src.skip_space(a)) for a, _ in args):
@@ -471,7 +394,7 @@ def sites(text: str, rel: str, index, reads: frozenset[str], language: str, regi
         else:
             default = _default(w.defaults[w.path] if w.path < len(w.defaults) else None)
             pieces = [("lit", default)] if default is not None else []
-        templates = f.expand(pieces, start) if pieces else []
+        templates = httpphppath.expand(f, pieces, start) if pieces else []
         method = w.method
         if w.method_param is not None:
             if w.method_param < len(args):
@@ -495,42 +418,6 @@ def sites(text: str, rel: str, index, reads: frozenset[str], language: str, regi
             if u is not None and u.path not in paths:
                 paths.add(u.path)
                 out.append(u)
-    return out
-
-
-def constant_sites(f: File, text: str, rel: str, index, reads, language) -> list:
-    """HTTP calls whose URL is a constant holding a full Stripe URL (``curl_init(self::FILES_API_ENDPOINT)``,
-    ``wp_remote_post(self::IMPORT_SETS_ENDPOINT . '/' . $id, ...)``); a literal URL is the URL scan's."""
-    out = []
-    for m in HTTP.finditer(f.code):
-        callee, verb = m.group(1), m.group(2)
-        args = f.src.args(m.end() - 1)
-        url_at = 1 if verb == "request" else 0
-        if len(args) <= url_at or "stripe.com" in text[args[url_at][0] : args[url_at][1]]:
-            continue
-        pieces = f.pieces(*args[url_at])
-        if not pieces or pieces[0][0] != "lit":
-            continue
-        method = verb if verb in ("get", "post", "delete") else None
-        if callee:
-            fn = f.func_at(m.start())
-            rest = f.text[m.end() : fn.close if fn else len(text)]
-            if callee == "curl_init":
-                named = re.search(r"CURLOPT_CUSTOMREQUEST\s*(?:,|=>)\s*['\"](\w+)['\"]", rest)
-                method = httpurl.method_word(named.group(1)) if named else "post" if "CURLOPT_POST" in rest else "get"
-            else:
-                options = f.array_items(*args[1]) if len(args) > 1 else {}
-                given = (options or {}).get("method")
-                got = f.pieces(*given) if given else []
-                if given:
-                    method = httpurl.method_word(got[0][1]) if len(got) == 1 and got[0][0] == "lit" else None
-                else:
-                    method = "post" if callee.endswith("_post") else "get"
-        w = httpwrap.Wrapper("php", rel, callee or verb, "", "", 0, method, body_seen=False)
-        u = httpwrap.build(text, rel, index, w, f.line(m.start()), callee or verb,
-                           [v if k == "lit" else None for k, v in pieces], method, set(), {""}, reads, language)
-        if u is not None:
-            out.append(u)
     return out
 
 
