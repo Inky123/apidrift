@@ -118,6 +118,31 @@ LOCKFILE_RE = re.compile(
 )
 
 
+PIN_VERSION_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?:\.[A-Za-z][A-Za-z0-9_]{0,30})?")
+MAX_PINS = 100
+
+
+def pin_list(items: object) -> list[dict]:
+    """The child's API-version pins the parent will mention, rebuilt from checked values: a path
+    :func:`issue.valid_path` admits, a line number, and a dated version string (``2024-06-20``,
+    ``2025-04-30.basil``) that the parent can compare with its own table."""
+    out: list[dict] = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict) or len(out) >= MAX_PINS:
+            continue
+        file, line, version = item.get("file"), item.get("line"), item.get("version")
+        if not isinstance(file, str) or not issue.valid_path(file) or file != PurePosixPath(file).as_posix():
+            continue
+        if isinstance(line, bool) or not isinstance(line, int) or not 1 <= line <= 10_000_000:
+            continue
+        if not isinstance(version, str) or not PIN_VERSION_RE.fullmatch(version):
+            continue
+        entry = {"file": file, "line": line, "version": version}
+        if entry not in out:
+            out.append(entry)
+    return out
+
+
 def sdk_locks(items: object, fixes: list[dict]) -> list[dict]:
     """The child's locked SDK versions the parent will mention, rebuilt from checked values only: a known SDK
     whose language an accepted fix with a non-delete site is written in, a short plain version string, a

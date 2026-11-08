@@ -49,3 +49,39 @@ def test_a_mixed_pull_names_the_rejection_only_for_the_wrapped_fields():
 
 def test_deletes_only_is_unchanged():
     assert first_line(body([PAYTO])).endswith(prpins.DELETES_ONLY)
+
+
+def pin(version: str, file: str = "config/stripe.rb", line: int = 3) -> dict:
+    return {"file": file, "line": line, "version": version}
+
+
+def section(text: str) -> str:
+    start = text.index("**Merge together with your upgrade**") if "**Merge together" in text else text.index("**API-version")
+    return text[start:text.index("\n\nVerified:")]
+
+
+def test_only_pins_older_than_the_release_are_listed_as_predating_it():
+    text = section(body([PMT], pins=[pin("2025-04-30.basil"), pin("2026-09-30.endive", line=4),
+                                     pin("2026-10-28.endive", line=5), pin("2026-09-30.preview", line=6)]))
+    assert text.split("\n")[1] == (f"These files pin an API version older than {ENDIVE}, the release that changed these "
+                                   "fields: check that the pinned version accepts the new field, or bump them and the "
+                                   "Stripe SDK when you merge it:")
+    assert "/config/stripe.rb#L3 pins `2025-04-30.basil`" in text and text.count("\n- ") == 1
+    assert text.split("\n")[-1].startswith(f"Already pinned to {ENDIVE} or later: ")
+    assert "`2026-10-28.endive`" in text and "`2026-09-30.preview`" in text
+
+
+def test_a_wrap_pin_says_it_rejects_and_no_older_pin_says_so():
+    text = section(body([ANCHOR], pins=[pin("2024-09-30.acacia")]))
+    assert f"older than {ENDIVE}, which rejects the new shape; bump them" in text
+    text = section(body([ANCHOR], pins=[pin("2026-10-28.endive")]))
+    assert f"No API-version pin older than {ENDIVE} was found in the scanned files." in text and "rejects" not in text
+
+
+@pytest.mark.parametrize("bad", [
+    pin("2024"), pin("`2023-10-16`"), pin("2023-10-16; beta=v1"), pin("2023-10-16", file="../x.rb"),
+    pin("2023-10-16", line=True), {"file": "a.rb", "line": 1}, "2023-10-16",
+])
+def test_a_pin_the_parent_cannot_compare_is_dropped(bad):
+    text = section(body([PMT], pins=[bad]))
+    assert f"No API-version pin older than {ENDIVE} was found" in text and "2023" not in text

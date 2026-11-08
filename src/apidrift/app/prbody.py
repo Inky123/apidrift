@@ -205,7 +205,7 @@ def render_pr(
             lines.append(f"- {_where(full_name, sha, file, line)}" + (f" via {code(call)}" if call else ""))
         if len(places) > MAX_PR_LINKS:
             lines.append(f"- and {len(places) - MAX_PR_LINKS} more.")
-    lines += _pins(payload, full_name, sha, deletes_only)
+    lines += _pins(payload, {action for _, _, action, _ in groups}, introduced, full_name, sha)
     lines += _sdks(payload, fixes, full_name, sha)
     uncertain = len({place for _, places in possibly for place in places})
     verified = len(placed) - uncertain
@@ -229,23 +229,10 @@ def _introduced(groups: dict[tuple[str, str, str, str], list[tuple[str, int]]], 
     return min(found) if found else version
 
 
-def _pins(payload: dict, full_name: str, sha: str, deletes_only: bool) -> list[str]:
-    pins = [p for p in payload.get("pins") or [] if isinstance(p, dict) and p.get("file")]
-    if deletes_only:  # no merge-together claim: the change is accepted on every version
-        lines = ["", "**API-version pins found**"]
-        if pins:
-            lines.append("These files pin an API version; this pull request does not depend on it:")
-    else:
-        lines = ["", "**Merge together with your upgrade**"]
-        if pins:
-            lines.append("These files pin an API version that predates this change; bump them and the Stripe SDK when you merge it:")
-    for pin in pins[:MAX_PR_LINKS]:
-        lines.append(f"- {_where(full_name, sha, str(pin['file']), pin.get('line'))} pins {code(str(pin.get('version') or ''))}")
-    if len(pins) > MAX_PR_LINKS:
-        lines.append(f"- and {len(pins) - MAX_PR_LINKS} more.")
-    if not pins:
-        lines.append("No API-version pin was found in the scanned files.")
-    return lines
+def _pins(payload: dict, actions: set[str], introduced: str, full_name: str, sha: str) -> list[str]:
+    """Pins checked by :func:`fixcheck.pin_list`, compared with ``introduced`` (:mod:`prpins`)."""
+    where = lambda file, line: _where(full_name, sha, file, line)  # noqa: E731
+    return prpins.section(fixcheck.pin_list(payload.get("pins")), actions, introduced, safe_version(introduced), where)
 
 
 TYPED_NODE = (".ts", ".tsx", ".mts", ".cts")

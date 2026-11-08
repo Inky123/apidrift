@@ -199,7 +199,7 @@ def test_a_deletes_only_pull_does_not_claim_it_must_wait_for_the_upgrade():
     assert "Merge together" not in body and "rejects the new shape" not in body and "predates" not in body
     _, mixed = render([fix(site(PAYTO), site(ANCHOR, 4))], pins=pins)
     assert "rejects the new shape." in mixed and "**Merge together with your upgrade**" in mixed
-    assert "These files pin an API version that predates this change;" in mixed and "can merge any time" not in mixed
+    assert f"These files pin an API version older than {ENDIVE}, which rejects the new shape;" in mixed and "can merge any time" not in mixed
 
 
 def test_one_note_per_migration_and_its_endpoints_sit_together():
@@ -223,7 +223,7 @@ def test_object_literals_in_a_note_are_code_spans():
 
 def test_pin_note_is_action_neutral():
     _, body = render([fix(site(ANCHOR))], pins=[{"file": "a.py", "line": 1, "version": "2024-06-20"}])
-    assert "These files pin an API version that predates this change;" in body and "rename" not in body
+    assert f"These files pin an API version older than {ENDIVE}, which rejects the new shape;" in body and "rename" not in body
 
 
 def test_every_table_entry_is_reachable_by_its_site():

@@ -159,7 +159,7 @@ def test_opens_a_pull_request_from_a_branch_on_the_base_commit(scan, installed, 
         f"Verified: apidrift re-scanned the changed files; 1 call site now sends what Stripe {NEW_VERSION} expects; "
         "every other Stripe call is unchanged.",
         f"Stripe changed these fields in {NEW_VERSION}, so an older pinned version may not accept the new names; check it, or upgrade.",
-        f"blob/{SHA}/server.py#L2 pins `2023-10-16`", "These files pin an API version that predates this change;",
+        f"blob/{SHA}/server.py#L2 pins `2023-10-16`", f"These files pin an API version older than {NEW_VERSION}, the release that changed these fields:",
         "**Left for you**", prbody.UNFIXABLE_WHY["incomplete_binding"], f"blob/{SHA}/server.rb#L7",
         f"Still mentions the old name at https://github.com/octo/shop/blob/{SHA}/server.js#L30", "Addresses #1",
     ):
@@ -407,7 +407,7 @@ def test_render_pr_keeps_repo_text_inert():
     payload = {
         "impacts": [{"usage": {"file": "pay @zach.py", "line": 3, "path": "/v1/charges", "call": "@zach `#1`"}}],
         "migrations": [{"method": "post", "path": "/v1/charges", "target": "description", "replacement": "d2", "doc": "javascript:alert(1)", "note": "[x](http://evil)"}],
-        "pins": [{"file": "a.py", "line": 1, "version": "`2023`"}],
+        "pins": [{"file": "a.py", "line": 1, "version": "`2023`"}, {"file": "a.py", "line": 2, "version": "2023-10-16"}],
         "unfixable": [{"file": "b.py", "line": 2, "why": "mystery <script>"}],
         "leftovers": [],
         "unread": {"Go": 2},
@@ -417,7 +417,7 @@ def test_render_pr_keeps_repo_text_inert():
     assert title == "Stripe v: rename description (1 call site)"
     assert "javascript:" not in body and "evil" not in body and "`` @zach `#1` ``" in body  # the child's note is ignored
     assert "**`description` → `d2` on POST `/v1/charges`**" in body and "Ready for Stripe v." in body
-    assert "pay%20%40zach.py#L3" in body and "pins `` `2023` ``" in body and "apidrift does not read Go call sites yet" in body
+    assert "pay%20%40zach.py#L3" in body and "`2023`" not in body and "a.py#L2 pins `2023-10-16`" in body and "apidrift does not read Go call sites yet" in body
     assert "mystery" not in body and "<script>" not in body and prbody.UNKNOWN_UNFIXABLE in body  # never the child's why
     assert "Addresses #9" in body and prbody.pr_marker_in(body) == "f" * 64
     assert "No API-version pin" not in body
