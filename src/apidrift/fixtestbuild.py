@@ -13,7 +13,11 @@ That ``payload`` literal is the expected request, and it is tied to the edit onl
   ``describe`` names the class the builder is defined in;
 - the builder is defined once in that file, an edited line of this migration lies inside it, the call the
   fix changed is outside it (it builds, it does not send), and the file calls it;
-- the actual value is a ``let``/``subject`` that is exactly ``<x>.__send__(:builder, ...)`` (or ``send``);
+- the actual value is a ``let``/``subject`` that is exactly ``<x>.__send__(:builder, ...)`` (or ``send``),
+  where ``<x>`` is the described class itself: ``described_class``, the ``describe`` constant, ``subject``
+  (unless a bare ``subject`` block builds something else), or a ``let``/``subject(:name)`` whose body is
+  exactly one of those, with at most ``.new(...)`` after it. Another class's same-named builder
+  (``Billing::Link.new.send(:payload)``) is not this fix's, so its literal is left alone;
 - the expected ``let`` is defined once and is one hash literal, and every use of it is ``eq(...)`` against
   such an actual value or the start of a ``merge``/``deep_merge``/``except``/``dup`` whose result is used
   the same way. Any other use (passed to a factory, splatted, indexed) and the literal is left alone.
@@ -37,7 +41,9 @@ END = re.compile(r"end\b.*")
 TOKEN = re.compile(r"(?<![\w:])[A-Za-z_]\w*[?!]?(?![\w?!])")  # a method name as a bare token (not ``X::name``)
 DESCRIBE = re.compile(r"^(?:RSpec\s*\.\s*)?describe\s*\(?\s*(?:::)?([A-Z][\w:]*)", re.M)
 LET = re.compile(r"\b(?:let!?|subject)\(\s*:(\w+[?!]?)\s*\)\s*(\{|do\b)")
-SENDS = re.compile(r"\s*[\w:.]+\s*\.\s*(?:__send__|send|public_send)\(\s*:(\w+[?!]?)\s*[,)]")
+BARE_SUBJECT = re.compile(r"(?<![\w:.])(subject)\s*(\{|do\b)")  # the implicit subject, redefined
+SENDS = re.compile(r"\s*(?P<recv>[\w:.]+)\s*\.\s*(?:__send__|send|public_send)\(\s*:(?P<method>\w+[?!]?)\s*[,)]")
+NEW = re.compile(r"\s*\.\s*new\b")
 DERIVES = r"\s*\.\s*(?:merge|deep_merge|except|dup)\b"
 DERIVED_LET = re.compile(r"\s*(\w+)" + DERIVES)
 LOCAL = re.compile(r"(?m)^[ \t]*(\w+)\s*=\s*(\w+)" + DERIVES)
@@ -147,7 +153,8 @@ def find(text: str, file: str, sources: list[Builder]) -> list[Expect]:
         if not mask.covers(m.start()):
             span = _body(text, src, m)
             bodies.setdefault(m.group(1), []).append(span if span else (-1, -1))
-    actual = {n: m for n, spans in bodies.items() if len(spans) == 1 and (m := _sent(text, src, *spans[0]))}
+    roots = _receivers(text, src, mask, described, bodies)
+    actual = {n: m for n, spans in bodies.items() if len(spans) == 1 and (m := _sent(text, src, *spans[0], roots))}
     derived = {n: d.group(1) for n, spans in bodies.items() if len(spans) == 1 and spans[0][0] >= 0
                and (d := DERIVED_LET.match(text[spans[0][0] : spans[0][1]]))}
     out = []
@@ -173,13 +180,45 @@ def _body(text: str, src: Source, m: re.Match[str]) -> tuple[int, int] | None:
     return (m.end(), close.start()) if close else None
 
 
-def _sent(text: str, src: Source, lo: int, hi: int) -> str | None:
-    """The builder a ``let`` body calls when the body is exactly ``<x>.__send__(:builder, ...)``."""
+def _receivers(text: str, src: Source, mask: Mask, described: str, bodies: dict[str, list[tuple[int, int]]]) -> set[str]:
+    """The names that stand for the described class in this spec: ``described_class``, the ``describe``
+    constant, ``subject`` unless a bare ``subject`` block builds something else, and every ``let`` /
+    ``subject(:name)`` whose one body is exactly an instance of it (:func:`_instance`)."""
+    roots = {"described_class", described, "::" + described.lstrip(":")}
+    roots |= {n for n, spans in bodies.items() if len(spans) == 1 and spans[0][0] >= 0 and _instance(text, src, *spans[0], described)}
+    bare = [m for m in BARE_SUBJECT.finditer(text) if not mask.covers(m.start())]
+    spans = [_body(text, src, m) for m in bare]
+    if not bare or (len(bare) == 1 and spans[0] and _instance(text, src, *spans[0], described)):
+        roots.add("subject")
+    return roots
+
+
+def _instance(text: str, src: Source, lo: int, hi: int, described: str) -> bool:
+    """The body ``[lo, hi)`` is exactly the described class or a ``.new(...)`` of it."""
+    m = re.compile(rf"\s*(?:described_class|(?:::)?{re.escape(described)})(?![\w:])").match(text, lo)
+    if not m or m.end() > hi:
+        return False
+    i, n = m.end(), NEW.match(text, m.end())
+    if n and n.end() <= hi:
+        i = n.end()
+        if text[i : i + 1] == "(":
+            i = src.skip_balanced(i)
+            if text[i - 1 : i] != ")":
+                return False
+    return src.skip_space(i) >= hi
+
+
+def _sent(text: str, src: Source, lo: int, hi: int, roots: set[str]) -> str | None:
+    """The builder a ``let`` body calls when the body is exactly ``<x>.__send__(:builder, ...)`` and ``<x>`` is
+    one of ``roots`` (the described class), at most with ``.new`` after it."""
     m = SENDS.match(text, lo) if lo >= 0 else None
     if not m or m.end() > hi:
         return None
+    root, *rest = m.group("recv").split(".")
+    if root not in roots or rest not in ([], ["new"]):
+        return None
     end = src.skip_balanced(text.rindex("(", lo, m.end()))
-    return m.group(1) if text[end - 1 : end] == ")" and src.skip_space(end) >= hi else None
+    return m.group("method") if text[end - 1 : end] == ")" and src.skip_space(end) >= hi else None
 
 
 def _literal(text: str, src: Source, lo: int, hi: int) -> tuple[int, int] | None:

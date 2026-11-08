@@ -5,6 +5,7 @@ listed: a negative expectation, a mock's return value, a Stripe response read, a
 a comment or string, and a mock this reader cannot tie to the SDK call.
 """
 
+import pytest
 from test_fixer import plan_for
 from test_fixer_v2 import plan_v2
 
@@ -279,3 +280,64 @@ def test_finders_ignore_text_in_strings_and_comments():
     assert find("<?php // $m->shouldReceive('create')->with(['a' => 1]);\n", "php") == []
     assert find("def f(:\n", "python") == []  # does not parse: nothing is read
     assert find("anything", "go") == []
+
+
+R30_APP = (
+    "module Billing\n  class Pay\n    def call\n      Stripe::PaymentIntent.create(payload)\n    end\n\n"
+    "    private\n\n    def payload\n      {\n        amount: 1,\n        payment_method_types: ['card']\n      }\n    end\n"
+    "  end\nend\n"
+)
+R30_LINK = R30_APP.replace("Pay", "Link").replace("PaymentIntent", "PaymentLink").replace("amount: 1", "line_items: []")
+R30_SPEC = (
+    "RSpec.describe Billing::Pay do\n"
+    "  let(:built) { described_class.new.__send__(:payload) }\n"
+    "  let(:link) { Billing::Link.new.send(:payload) }\n"
+    "  let(:expected) { { amount: 1, payment_method_types: ['card'] } }\n"
+    "  let(:expected_link) { { line_items: [], payment_method_types: ['card'] } }\n"
+    "  it { expect(built).to eq(expected) }\n"
+    "  it { expect(link).to eq(expected_link) }\n"
+    "end\n"
+)
+
+
+def test_r30_another_classes_same_named_builder_is_not_this_fix(tmp_path):
+    """``Billing::Link#payload`` was not changed, so the literal its spec compares with must stay as it is."""
+    files = {"app/billing/pay.rb": R30_APP, "app/billing/link.rb": R30_LINK, "spec/billing/pay_spec.rb": R30_SPEC}
+    plan = plan_for(tmp_path, files)
+    assert [f.file for f in plan.fixes] == ["app/billing/pay.rb"]
+    assert edited(plan) == {"spec/billing/pay_spec.rb": {4}}
+    after = content(plan, "spec/billing/pay_spec.rb")
+    assert "let(:expected) { { amount: 1, allowed_payment_method_types: ['card'] } }" in after
+    assert "let(:expected_link) { { line_items: [], payment_method_types: ['card'] } }" in after
+    assert ("spec/billing/pay_spec.rb", 5) in plan.tests  # still named: left for a person
+
+
+@pytest.mark.parametrize("receiver, ok", [
+    ("described_class.new", True),
+    ("Billing::Pay.new", True),
+    ("::Billing::Pay.new", True),
+    ("subject", True),  # the implicit subject is described_class.new
+    ("service", True),  # let(:service) { described_class.new(1) }
+    ("built_by_const", True),  # let(:built_by_const) { Billing::Pay.new }
+    ("Billing::Link.new", False),
+    ("Pay.new", False),  # not the constant the spec describes
+    ("other", False),  # let(:other) { Billing::Link.new }
+    ("described_class.new.dup", False),  # more than .new after the root
+    ("helper.described_class", False),
+])
+def test_r30_only_the_described_class_may_be_the_builders_receiver(tmp_path, receiver, ok):
+    spec = R30_SPEC.replace("described_class.new.__send__", f"{receiver}.__send__").replace(
+        "  let(:built)", "  let(:service) { described_class.new(1) }\n  let(:built_by_const) { Billing::Pay.new }\n"
+        "  let(:other) { Billing::Link.new }\n  let(:built)")
+    plan = plan_for(tmp_path, {"app/billing/pay.rb": R30_APP, "app/billing/link.rb": R30_LINK, "spec/billing/pay_spec.rb": spec})
+    assert edited(plan) == ({"spec/billing/pay_spec.rb": {7}} if ok else {}), receiver
+
+
+def test_r30_a_bare_subject_that_builds_another_class_is_not_the_described_one(tmp_path):
+    spec = R30_SPEC.replace("described_class.new.__send__", "subject.__send__")
+    for body, ok in (("subject { described_class.new }", True), ("subject { Billing::Link.new }", False),
+                     ("subject do\n    Billing::Pay.new(1)\n  end", True), ("subject { build(:pay) }", False)):
+        root = tmp_path / str(ok) / body[:12].replace(" ", "_").replace("(", "").replace(":", "")
+        with_subject = spec.replace("  let(:built)", f"  {body}\n  let(:built)")
+        plan = plan_for(root, {"app/billing/pay.rb": R30_APP, "app/billing/link.rb": R30_LINK, "spec/billing/pay_spec.rb": with_subject})
+        assert bool(edited(plan)) is ok, body
