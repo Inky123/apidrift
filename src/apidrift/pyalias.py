@@ -70,6 +70,7 @@ class Binders:
         self.declared: set[str] = set()  # named by a global / nonlocal statement
         self.attr_stores: set[str] = set()  # attributes written or deleted anywhere (x.attr = v, setattr(x, "attr", v))
         self.setattr_any = False  # setattr / delattr with a computed name
+        self.repo = None  # pyrepo.Repo: the checkout, which module-level aliases and class attributes need
         self._visit(tree, [tree])
 
     # --- walking ---------------------------------------------------------------------------
@@ -164,14 +165,31 @@ class Binders:
 
     def binding(self, name: ast.Name) -> tuple[str, ast.AST] | None:
         """The one binding a loaded name can have, or None (several, none, or declared global/nonlocal)."""
+        found = self.binding_in(name)
+        return found[:2] if found is not None else None
+
+    def binding_in(self, name: ast.Name) -> tuple[str, ast.AST, ast.AST] | None:
+        """:meth:`binding` and the scope it is in."""
         chain = self.chains.get(id(name))
         if chain is None or name.id in self.declared:
             return None
         for scope in chain:
             found = self.by_scope.get(scope, {}).get(name.id)
             if found:
-                return found[0] if len(found) == 1 else None
+                return (*found[0], scope) if len(found) == 1 else None
         return None
+
+    def unwritten(self, attr: str) -> bool:
+        """Nothing in the checkout outside tests writes ``.attr`` (``mod.alias = ...``, ``Model.attr = ...``):
+        proven only with the checkout (:class:`pyrepo.Repo`); a file read alone proves nothing."""
+        from .pyrepo import Unknown
+
+        if self.repo is None:
+            return False
+        try:
+            return self.repo.writes(attr) == 0
+        except Unknown:
+            return False
 
     def sdk_chain(self, node: ast.expr, imports: dict[str, str], depth: int = 0) -> list[str] | None:
         """The SDK chain an expression names (``stripe.PaymentIntent``, ``self._client.v1``), else None."""
@@ -193,17 +211,22 @@ class Binders:
     def root(self, name: ast.Name, rest: list[str], imports: dict[str, str], depth: int) -> list[str] | None:
         """What a chain's first name stands for: an import of stripe, an alias, or a class attribute
         (``Model.stripe_class``, which consumes the first of ``rest``)."""
-        found = self.binding(name)
+        found = self.binding_in(name)
         if found is None:
             return None
-        kind, node = found
+        kind, node, scope = found
         if kind == "param":
             return [name.id] if name.id in ("self", "cls") else None  # self._client.v1: a StripeClient's namespace
         if kind == "import":
             return imports[name.id].split(".") if name.id in imports else None
         if kind == "assign":
+            if isinstance(scope, (ast.Module, ast.ClassDef)) and not self.unwritten(name.id):
+                return None  # a module-level name another module may rebind (``mod.alias = ...``)
             return self.sdk_chain(node.value, imports, depth + 1)
         if kind == "class" and rest:
+            if not (self.unwritten(rest[0]) and self.unwritten(name.id)):
+                return None  # ``Model.stripe_class = ...`` (or ``models.Model = ...``) elsewhere in the checkout
+
             value = self.class_attr(node, rest[0], depth)
             if value is None:
                 return None

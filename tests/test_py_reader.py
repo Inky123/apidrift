@@ -221,6 +221,14 @@ def test_bare_except_tuples_are_read_in_place():
     assert pysyntax.bare_except_tuples("try:\n    f()\nexcept A as e:\n    pass\n") is None
 
 
+def test_too_deep_files_and_odd_line_breaks():
+    assert pysyntax.parse("x = " + "+".join(["1"] * 20000) + "\n") is None  # RecursionError: unreadable, not a crash
+    text = "a = 1  # \f \x1c \x85 in a comment\ntry:\n    f()\nexcept A, B:\n    pass\n"  # none ends a line
+    patched = pysyntax.bare_except_tuples(text)
+    assert patched.split("\n")[3] == "except(A, B):" and patched.split("\n")[0] == text.split("\n")[0]
+    assert pysyntax.parse(text) is not None
+
+
 def test_a_file_in_python_314_syntax_is_scanned_and_fixed(tmp_path):
     text = (
         "import stripe\n"

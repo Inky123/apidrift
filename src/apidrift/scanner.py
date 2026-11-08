@@ -143,6 +143,7 @@ class ScanResult:
     skipped_dirs: int = 0  # dependency and build directories left unread
     unread: dict[str, int] = field(default_factory=dict)  # language -> files mentioning Stripe in languages not parsed
     reader: Reader = Reader()  # the vendor the scan was for
+    pyrepo: object | None = field(default=None, repr=False, compare=False)  # pyrepo.Repo: the fixer reads with it too
 
     @property
     def counted(self) -> list[Usage]:
@@ -183,8 +184,10 @@ def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> Scan
     unread: dict[str, int] = {}
     scanned = 0
     registry = httpwrap.Registry() if reader.scan_text is None and root.is_dir() else None  # raw-HTTP wrappers
-    if reader.scan_text is None:  # Python calls through self: the checkout's classes, read on demand (pyrepo)
-        read = functools.partial(scan_text, repo=pyrepo.Repo(base, files))
+    repo = None
+    if reader.scan_text is None and root.is_dir():  # the checkout's classes, read on demand; one file proves nothing
+        repo = pyrepo.Repo(base, files)
+        read = functools.partial(scan_text, repo=repo)
     for path in files:
         text = _read(path)
         if text is None:
@@ -206,7 +209,9 @@ def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> Scan
             text = _read(base / rel) or ""
             usages += _http_sites(text, rel, index, [u for u in usages if u.file == rel], registry)
     usages.sort(key=lambda u: (u.file, u.line, u.path))
-    return ScanResult(str(root), usages, scanned, unresolved, skipped_files, skipped_dirs, dict(sorted(unread.items())), reader)
+    return ScanResult(
+        str(root), usages, scanned, unresolved, skipped_files, skipped_dirs, dict(sorted(unread.items())), reader, repo
+    )
 
 
 def scan_text(

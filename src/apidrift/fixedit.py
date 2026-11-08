@@ -65,7 +65,7 @@ def apply(text: str, edits: list[Edit]) -> str:
 class Locator:
     """Edit sites for the usages of one file, parsing it once."""
 
-    def __init__(self, text: str, language: str, index: SdkIndex) -> None:
+    def __init__(self, text: str, language: str, index: SdkIndex, repo=None) -> None:
         self.text, self.language, self.ruby = text, language, language == "ruby"
         self.quote = '"' if text.count('"') > text.count("'") else "'"  # the file's usual string quote
         resolve = lambda chain: scanner._resolve(index, chain)  # noqa: E731
@@ -75,7 +75,7 @@ class Locator:
 
             self.go = GoLocator(text, index)
         elif language == "python":
-            self.py_calls, _ = pyparse.calls(text, resolve)
+            self.py_calls, _ = pyparse.calls(text, resolve, repo=repo)  # the scan's checkout: the same calls
             self.offsets = _Offsets(text)
         else:
             self.js_calls, _ = jsparse.calls(text, index, ruby=self.ruby, resolve=resolve)

@@ -1,223 +1,425 @@
-"""What the whole checkout says about a Python class, for calls made through ``self`` / ``cls``.
+"""What the whole checkout says about Python classes, for calls through ``self`` / ``cls`` (:mod:`pyself`) and
+module-level SDK aliases (:mod:`pyalias`). Every answer fails closed: anything not seen or not modelled means
+"not proven", exactly as if there were no checkout.
 
-``self.stripe_class.create(...)`` and ``self.api.Customer.create(...)`` (``self.api = api`` in ``__init__``)
-name an SDK object only if no subclass anywhere rebinds the attribute, and, for an injected one, every
-construction of the class passes the ``stripe`` module. One file cannot show that, so :func:`scanner.scan_repo`
-hands the reader a :class:`Repo` over every Python file of the checkout. It reads a file only when its text
-names a class in question (by word), parses it once, and remembers:
+The checkout is walked once, by this module itself (dot directories, build output, oversize files and
+symlinks included), and one word index is built over every ``.py`` file (:meth:`Repo.mentions`). Files the
+scanner reads are parsed when a question names a word they contain; a file it skips (oversize, symlinked,
+in a skipped directory), a file that does not parse, or a symlinked directory that names nothing we can
+read, makes every question touching it unproven. Past :data:`MAX_FILES` files, :data:`MAX_BYTES` of source
+or :data:`MAX_POSTINGS` words, nothing is proven.
 
-* each class: its name, the last names of its bases, the names its body binds, whether it is decorated;
-* each call of such a class by name (``StripeBillingService(...)``, ``mod.Cls(...)``) or of ``cls(...)`` inside
-  one of its classmethods: whether each argument is the stripe module (a name bound to ``import stripe``);
-* any other use of the class as a value (passed, returned, assigned, ``type(self)(...)``, ``self.__class__``),
-  which could construct it out of sight.
+Per parsed file (:class:`Facts`): each class (name, bases resolved through imports and aliases -- ``Base[int]``
+is ``Base``; anything else is unresolved -- the names its body binds, its decorators, a metaclass); each call
+of a name (``Cls(...)``, ``alias(...)``, ``mod.Cls(...)``) or of ``cls`` inside a class (any method whose first
+parameter is ``cls``, or any ``@classmethod``), with which arguments are the stripe module; every other use
+of a name as a value; names given to ``type(...)`` / ``new_class(...)``, named in an unresolved base, or
+spelled in a string (``getattr(m, "Cls")``, ``"app.svc.Cls"``); and every attribute written (assignment and
+annotated assignment targets, unpacking, ``del``, augmented assignment, ``setattr`` / ``__setattr__`` /
+``delattr`` in any spelling; a computed name or a ``__dict__`` / ``vars()`` write counts as writing every name
+the file spells as a string. A name computed from outside the source -- configuration, request data -- is the
+one write this does not model).
 
-Classes are matched by name, so two classes of the same name count as one (more is only stricter). Test
-files (:data:`scanner.TEST_DIRS`, :data:`scanner.TEST_FILE`) build services with stand-ins and make no real
-request: their constructions and uses are not counted, but their subclasses are. A class reached by a dotted
-string and constructed directly would not be seen; ``config.maybe_dotted(...).create_service`` style access
-goes through a classmethod, whose ``cls(...)`` is. Past :data:`MAX_FILES` Python files nothing is proven.
+Test files (:data:`scanner.TEST_DIRS`, :data:`scanner.TEST_FILE`) build services with stand-ins and patch
+attributes; they make no real request, so their constructions, value uses and writes are not counted. Their
+classes are.
 """
 
 from __future__ import annotations
 
 import ast
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import pysyntax
 
-MAX_FILES = 20_000
-MAX_BYTES = 1_500_000
+MAX_FILES = 50_000
+MAX_BYTES = 400_000_000  # source read in the one pass
+MAX_FILE = 8_000_000  # a file past this is not read: it may name anything
+MAX_POSTINGS = 40_000_000
 MAX_FAMILY = 200
-MAX_KEPT = 64_000_000  # characters of source kept in memory between questions
+MAX_PARSED = 2_000  # files parsed to answer questions
+WORD = re.compile(rb"[A-Za-z_][A-Za-z0-9_]*")
+BUILTIN_BASES = {"object"}
+SETATTRS = {"setattr", "delattr", "__setattr__", "__delattr__"}
+DYNAMIC = {"type", "new_class", "make_dataclass", "namedtuple"}
 
 
 @dataclass
 class Klass:
     name: str
-    bases: list[str]
+    bases: list[str | None]
     binds: set[str]
+    decorators: list[str | None]
+    metaclass: bool
 
 
 @dataclass
 class Facts:
     classes: list[Klass] = field(default_factory=list)
-    calls: list[tuple[str, list[bool | None], dict[str, bool | None]]] = field(default_factory=list)  # name, args, kwargs
-    escapes: set[str] = field(default_factory=set)  # class names used as values
+    calls: list[tuple[str, list[bool | None], dict[str | None, bool | None]]] = field(default_factory=list)
+    cls_calls: list[tuple[str, list[bool | None], dict[str | None, bool | None]]] = field(default_factory=list)
+    escapes: set[str] = field(default_factory=set)
+    dynamic: set[str] = field(default_factory=set)  # named in type(...) / new_class(...) or an unresolved base
+    strings: set[str] = field(default_factory=set)  # spelled as a string, or reached by getattr(...)(...)
+    writes: dict[str, int] = field(default_factory=dict)
+    any_write: bool = False  # setattr with a computed name, a __dict__ / vars() write
+
+
+class Unknown(Exception):
+    """Something the proof cannot see: the question is answered "not proven"."""
 
 
 class Repo:
-    def __init__(self, base: Path, files: list[Path]) -> None:
-        self.base = base
-        self.files = [p for p in files if p.suffix == ".py"]
-        self.usable = len(self.files) <= MAX_FILES
-        self._texts: dict[Path, str | None] = {}
-        self._facts: dict[Path, Facts | None] = {}
-        self._mentions: dict[str, list[Path]] = {}
-        self._stores: dict[str, int] = {}
-        self._kept = 0
+    def __init__(self, base: Path, readable: list[Path]) -> None:
+        self.base = Path(base).resolve()
+        self.readable = {str(p) for p in readable}  # the scanner walks the same resolved root: the same spelling
+        self._index: dict[bytes, list[int]] | None = None
+        self.paths: list[Path] = []
+        self.skipped: list[bool] = []  # a file the scanner does not read: naming a class there leaves it unproven
+        self.usable = True  # False: some Python source is out of sight (too much, a symlinked directory, unreadable)
+        self._facts: dict[int, Facts | None] = {}
 
-    # --- reading ---------------------------------------------------------------------------
+    # --- the one pass ----------------------------------------------------------------------
 
-    def _text(self, path: Path) -> str | None:
-        if path in self._texts:
-            return self._texts[path]
-        try:
-            text = path.read_text(errors="replace") if path.stat().st_size <= MAX_BYTES else None
-        except OSError:
-            text = None
-        if self._kept + len(text or "") <= MAX_KEPT:  # keep texts while they are few; read again past that
-            self._texts[path] = text
-            self._kept += len(text or "")
-        return text
+    def _build(self) -> None:
+        index: dict[bytes, list[int]] = {}
+        read = postings = 0
+        for dirpath, dirs, names in os.walk(self.base):
+            here = Path(dirpath)
+            for d in list(dirs):
+                if (here / d).is_symlink() and "node_modules" not in here.parts and d != "node_modules":
+                    self.usable = False  # its Python files are out of sight
+            dirs[:] = [d for d in dirs if d != ".git" and not (here / d).is_symlink()]
+            for name in names:
+                if not name.endswith(".py"):
+                    continue
+                path = here / name
+                n = len(self.paths)
+                self.paths.append(path)
+                if len(self.paths) > MAX_FILES:
+                    self.usable = False
+                    return
+                try:
+                    link = path.is_symlink()
+                    if (link and not path.resolve().is_relative_to(self.base)) or path.stat().st_size > MAX_FILE:
+                        self.usable = False  # its words cannot be read: it may name anything
+                        return
+                    raw = path.read_bytes()
+                except OSError:
+                    self.usable = False
+                    return
+                read += len(raw)
+                self.skipped.append(link or str(path) not in self.readable)
+                words = set(WORD.findall(raw))
+                postings += len(words)
+                if read > MAX_BYTES or postings > MAX_POSTINGS:
+                    self.usable = False
+                    return
+                for w in words:
+                    index.setdefault(w, []).append(n)
+        self._index = index
 
-    def test_file(self, path: Path) -> bool:
+    def mentions(self, name: str) -> list[int]:
+        """Files whose text has ``name`` as a word; :class:`Unknown` when one of them cannot be read, or a file
+        that could name it was not seen."""
+        if self._index is None and self.usable:
+            self._build()
+        if not self.usable or self._index is None:
+            raise Unknown(name)
+        found = self._index.get(name.encode(), [])
+        if any(self.skipped[n] for n in found):
+            raise Unknown(name)  # named in a file the scanner skips (oversize, a build or dot directory, a symlink)
+        return found
+
+    def test_file(self, n: int) -> bool:
         from .scanner import TEST_DIRS, TEST_FILE  # the scanner builds on this module
 
-        *dirs, name = path.relative_to(self.base).parts
+        *dirs, name = self.paths[n].relative_to(self.base).parts
         return any(d in TEST_DIRS for d in dirs) or bool(TEST_FILE.match(name))
 
-    def mentions(self, name: str) -> list[Path]:
-        if name not in self._mentions:
-            word = re.compile(rf"\b{re.escape(name)}\b")
-            self._mentions[name] = [p for p in self.files if (t := self._text(p)) is not None and word.search(t)]
-        return self._mentions[name]
+    def facts(self, n: int) -> Facts:
+        if n not in self._facts:
+            if len(self._facts) >= MAX_PARSED:
+                raise Unknown(str(self.paths[n]))
+            try:
+                tree = pysyntax.parse(self.paths[n].read_text(errors="replace"))
+                self._facts[n] = collect(tree) if tree is not None else None
+            except (OSError, RecursionError, MemoryError):
+                self._facts[n] = None
+        if self._facts[n] is None:
+            raise Unknown(str(self.paths[n]))
+        return self._facts[n]
 
-    def facts(self, path: Path) -> Facts | None:
-        if path not in self._facts:
-            text = self._text(path)
-            tree = pysyntax.parse(text) if text is not None else None
-            self._facts[path] = collect(tree) if tree is not None else None
-        return self._facts[path]
+    # --- questions (each raises Unknown when it cannot be answered) -----------------------
 
-    # --- questions -------------------------------------------------------------------------
+    def classes(self, name: str) -> list[Klass]:
+        """Every class of that name in the checkout."""
+        return [k for n in self.mentions(name) for k in self.facts(n).classes if k.name == name]
 
-    def family(self, name: str) -> set[str] | None:
-        """``name`` and every class anywhere that subclasses it (by base name), or None when unknown."""
-        if not self.usable:
-            return None
+    def family(self, name: str) -> set[str]:
+        """``name`` and every class that subclasses it, by name, transitively."""
         out, todo = {name}, [name]
         while todo:
-            if len(out) > MAX_FAMILY:
-                return None
             current = todo.pop()
-            for path in self.mentions(current):
-                facts = self.facts(path)
-                if facts is None:
-                    return None  # a file naming the class that cannot be read
+            for n in self.mentions(current):
+                facts = self.facts(n)
+                if current in facts.dynamic:
+                    raise Unknown(current)  # type("Sub", (Base,), {...}), getattr(m, "Base"), an unresolved base
                 for k in facts.classes:
+                    if None in k.bases:
+                        raise Unknown(k.name)  # a base we cannot name, in a file naming the class
                     if current in k.bases and k.name not in out:
                         out.add(k.name)
                         todo.append(k.name)
+            if len(out) > MAX_FAMILY:
+                raise Unknown(name)
         return out
 
-    def binds(self, names: set[str], attr: str) -> bool:
-        """Some class of these names, anywhere, binds ``attr`` in its body."""
-        for name in names:
-            for path in self.mentions(name):
-                facts = self.facts(path)
-                if facts is None or any(k.name == name and attr in k.binds for k in facts.classes):
-                    return True
-        return False
+    def ancestors(self, name: str, *, strict: bool = True, depth: int = 0) -> set[str]:
+        """Every class ``name`` inherits from, by name. A base not defined in the checkout raises
+        :class:`Unknown` (``strict``) or is listed without its own bases."""
+        if depth > 32:
+            raise Unknown(name)
+        defs = self.classes(name)
+        if not defs:
+            if strict or depth == 0:
+                raise Unknown(name)
+            return set()
+        out: set[str] = set()
+        for k in defs:
+            for b in k.bases:
+                if b not in BUILTIN_BASES:
+                    out |= {b} | self.ancestors(b, strict=strict, depth=depth + 1)
+        return out
 
-    def stores(self, attr: str) -> int:
-        """Writes of ``.attr`` (``x.attr = v``, ``x.attr += v``, ``setattr(x, "attr", v)``) outside test files."""
-        if not self.usable:
-            return 1 << 30
-        if attr not in self._stores:
-            a = re.escape(attr)
-            pattern = re.compile(rf"\.\s*{a}\s*(?:[-+*/|&@%^]|//|<<|>>|\*\*)?=(?!=)|setattr\([^,]+,\s*['\"]{a}['\"]|\bdel\b[^\n]*\.\s*{a}\b")
-            self._stores[attr] = sum(
-                len(pattern.findall(t)) for p in self.files if not self.test_file(p) and (t := self._text(p)) is not None
-            )
-        return self._stores[attr]
+    def ahead(self, owner: str, names: set[str], *, all_of_mro: bool = False) -> None:
+        """Every class that can come before ``owner`` in the MRO of ``owner`` or of a subclass anywhere (any
+        ancestor of a subclass that is not ``owner`` or behind it: a superset of the real MRO prefix) is defined
+        in the checkout, has no metaclass, no decorator but :data:`pyself.KEEP`, and binds none of ``names``.
+        With ``all_of_mro`` the same holds for ``owner`` and every class behind it. Raises :class:`Unknown`."""
+        from .pyself import KEEP  # pyself builds on this module
 
-    def injected_stripe(self, names: set[str], position: int, keyword: str) -> bool:
-        """Every construction of these classes outside tests passes the stripe module as argument ``position``
-        (or keyword ``keyword``), there is at least one, and no class of them is used as a value there."""
+        family = self.family(owner)
+        behind = self.ancestors(owner, strict=all_of_mro) | {owner}
+        group = {owner} | (behind if all_of_mro else set())
+        for sub in family - {owner}:
+            group |= ({sub} | self.ancestors(sub, strict=False)) - behind
+        for cls in group:
+            defs = self.classes(cls)
+            if not defs:
+                raise Unknown(cls)  # ahead of the owner and not in the checkout: it may bind anything
+            for k in defs:
+                if k.metaclass or any(d not in KEEP for d in k.decorators):
+                    raise Unknown(cls)
+                if (cls != owner or all_of_mro) and k.binds & names:
+                    raise Unknown(cls)
+
+    def writes(self, attr: str) -> int:
+        """Writes of ``.attr`` outside test files (a file that may write anything counts as unknown)."""
+        total = 0
+        for n in self.mentions(attr):
+            if self.test_file(n):
+                continue
+            facts = self.facts(n)
+            if facts.any_write and attr in facts.strings:
+                raise Unknown(attr)  # setattr(obj, name, v) in a file that spells the name as a string
+            total += facts.writes.get(attr, 0)
+        return total
+
+    def injected_stripe(self, owner: str, position: int, keyword: str) -> int:
+        """How many constructions build ``owner`` or a subclass outside tests, each passing the stripe module as
+        argument ``position`` (or keyword ``keyword``); :class:`Unknown` when one passes anything else, a class
+        of the family is used as a value, or one is built out of sight."""
+        family = self.family(owner)
+        lineage = set(family)
+        for sub in family:
+            lineage |= self.ancestors(sub)  # an inherited factory's cls(...) builds the subclass it is called on
         seen = 0
-        for name in names:
-            for path in self.mentions(name):
-                facts = self.facts(path)
-                if facts is None:
-                    return False
-                if self.test_file(path):
+        for name in lineage:
+            for n in self.mentions(name):
+                if self.test_file(n):
                     continue
-                if name in facts.escapes:
-                    return False
-                for callee, args, kwargs in facts.calls:
-                    if callee != name:
-                        continue
+                facts = self.facts(n)
+                if family & (facts.escapes | facts.dynamic | facts.strings):
+                    raise Unknown(name)
+                built = [c for c in facts.calls if c[0] in family] + [c for c in facts.cls_calls if c[0] in lineage]
+                for _, args, kwargs in built:
                     value = args[position] if position < len(args) else kwargs.get(keyword, False)
-                    if value is not True or (None in args[: position + 1]) or None in kwargs:
-                        return False  # another value, a *args / **kwargs spread, or not passed
+                    if value is not True or None in args[: position + 1] or None in kwargs:
+                        raise Unknown(name)
                     seen += 1
-        return seen > 0
+        return seen
 
 
 def collect(tree: ast.Module) -> Facts:
     from .pyalias import Binders  # pyalias builds on pyparse, which reads this module's answers
 
-    binders = Binders(tree)
-    facts = Facts()
-    parents: dict[ast.AST, ast.AST] = {}
-    annotations: set[int] = set()  # nodes inside a type annotation: naming a class there builds nothing
+    binders, facts, parents = Binders(tree), Facts(), {}
+    annotations: set[int] = set()
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
             parents[child] = node
         for ann in (getattr(node, "annotation", None), getattr(node, "returns", None)):
             if isinstance(ann, ast.AST):
                 annotations |= {id(n) for n in ast.walk(ann)}
+    resolve = lambda node: _resolve(node, binders)  # noqa: E731
     for node in ast.walk(tree):
         if id(node) in annotations:
             continue
         if isinstance(node, ast.ClassDef):
-            bases = [b.attr if isinstance(b, ast.Attribute) else getattr(b, "id", "") for b in node.bases]
-            facts.classes.append(Klass(node.name, bases, set(binders.by_scope.get(node, {}))))
+            bases = [_base(b, binders) for b in node.bases]
+            for b, name in zip(node.bases, bases):
+                if name is None:
+                    facts.dynamic |= _names(b, binders)
+            decorators = [_dotted(d) for d in node.decorator_list]
+            facts.classes.append(Klass(node.name, bases, set(binders.by_scope.get(node, {})), decorators, bool(node.keywords)))
         elif isinstance(node, ast.Call):
-            name = _callee(node.func, parents, binders)
-            if name is not None:
-                args = [None if isinstance(a, ast.Starred) else _is_stripe(a, binders) for a in node.args]
-                kwargs = {kw.arg: _is_stripe(kw.value, binders) for kw in node.keywords if kw.arg}
-                if any(kw.arg is None for kw in node.keywords):
-                    kwargs[None] = None
-                facts.calls.append((name, args, kwargs))
-        elif isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load):
-            name = node.id if isinstance(node, ast.Name) else node.attr
-            parent = parents.get(node)
-            if isinstance(parent, ast.Call) and parent.func is node:
-                continue  # a construction (or ``cls(...)``), read above
-            if isinstance(parent, ast.Attribute) and parent.value is node:
-                if parent.attr in ("__init__", "__new__", "__call__"):
-                    facts.escapes.add(name)
-                continue  # Cls.create_service
-            if isinstance(parent, ast.ClassDef) and node in parent.bases:
-                continue
-            if isinstance(parent, ast.Call) and getattr(parent.func, "id", None) in ("isinstance", "issubclass"):
-                continue
-            if name == "cls" and isinstance(node, ast.Name):
-                owner = _classmethod_owner(node, parents)
-                if owner is not None:
-                    facts.escapes.add(owner)
-                continue
-            facts.escapes.add(name)
-        if isinstance(node, ast.Attribute) and node.attr == "__class__" or (
-            isinstance(node, ast.Call) and isinstance(node.func, ast.Call) and getattr(node.func.func, "id", None) == "type"
-        ):
-            owner = _class_of(node, parents)
-            if owner is not None:
-                facts.escapes.add(owner)  # type(self)(...) / self.__class__(...): built out of sight
+            _call(node, parents, binders, facts)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and len(node.value) < 300 and not _in_all(node, parents):
+            facts.strings.add(node.value.rpartition(".")[2].rpartition(":")[2])  # getattr(m, "Cls"), "app.svc.Cls"
+        if isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load):
+            name = resolve(node)
+            if name is not None and not _allowed(node, parents):
+                facts.escapes.add(name)
+        if isinstance(node, ast.Attribute) and not isinstance(node.ctx, ast.Load):
+            facts.writes[node.attr] = facts.writes.get(node.attr, 0) + 1
+            if node.attr == "__dict__":
+                facts.any_write = True
+        if isinstance(node, ast.Subscript) and not isinstance(node.ctx, ast.Load) and _dict_of(node.value):
+            facts.any_write = True  # obj.__dict__["k"] = v, vars(obj)["k"] = v
     return facts
 
 
-def _callee(func: ast.expr, parents, binders) -> str | None:
+def _call(node: ast.Call, parents, binders, facts: Facts) -> None:
+    func = node.func
+    callee = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else None)
+    if callee in SETATTRS:
+        # setattr(obj, "a", v), object.__setattr__(obj, "a", v): the name second; obj.__setattr__("a", v): first
+        unbound = isinstance(func, ast.Name) or (isinstance(func.value, ast.Name) and func.value.id in ("object", "type"))
+        args = node.args[1:] if unbound else node.args
+        name = args[0] if args else None
+        if isinstance(name, ast.Constant) and isinstance(name.value, str):
+            facts.writes[name.value] = facts.writes.get(name.value, 0) + 1
+        else:
+            facts.any_write = True
+        return
+    if isinstance(func, ast.Attribute) and func.attr == "update" and _dict_of(func.value):
+        facts.any_write = True  # obj.__dict__.update(...)
+    if callee in DYNAMIC:
+        for arg in [*node.args, *(kw.value for kw in node.keywords)]:
+            facts.dynamic |= _names(arg, binders)
+    args = [None if isinstance(a, ast.Starred) else _is_stripe(a, binders) for a in node.args]
+    kwargs: dict[str | None, bool | None] = {kw.arg: _is_stripe(kw.value, binders) for kw in node.keywords}
     if isinstance(func, ast.Name):
-        return _classmethod_owner(func, parents) if func.id == "cls" else func.id
-    if isinstance(func, ast.Attribute):
-        return func.attr
+        owner = _cls_owner(func, parents, binders)
+        if owner is not None:
+            facts.cls_calls.append((owner, args, kwargs))
+            return
+    name = _resolve(func, binders)
+    if name is not None:
+        facts.calls.append((name, args, kwargs))
+    elif isinstance(func, (ast.Call, ast.Subscript)):
+        facts.strings |= _names(func, binders)  # getattr(m, "Cls")(...), m.__dict__["Cls"](...): built out of sight
+    owner = _class_of(node, parents)
+    if owner is not None and _builds_own_type(func):
+        facts.escapes.add(owner)  # type(self)(...), self.__class__(...): built out of sight
+
+
+def _builds_own_type(func: ast.expr) -> bool:
+    if isinstance(func, ast.Call) and isinstance(func.func, ast.Name) and func.func.id == "type":
+        return True
+    return isinstance(func, ast.Attribute) and func.attr == "__class__"
+
+
+def _in_all(node: ast.AST, parents) -> bool:
+    """A string in ``__all__ = [...]``: an export list, not a lookup."""
+    parent = parents.get(node)
+    while isinstance(parent, (ast.List, ast.Tuple)):
+        parent = parents.get(parent)
+    return isinstance(parent, (ast.Assign, ast.AugAssign)) and any(
+        isinstance(t, ast.Name) and t.id == "__all__" for t in (parent.targets if isinstance(parent, ast.Assign) else [parent.target])
+    )
+
+
+def _dict_of(node: ast.expr) -> bool:
+    if isinstance(node, ast.Attribute) and node.attr == "__dict__":
+        return True
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "vars"
+
+
+def _allowed(node: ast.expr, parents) -> bool:
+    """A use of a class name that builds nothing out of sight."""
+    parent = parents.get(node)
+    if isinstance(parent, ast.Call) and parent.func is node:
+        return True  # a construction, read in _call
+    if isinstance(parent, ast.Attribute) and parent.value is node:
+        return parent.attr not in ("__init__", "__new__", "__call__", "__class__", "__subclasses__")
+    if isinstance(parent, ast.ClassDef) and node in parent.bases:
+        return True
+    if isinstance(parent, ast.Call) and getattr(parent.func, "id", None) in ("isinstance", "issubclass", "super"):
+        return True
+    if isinstance(parent, ast.Tuple) and isinstance(parents.get(parent), ast.Call):
+        call = parents.get(parent)
+        return getattr(call.func, "id", None) in ("isinstance", "issubclass")
+    if isinstance(parent, ast.ExceptHandler) or (isinstance(parent, ast.Tuple) and isinstance(parents.get(parent), ast.ExceptHandler)):
+        return True
+    return False
+
+
+def _resolve(node: ast.expr, binders, depth: int = 0) -> str | None:
+    """The class name a name or dotted name stands for (through ``import ... as``, ``from x import C as D`` and
+    ``D = C``); the last part of a dotted name; None for a name bound otherwise (a parameter, a loop target)."""
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if not isinstance(node, ast.Name) or depth > 4:
+        return None
+    found = binders.binding(node)
+    if found is None:
+        return None if node.id in binders.declared else node.id  # unbound here: a builtin, a star import
+    kind, bound = found
+    if kind == "class":
+        return node.id
+    if kind == "import":
+        for a in bound.names:
+            if (a.asname or a.name).split(".")[0] == node.id:
+                return a.name.rpartition(".")[2] if isinstance(bound, ast.ImportFrom) else None
+        return None
+    if kind == "assign" and isinstance(bound.value, (ast.Name, ast.Attribute)):
+        return _resolve(bound.value, binders, depth + 1)
     return None
+
+
+def _base(node: ast.expr, binders) -> str | None:
+    if isinstance(node, ast.Subscript):  # Base[int], Generic[T]
+        node = node.value
+    if isinstance(node, (ast.Name, ast.Attribute)):
+        return _resolve(node, binders)
+    return None
+
+
+def _names(node: ast.AST, binders) -> set[str]:
+    out: set[str] = set()
+    for n in ast.walk(node):
+        if isinstance(n, (ast.Name, ast.Attribute)):
+            r = _resolve(n, binders)
+            out |= {r} if r else set()
+            out |= {n.id} if isinstance(n, ast.Name) else {n.attr}
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str):
+            out.add(n.value.rpartition(".")[2])
+    return out
+
+
+def _dotted(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Call):
+        node = node.func
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    return ".".join([node.id, *reversed(parts)]) if isinstance(node, ast.Name) else None
 
 
 def _is_stripe(value: ast.expr, binders) -> bool:
@@ -230,19 +432,21 @@ def _is_stripe(value: ast.expr, binders) -> bool:
     return any(a.name == "stripe" and (a.asname or a.name) == value.id for a in found[1].names)
 
 
-def _classmethod_owner(node: ast.AST, parents) -> str | None:
-    """The class whose classmethod ``cls`` is (the first parameter of an ``@classmethod`` in a class body)."""
-    current = parents.get(node)
-    while current is not None and not isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        current = parents.get(current)
-    if current is None:
+def _cls_owner(func: ast.Name, parents, binders) -> str | None:
+    """The class whose ``cls`` this is: the first parameter of a function defined in a class body that is a
+    ``@classmethod`` (with any other decorators) or names its first parameter ``cls``."""
+    found = binders.binding(func)
+    if found is None or found[0] != "param":
         return None
-    klass = parents.get(current)
-    decorated = [getattr(d, "id", None) for d in current.decorator_list] == ["classmethod"]
-    first = current.args.args[0].arg if current.args.args else None
-    if isinstance(klass, ast.ClassDef) and decorated and first == "cls":
-        return klass.name
-    return None
+    fn = parents.get(parents.get(found[1]))
+    klass = parents.get(fn)
+    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) or not isinstance(klass, ast.ClassDef):
+        return None
+    first = [*fn.args.posonlyargs, *fn.args.args][:1]
+    if not first or first[0] is not found[1]:
+        return None
+    classmethod_ = any(_dotted(d) in ("classmethod", "builtins.classmethod") for d in fn.decorator_list)
+    return klass.name if classmethod_ or func.id == "cls" else None
 
 
 def _class_of(node: ast.AST, parents) -> str | None:

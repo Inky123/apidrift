@@ -9,7 +9,7 @@ from apidrift.openapi import load_spec
 from apidrift.scanner import scan_repo
 from apidrift.sdkmap import SdkIndex
 from specs import sdk_doc
-from test_fixer import plan_for
+from test_fixer import changed_lines, only_fix, plan_for
 
 SERVICE = (
     "import stripe\n"
@@ -117,10 +117,21 @@ def test_an_options_property_that_is_not_proven_stays_hidden(tmp_path, index, te
     assert got[("method.py", line)][2] is False
 
 
-def test_the_fixer_does_not_edit_through_self(tmp_path):
+def test_the_fixer_reads_through_self_with_the_same_checkout(tmp_path):
     plan = plan_for(tmp_path, {
         "svc.py": SERVICE.replace("self.api.Charge.create(amount=1, currency='usd')",
                                   "self.api.PaymentIntent.create(amount=1, payment_method_types=['card'])"),
     })
-    # found with the checkout, but the fixer reads one file: it refuses rather than edit what it cannot see
-    assert plan.fixes == [] and [u.line for u in plan.unfixable] == [7]
+    # the scan's checkout reaches the Locator and the oracle: the same call, edited exactly as a direct one
+    assert changed_lines(only_fix(plan)) == {7: (
+        "        return self.api.PaymentIntent.create(amount=1, payment_method_types=['card'])",
+        "        return self.api.PaymentIntent.create(amount=1, allowed_payment_method_types=['card'])",
+    )}
+
+
+def test_the_fixer_does_not_edit_through_self_when_one_file_is_fixed_alone(tmp_path):
+    text = SERVICE.replace("self.api.Charge.create(amount=1, currency='usd')",
+                           "self.api.PaymentIntent.create(amount=1, payment_method_types=['card'])")
+    (tmp_path / "svc.py").write_text(text)
+    plan = plan_for(tmp_path / "svc.py")  # a single-file scan: no checkout, so no call through self
+    assert plan.fixes == [] and plan.unfixable == []
