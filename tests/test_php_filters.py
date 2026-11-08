@@ -22,11 +22,15 @@ def test_registered_hooks_are_the_literal_names_add_filter_names():
     texts = {"a.php": "add_filter( 'one', 'f' ); add_filter(\"two\", [$this, 'g'], 10, 2);", "b.php": "apply_filters('three', $x);"}
     assert phpfilters.registered(texts) == {"one", "two"}
     assert phpfilters.registered({"c.php": "add_filter($name, 'f');"}) == {phpfilters.ANY}
+    assert phpfilters.registered({"d.php": "add_filter('links_' . $x, 'f'); add_filter(\"{$p}_x\", 'g');"}) == {
+        "links_*", phpfilters.ANY,
+    }
 
 
 @pytest.mark.parametrize("hook,hooks,ok", [
     ("h", set(), True), ("h", {"other"}, True), ("h", {"h"}, False), ("h", {phpfilters.ANY}, False),
     (None, set(), False), ("h", None, False),
+    ("links_pay", {"links_*"}, False), ("pay_args", {"links_*"}, True),  # a concatenated name: that prefix only
 ])
 def test_pass_through(hook, hooks, ok):
     assert phpfilters.pass_through(hook, hooks) is ok
