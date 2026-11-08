@@ -108,6 +108,7 @@ class SdkIndex:
         self._aliases: dict[str, set[tuple[str, str]]] = {}
         self._owners: dict[tuple[str, ...], tuple[str, str]] = {}
         self._patterns: list[tuple[str, int, re.Pattern[str]]] = []
+        self._matched: dict[str, tuple[list, str | None]] = {}  # URL path -> (the patterns it was matched against, its template)
         self.operations: set[tuple[str, str]] = set()
         self.go = None  # gomap.GoIndex: stripe-go call aliases and request fields (set by build)
 
@@ -146,12 +147,14 @@ class SdkIndex:
 
     def match_path(self, url_path: str) -> str | None:
         """Spec path template for a concrete URL path such as ``/v1/customers/cus_123``."""
+        cached = self._matched.get(url_path)  # the same URL is asked for once per occurrence: answered once
+        if cached is not None and cached[0] is self._patterns:  # the table is set once, whole, by build()
+            return cached[1]
         segments = [WILD if re.search(r"[${}:%#+\"']", s) else s for s in url_path.strip("/").split("/")]
         candidate = "/" + "/".join(segments)
-        for path, _, pattern in self._patterns:
-            if pattern.match(candidate):
-                return path
-        return None
+        found = next((path for path, _, pattern in self._patterns if pattern.match(candidate)), None)
+        self._matched[url_path] = (self._patterns, found)
+        return found
 
     def methods_for(self, path: str) -> list[str]:
         return sorted(m for m, p in self.operations if p == path)
