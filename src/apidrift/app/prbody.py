@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import re
 
-from .. import migrations
+from .. import fixsdk, migrations
+from . import fixcheck, prpins
 from .issue import FIELD_PATH_RE, METHOD_RE, VERSION_RE, code, escape, permalink, unread_note
 
 PR_MARKER_RE = re.compile(r"<!-- apidrift:pr=([0-9a-f]{64}) -->")
@@ -182,11 +183,8 @@ def render_pr(
     placed = {(f, ln, k[0]) for k, places in groups.items() for f, ln in places}
     possibly = _possibly_remaining(payload, placed)
     deletes_only = bool(groups) and all(action == "delete" for _, _, action, _ in groups)
-    if deletes_only:  # a field Stripe never acted on can be dropped on any API version
-        lede = "Removing these fields is safe on your current API version too, so this can merge any time."
-    else:
-        lede = ("Merge this together with your API-version and SDK upgrade; on your current pinned version Stripe "
-                "rejects the new shape.")
+    introduced = _introduced(groups, version)
+    lede = prpins.lede({action for _, _, action, _ in groups}, safe_version(introduced))
     lines = [f"Ready for Stripe {safe_version(version)}. {lede}"]
     if not deletes_only and any(str(fix.get("file")).endswith(".go") for fix in fixes):
         lines += ["", GO_NOTE]
@@ -207,7 +205,8 @@ def render_pr(
             lines.append(f"- {_where(full_name, sha, file, line)}" + (f" via {code(call)}" if call else ""))
         if len(places) > MAX_PR_LINKS:
             lines.append(f"- and {len(places) - MAX_PR_LINKS} more.")
-    lines += _pins(payload, full_name, sha, deletes_only)
+    lines += _pins(payload, {action for _, _, action, _ in groups}, introduced, full_name, sha)
+    lines += _sdks(payload, fixes, full_name, sha)
     uncertain = len({place for _, places in possibly for place in places})
     verified = len(placed) - uncertain
     count = f"{verified} call site now sends" if verified == 1 else f"{verified} call sites now send"
@@ -223,22 +222,57 @@ def render_pr(
     return pr_title(version, keys, len(placed)), "\n".join(lines) + "\n"
 
 
-def _pins(payload: dict, full_name: str, sha: str, deletes_only: bool) -> list[str]:
-    pins = [p for p in payload.get("pins") or [] if isinstance(p, dict) and p.get("file")]
-    if deletes_only:  # no merge-together claim: the change is accepted on every version
-        lines = ["", "**API-version pins found**"]
-        if pins:
-            lines.append("These files pin an API version; this pull request does not depend on it:")
-    else:
-        lines = ["", "**Merge together with your upgrade**"]
-        if pins:
-            lines.append("These files pin an API version that predates this change; bump them and the Stripe SDK when you merge it:")
-    for pin in pins[:MAX_PR_LINKS]:
-        lines.append(f"- {_where(full_name, sha, str(pin['file']), pin.get('line'))} pins {code(str(pin.get('version') or ''))}")
-    if len(pins) > MAX_PR_LINKS:
-        lines.append(f"- and {len(pins) - MAX_PR_LINKS} more.")
-    if not pins:
-        lines.append("No API-version pin was found in the scanned files.")
+def _introduced(groups: dict[tuple[str, str, str, str], list[tuple[str, int]]], version: str) -> str:
+    """The earliest release (from the parent's table) that changed a non-delete field here; else ``version``."""
+    found = [m.introduced for (path, old, action, new) in groups if action != "delete"
+             and (m := _migration(path, old, action, new)) is not None]
+    return min(found) if found else version
+
+
+def _pins(payload: dict, actions: set[str], introduced: str, full_name: str, sha: str) -> list[str]:
+    """Pins checked by :func:`fixcheck.pin_list`, compared with ``introduced`` (:mod:`prpins`)."""
+    where = lambda file, line: _where(full_name, sha, file, line)  # noqa: E731
+    return prpins.section(fixcheck.pin_list(payload.get("pins")), actions, introduced, safe_version(introduced), where)
+
+
+TYPED_NODE = (".ts", ".tsx", ".mts", ".cts")
+
+
+def _sdks(payload: dict, fixes: list[dict], full_name: str, sha: str) -> list[str]:
+    """One sentence per locked SDK version (validated by :func:`fixcheck.sdk_locks`), measured against the
+    parent's own table of first releases for the API version the fixed sites need. Nothing for deletions."""
+    locks = fixcheck.sdk_locks(payload.get("sdks"), fixes)
+    needed = {
+        m.introduced for fix in fixes for s in fix.get("sites") or []
+        if s.get("action") != "delete" and (m := migrations.for_site(str(s.get("path")), str(s.get("target")))) is not None
+    }
+    if not locks or not needed:
+        return []
+    api = max(needed)
+    typed = any(str(fix.get("file")).lower().endswith(TYPED_NODE) for fix in fixes)
+    lines = ["", "**Stripe SDK version**"]
+    for lock in locks:
+        sdk, version = lock["sdk"], lock["version"]
+        where = _where(full_name, sha, lock["file"], lock["line"])
+        first = fixsdk.FIRST_RELEASE.get(api, {}).get(sdk)
+        older = fixsdk.older(sdk, version, api)
+        if older and first:
+            note = f"[{sdk} {first}]({fixsdk.CHANGELOGS[sdk]}#{first.replace('.', '-')})"
+            line = (f"- {where} locks {code(sdk)} {code(version)}, which is older than {note}, its first release for "
+                    f"Stripe {safe_version(api)}. Upgrade it in this change, or make sure every request it sends uses "
+                    f"API version {safe_version(api)} or later.")
+            if sdk == "stripe-go":
+                major = first.split(".")[0]
+                line += (f" stripe-go v{major} is imported as {code(f'{fixsdk.GO_MODULE}/v{major}')}, so go.mod and "
+                         "the import paths change with it; apidrift does not change import paths.")
+            if sdk == "stripe-node" and typed:
+                line += " Its TypeScript types may not have the new field names or shapes, so the type check can fail until then."
+        elif older is None:
+            line = (f"- {where} locks {code(sdk)} {code(version)}; it must be a release built for Stripe API version "
+                    f"{safe_version(api)} or later" + (f" ({sdk} {first} or later)." if first else "."))
+        else:
+            line = f"- {where} locks {code(sdk)} {code(version)}, a release built for Stripe {safe_version(api)} or later."
+        lines.append(line)
     return lines
 
 

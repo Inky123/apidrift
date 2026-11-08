@@ -58,7 +58,7 @@ def test_a_real_mixed_plan_renders_every_action(tmp_path):
         "**`subscription_details.billing_cycle_anchor` becomes an object with `type` on POST `/v1/invoices/create_preview`**",
     ):
         assert heading in body, heading
-    assert "rejects the new shape." in body and "**Merge together with your upgrade**" in body
+    assert "The fields that become an object are rejected on your current pinned version." in body and "**Merge together with your upgrade**" in body
     assert "`{type: 'timestamp', timestamp: …}`" in body
     possibly = [p for p in plan["possibly_remaining"] if any(f["file"] == p["file"] for f in accepted)]
     assert possibly  # delete.js sends payto at a call whose arguments are not fully visible

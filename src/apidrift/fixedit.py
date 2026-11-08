@@ -15,7 +15,7 @@ import re
 import tokenize
 from dataclasses import dataclass, field
 
-from . import fixhelpers, fixvalue, jsparse, jsspread, pyparse, scanner
+from . import fixhelpers, fixscope, fixvalue, jsparse, jsspread, pyparse, scanner
 from .fixtokens import _Offsets
 from .fixvalue import Edit, Entry
 from .jsparse import IDENT, QUOTES, RUBY_KEYWORD, Fields, Source
@@ -144,8 +144,9 @@ class Locator:
             if p.kind == "shorthand" or vs >= src.n or src.text[vs] != "{":
                 out.incomplete = True  # the nested object is a variable or an expression
         spans = fields.spans.get(m.target, [])
-        if spans and m.action != "rename" and fixvalue.js_unsafe(src, start - 1 if literal else start, src.skip_scalar(start, "")):
-            out.add(fixvalue.UNSUPPORTED)  # a regex, generic or heredoc in this literal: the spans may be misread
+        lo, hi, name = start - 1 if literal else start, src.skip_scalar(start, ""), fixvalue.leaf(m.target)
+        if m.action != "rename" and any(fixscope.unsafe_entry(src, lo, s.key_start, s.entry_end, hi, name) for s in spans):
+            out.add(fixvalue.UNSUPPORTED)  # a regex, generic or heredoc the cursor may misread decides this edit
             return
         for span in spans:
             cont_start, cont_literal = start, literal

@@ -12,8 +12,8 @@ reason it cannot be edited:
 - ``wrap_type``: the value becomes ``{ type: V }`` (``{'type': V}`` in Python) under the table's rules.
 
 Values are rewritten from an ALLOW-LIST: a value outside the small grammar below is ``unsupported_value``,
-never a guess. Text near a ``/``, ``<`` or Ruby ``%r`` is not edited at all (:func:`js_unsafe`): the
-cursor in :mod:`jsparse` cannot tell a regex or a generic from an operator.
+never a guess. An entry whose reading depends on a ``/``, ``<`` or Ruby percent literal is not edited at all
+(:mod:`fixscope`): the cursor in :mod:`jsparse` cannot tell a regex or a generic from an operator.
 Replacement text is built from the ORIGINAL source of the value, never from a parsed form.
 """
 
@@ -199,25 +199,6 @@ def js_container(src: Source, i: int, *, literal: bool) -> Container:
             j -= 1
         lead = j if j >= 0 and text[j] == "," else None
     return Container(tuple(slots), literal, lead)
-
-
-def js_unsafe(src: Source, lo: int, hi: int) -> bool:
-    """A ``/`` (regex or division), ``<`` (TS generics, comparisons, heredocs) or Ruby ``%r`` outside strings and
-    comments: text this module's scanner may misread, so an edit near it is not attempted."""
-    i = lo
-    while i < hi:
-        j = src.skip_space(i)
-        if j > i:
-            i = j
-            continue
-        c = src.text[i]
-        if c in QUOTES:
-            i = src.skip_string(i)
-        elif c in "/<" or (src.ruby and src.text.startswith("%r", i)):
-            return True
-        else:
-            i += 1
-    return False
 
 
 def js_rewrite(m: Migration, text: str, src: Source, start: int, end: int, *, ruby: bool, quote: str, bad_name):

@@ -125,7 +125,7 @@ def test_each_action_has_its_own_heading_and_the_tables_note():
         assert prbody._note(_note(base)) in body
     assert f"[Changelog]({migrations.PAYTO_DOC})" in body and f"[Changelog]({migrations.ANCHOR_DOC})" in body
     assert "child note" not in body and "https://evil" not in body  # the child's migrations list is ignored
-    assert "Stripe rejects the new shape." in body
+    assert "so an older pinned version may not accept the new names; check it, or upgrade. The fields that become an object are rejected on your current pinned version." in body
     assert f"5 call sites now send what Stripe {ENDIVE} expects; every other Stripe call is unchanged." in body
 
 
@@ -199,7 +199,7 @@ def test_a_deletes_only_pull_does_not_claim_it_must_wait_for_the_upgrade():
     assert "Merge together" not in body and "rejects the new shape" not in body and "predates" not in body
     _, mixed = render([fix(site(PAYTO), site(ANCHOR, 4))], pins=pins)
     assert "rejects the new shape." in mixed and "**Merge together with your upgrade**" in mixed
-    assert "These files pin an API version that predates this change;" in mixed and "can merge any time" not in mixed
+    assert f"These files pin an API version older than {ENDIVE}, which rejects the new shape;" in mixed and "can merge any time" not in mixed
 
 
 def test_one_note_per_migration_and_its_endpoints_sit_together():
@@ -223,7 +223,7 @@ def test_object_literals_in_a_note_are_code_spans():
 
 def test_pin_note_is_action_neutral():
     _, body = render([fix(site(ANCHOR))], pins=[{"file": "a.py", "line": 1, "version": "2024-06-20"}])
-    assert "These files pin an API version that predates this change;" in body and "rename" not in body
+    assert f"These files pin an API version older than {ENDIVE}, which rejects the new shape;" in body and "rename" not in body
 
 
 def test_every_table_entry_is_reachable_by_its_site():
