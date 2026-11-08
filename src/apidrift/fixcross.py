@@ -5,8 +5,9 @@ or the literal of the one local it passes. The caller is found again with the sc
 code that made it a call site), never by searching for the key. Refusals, in the words of
 :mod:`fixhelpers`:
 
-- ``helper_shared``: the local the caller passes is also used elsewhere (passed on, read, or bound twice),
-  so one edit could change another request too;
+- ``helper_shared``: the local the caller passes is also used elsewhere (passed on, read, or bound twice,
+  or the function reads variables by computed name: ``$$n``, ``compact``, ``eval``, an include), so one
+  edit could change another request too;
 - ``not_found``: the table is gone (an oracle run without the scan) or two callers share the line.
 
 The wrapper itself is never edited: its parameter goes only to the one SDK call (the reader's own rule),
@@ -65,11 +66,11 @@ def php_sites(loc, usage, m):
 def _escapes(bindings, name: str, at: int, head: str) -> bool:
     """The literal the caller passes can also be seen by some other use of ``name``: an opaque use, or a
     use the same binding reaches, unless that use only reads another key (``$p['description']``)."""
-    from .phpscope import INPLACE, OPAQUE, READS_ALL, USED
+    from .phpscope import INPLACE, OPAQUE, READS_ALL, UNBOUNDED, USED
 
     lo, hi = bindings.scopes.extent(at)
-    if READS_ALL.search(bindings.src.code, lo, hi):
-        return True
+    if READS_ALL.search(bindings.src.code, lo, hi) or UNBOUNDED.search(bindings.src.code, lo, hi):
+        return True  # ``compact``, ``$$n``, ``${...}``, ``eval``, an include: anywhere in the function
     ours = {b.pos for b in bindings.reaching(name, at)}
     for u in bindings._in_scope(name, at):
         if u.pos == at or u.kind not in (USED, INPLACE, OPAQUE):

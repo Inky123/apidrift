@@ -245,7 +245,11 @@ def unread_sentence(unread: dict[str, int], vendor: str = "Stripe") -> str:
     return f"apidrift does not read {names} call sites yet: {listed} mention {vendor} and were not checked."
 
 
-def _iter_files(root: Path) -> tuple[list[Path], int, int]:
+def _iter_files(root: Path, suffixes: set[str] | None = None) -> tuple[list[Path], int, int]:
+    """The files a scan reads (``suffixes``: of these extensions instead of every text file), with the
+    counts of files and directories left out. Every walk over a checkout goes through here, so the same
+    files are read on every machine whatever is installed (dependency and build directories are skipped)."""
+    suffixes = TEXT_EXT if suffixes is None else suffixes
     files: list[Path] = []
     skipped_files = skipped_dirs = 0
     for dirpath, dirs, names in os.walk(root):
@@ -261,7 +265,7 @@ def _iter_files(root: Path) -> tuple[list[Path], int, int]:
         dirs[:] = keep
         for name in sorted(names):
             path = here / name
-            if name in SKIP_NAMES or name.endswith((".min.js", ".map")) or path.suffix.lower() not in TEXT_EXT:
+            if name in SKIP_NAMES or name.endswith((".min.js", ".map")) or path.suffix.lower() not in suffixes:
                 continue
             if path.is_symlink():
                 continue

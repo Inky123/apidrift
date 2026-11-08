@@ -4,19 +4,23 @@ A candidate is a wrapper :mod:`phphelpers` already accepts in its own file (its 
 into the SDK call's parameters and is used nowhere else there), defined in a ``class`` (not a trait,
 interface or enum) or as a plain function. It is followed when:
 
-- no other ``function NAME(`` exists anywhere in the checkout, tests and vendored directories included
-  (PHP method names are case-insensitive, so the count is too), the name is not too common, and the
-  repository is not a Composer library (whose methods have callers outside it);
+- no other ``function NAME(`` exists in any PHP file the scan would read (tests included, dependency and
+  build directories left out, the same on every machine; ``.inc``, ``.module`` and the other PHP
+  extensions count too; PHP method names are case-insensitive, so the count is too), the name is not too
+  common, and the wrapper is not in a package others install (:func:`crosstable.php_package`: a Composer
+  library, nested or not, or a WordPress plugin), whose methods have callers outside the repository;
 
 and a use of the name elsewhere is a *visible caller* only when its receiver provably holds an instance
 of the wrapper's class, resolved through ``namespace`` and ``use``:
 
 - ``$this->NAME(`` / ``self::`` / ``static::`` in that class or a class that ``extends`` it, ``parent::``
-  in a direct subclass, or ``Owner::NAME(`` (the class by name);
+  in a direct subclass, or ``Owner::NAME(`` (the class by name); ``$this`` only in the method's own body
+  (a closure's ``$this`` can be rebound);
 - ``$v->NAME(`` where ``$v`` is a parameter of the enclosing method typed as the class and never rebound;
-- ``$this->P->NAME(`` where ``P`` is a typed property (or promoted constructor parameter) of the class, or
-  an untyped declared property that the class only ever assigns from such a typed parameter, that no
-  other code assigns through another object or a trait, in a class nothing extends;
+- ``$this->P->NAME(`` where ``P`` is declared once in the caller's class, as a typed property (or promoted
+  constructor parameter) of the wrapper's class: PHP checks that type on every write, however it is made.
+  An untyped property is never followed: ``$o->{'p'} = ``, ``[$o->p] = ``, ``Closure::bind``, ``__set``,
+  ``extract`` or reflection can set it from anywhere;
 - for a plain function, ``NAME(`` in the same namespace or imported with ``use function``;
 
 and the argument at the forwarded position is an array literal, or a local bound only to one with no
@@ -40,16 +44,13 @@ from .phplex import COMMENT
 from .phpscope import BRACE_OR_END, HEADER_REACH
 
 LANG = "php"
-SUFFIXES = {".php"}
+SUFFIXES = {".php", ".inc", ".module", ".install", ".theme", ".profile", ".engine", ".phtml"}  # may define the name
 CLASS_KW = re.compile(r"(?<![\w$>:\\])(class|trait|interface|enum)\b", re.I)
 CLASS_HEAD = re.compile(
     r"\s+([A-Za-z_]\w*)(?:\s+extends\s+(\\?[A-Za-z_][\w\\]*))?(?:\s+implements\s+[\w\\,\s]+)?\s*$", re.I
 )
 NAMESPACE = re.compile(r"(?<![\w$>:\\])namespace\s+([A-Za-z_][\w\\]*)\s*[;{]", re.I)
 USE_FUNCTION = re.compile(r"(?<![\w$>:\\])use\s+function\s+\\?([A-Za-z_][\w\\]*)(?:\s+as\s+([A-Za-z_]\w*))?\s*;", re.I)
-EXTENDS = re.compile(r"\bextends\s+\\?([A-Za-z_][\w\\]*)", re.I)
-OUTSIDE = re.compile(r"(\$?[A-Za-z_]\w*|[)\]}])\s*(?:\?->|->)\s*([A-Za-z_]\w*)\s*(?:=(?![=>])|\?\?=)")
-TRAIT = re.compile(r"(?<![\w$>:\\])trait\s+[A-Za-z_]", re.I)
 TYPE = r"(\??\\?[A-Za-z_][\w\\]*)"
 TYPED_PARAM = re.compile(rf"\s*(?:(?:public|protected|private|readonly)\s+)*{TYPE}\s+\$([A-Za-z_]\w*)\s*(?:=[\s\S]*)?$", re.I)
 
@@ -61,15 +62,6 @@ class ClassInfo:
     name: str
     fqn: str  # lower case
     parent: str  # lower-case FQN of the class it extends ("" when none)
-
-
-@dataclass
-class Facts:
-    """What the walk over every PHP file learnt."""
-
-    extended: set[str]  # short names (lower case) that some class extends
-    outside: set[str]  # properties assigned through something other than ``$this``
-    trait_assigned: set[str]  # properties a trait assigns through ``$this``
 
 
 class Context:
@@ -143,18 +135,19 @@ def _comment(src, p: int) -> bool:
 
 
 def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
-    names = crosstable.single(table, LANG)
+    names = {}
+    for key, w in crosstable.single(table, LANG).items():
+        why = crosstable.php_package(base, w.file)
+        if why:
+            table.note(w, why)
+        else:
+            names[key] = w
     if not names:
         return
-    if crosstable.composer_library(base):
-        for w in names.values():
-            table.note(w, "a Composer library: callers outside the repository")
-        return
     pattern = "|".join(re.escape(w.name) for w in names.values())
-    definition = re.compile(rf"function\s*&?\s*({pattern})\s*\(", re.I)
+    definition = re.compile(rf"(?<![\w$])function\s*&?\s*({pattern})\s*\(", re.I)
     mention = re.compile(rf"(?<![\w$])(?:{pattern})(?!\w)", re.I)
     defs: Counter[str] = Counter()
-    facts = Facts(set(), set(), set())
     source = {p.resolve() for p in sources}
     mentioned: list[Path] = []
     for item in crosstable.walk(base, SUFFIXES):
@@ -164,10 +157,6 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
             return
         path, text = item
         defs.update(m.group(1).lower() for m in definition.finditer(text))
-        facts.extended |= {m.group(1).rsplit("\\", 1)[-1].lower() for m in EXTENDS.finditer(text)}
-        facts.outside |= {m.group(2) for m in OUTSIDE.finditer(text) if m.group(1) != "$this"}
-        if TRAIT.search(text):
-            facts.trait_assigned |= {m.group(2) for m in OUTSIDE.finditer(text) if m.group(1) == "$this"}
         rel = path.relative_to(base).as_posix()
         if path.resolve() in source and not scanner._doc_like(rel, path.suffix.lower()) and mention.search(text):
             mentioned.append(path)
@@ -176,7 +165,6 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
             table.note(w, f"{defs[key[1]]} definitions of the name in the checkout")
         else:
             table.followed[key] = w
-    table.facts[LANG] = facts
     followed = table.wrappers(LANG)
     if len(mentioned) > crosstable.MAX_PARSE_FILES:
         for w in followed:
@@ -191,7 +179,7 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
             continue
         ctx = parse(text, resolve)
         for w in followed:
-            for line, _, visible in uses(ctx, w, rel, facts):
+            for line, _, visible in uses(ctx, w, rel):
                 crosstable.record(table, w, rel, line, visible is not None)
     crosstable.settle(table, LANG)
 
@@ -207,7 +195,7 @@ def parse(text: str, resolve) -> Context:
 # --- uses of a wrapper's name ----------------------------------------------------------------
 
 
-def uses(ctx: Context, w: Wrapper, rel: str, facts: Facts):
+def uses(ctx: Context, w: Wrapper, rel: str):
     """(line, ``(`` of the call, argument span and fields or None) for every use of ``w``'s name in the file
     other than its definition and comments: None when the use is not a visible caller."""
     src, text, code = ctx.src, ctx.src.text, ctx.src.code
@@ -228,7 +216,7 @@ def uses(ctx: Context, w: Wrapper, rel: str, facts: Facts):
         if paren in same:
             yield line, paren, ("same-file", None)  # the same-file reader's call site
             continue
-        if ctx.ns is None or (own is not None and own.open <= p < own.close) or not _reaches(ctx, w, p, facts):
+        if ctx.ns is None or (own is not None and own.open <= p < own.close) or not _reaches(ctx, w, p):
             yield line, paren, None
             continue
         args = src.args(paren)
@@ -264,7 +252,7 @@ def argument(ctx: Context, a: int, b: int) -> Fields | None:
     return out
 
 
-def _reaches(ctx: Context, w: Wrapper, p: int, facts: Facts) -> bool:
+def _reaches(ctx: Context, w: Wrapper, p: int) -> bool:
     src, text = ctx.src, ctx.src.text
     j = src.back_space(p)
     op = "::" if text[j - 2 : j] == "::" else ("->" if text[j - 2 : j] == "->" else "")
@@ -290,16 +278,16 @@ def _reaches(ctx: Context, w: Wrapper, p: int, facts: Facts) -> bool:
             return False
         word = names[0].lower()
         if word in ("self", "static"):
-            return inside
+            return inside and _own_body(ctx, p)
         if word == "parent":
             return here is not None and here.parent == w.owner
         return ctx.qualify(names[0]) == w.owner
     if root != "var":
         return False
     if names == ["this"]:
-        return inside
+        return inside and _own_body(ctx, p)
     if len(names) == 2 and names[0] == "this":
-        return here is not None and _property(ctx, here, names[1], w, facts)
+        return here is not None and _own_body(ctx, p) and _property(ctx, here, names[1], w)
     if len(names) == 1:
         return _parameter(ctx, names[0], p, w)
     return False
@@ -325,68 +313,48 @@ def _typed(ctx: Context, d, name: str) -> str | None:
     return None
 
 
-def _property(ctx: Context, cls: ClassInfo, prop: str, w: Wrapper, facts: Facts) -> bool:
+def _own_body(ctx: Context, p: int) -> bool:
+    """``p`` is in a method's own body, not in a closure inside it (whose ``$this`` can be rebound)."""
+    d = ctx.helpers.enclosing(p)
+    return d is not None and d.method
+
+
+def _property(ctx: Context, cls: ClassInfo, prop: str, w: Wrapper) -> bool:
+    """``$this->prop`` in ``cls`` holds the wrapper's class: declared once there, typed as that class (a
+    typed property or a promoted constructor parameter). PHP checks the type on every write, so no write
+    anywhere (``$o->{'p'}``, destructuring, ``Closure::bind``, reflection) can put anything else there."""
     src = ctx.src
     if cls.kind != "class":
         return False
     body = src.code[cls.brace : src.pairs.get(cls.brace, cls.brace)]
     name = re.escape(prop)
-    typed = re.search(rf"(?:public|protected|private|var)(?:\s+readonly)?\s+{TYPE}\s+\${name}\b", body, re.I)
-    if typed and typed.group(1).lower() not in ("function", "static", "readonly", "const"):
-        return ctx.qualify(typed.group(1)) == w.owner  # PHP checks a typed property on every assignment
-    if not re.search(rf"(?:public|protected|private|var)(?:\s+readonly)?\s+\${name}\b", body, re.I):
-        return False  # not declared: a dynamic property anyone may set
-    if prop in facts.outside or prop in facts.trait_assigned or cls.name.lower() in facts.extended:
-        return False
-    if re.search(rf"&\s*\$this\s*->\s*{name}\b|\bas\s+\$this\s*->\s*{name}\b", body):
-        return False  # by reference, or a foreach target
-    for m in re.finditer(rf"\$this\s*->\s*{name}\s*[,\])]", body):
-        if _destructured(src, cls.brace + m.start()):
-            return False  # ``[$this->P, $x] = ...`` / ``list(...) = ...``
-    writes = list(re.finditer(rf"\$this\s*->\s*{name}\s*(=(?![=>])|\?\?=|\.=)", body))
-    if not writes:
-        return False
-    for m in writes:
-        at = cls.brace + m.start()
-        value = re.match(r"\s*\$([A-Za-z_]\w*)\s*;", src.code[cls.brace + m.end() :])
-        d = ctx.helpers.enclosing(at)
-        if m.group(1) != "=" or value is None or d is None or _typed(ctx, d, value.group(1)) != w.owner:
-            return False
-        if any(d.open < b.pos < at for b in ctx.parsed.bindings.by_name.get(value.group(1), ())):
-            return False
-    return True
-
-
-def _destructured(src, pos: int) -> bool:
-    """``pos`` is inside an array (or ``list(...)``) that is assigned to: a destructuring target."""
-    opener = src.enclosing(pos)
-    while opener >= 0 and (src.text[opener] == "[" or re.search(r"\blist\s*$", src.code[max(0, opener - 8) : opener])):
-        after = src.skip_space(src.pairs[opener] + 1)
-        if src.text.startswith("=", after) and src.text[after + 1 : after + 2] not in ("=", ">"):
-            return True
-        opener = src.parent.get(opener, -1)
-    return False
+    declared = list(re.finditer(rf"(?:public|protected|private|var|readonly)(?:\s+readonly)?(?:\s+{TYPE})?\s+\${name}(?!\w)", body, re.I))
+    if len(declared) != 1:
+        return False  # undeclared (a dynamic property), or declared again in a nested class
+    typed = re.fullmatch(rf"(?:public|protected|private|var|readonly)(?:\s+readonly)?\s+{TYPE}\s+\${name}", declared[0].group(0), re.I)
+    if typed is None or typed.group(1).lower() in ("function", "static", "readonly", "const", "var"):
+        return False  # untyped: never followed
+    return ctx.qualify(typed.group(1)) == w.owner
 
 
 # --- pass 3: the call sites ----------------------------------------------------------------
 
 
 def extend(parsed: phpparse.Parsed, helpers: PhpHelpers, table: Table | None, rel: str, found: list[Found]) -> list[Found]:
-    """``found`` (this file's call sites from the per-file reader) with the table applied: a covered
-    wrapper's own call site dropped, and each visible caller of a wrapper defined elsewhere added."""
+    """``found`` (this file's call sites from the per-file reader) with each visible caller of a wrapper
+    defined elsewhere added."""
     if table is None:
         return found
     if table.collecting:
         collect(parsed, helpers, table, rel)
         return found
-    out = [f for f in found if not table.drops(LANG, rel, f.line, f.call, f.resolved.path)]
+    out = list(found)  # the wrapper's own call site always stays: something unseen may call it too
     wrappers = table.wrappers(LANG)
     if not wrappers or scanner._doc_like(rel, ".php"):
         return out  # a test file's calls check the wrapper; they do not send
-    facts = table.facts.get(LANG)
     ctx = Context(parsed, helpers)
     for w in wrappers:
-        for line, paren, visible in uses(ctx, w, rel, facts):
+        for line, paren, visible in uses(ctx, w, rel):
             if visible is not None and visible[0] != "same-file":
                 out.append(Found(line, w.call + w.through(), w.resolved, visible[1]))
     return out
@@ -394,9 +362,8 @@ def extend(parsed: phpparse.Parsed, helpers: PhpHelpers, table: Table | None, re
 
 def sites(ctx: Context, table: Table, rel: str):
     """(wrapper, line, ``(``, argument span) of every visible cross-file caller in the file, for the fixer."""
-    facts = table.facts.get(LANG)
     for w in table.wrappers(LANG):
-        for line, paren, visible in uses(ctx, w, rel, facts):
+        for line, paren, visible in uses(ctx, w, rel):
             if visible is not None and visible[0] != "same-file":
                 yield w, line, paren, visible[0]
 

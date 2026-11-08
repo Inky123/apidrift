@@ -9,22 +9,26 @@ module does the same for callers in other files, in three passes driven by :func
    language module says how; uniqueness of the name is always part of it), then finds every use of the
    name in the repository's source files and sorts it: a *visible caller* (the caller's receiver provably
    reaches the wrapper and the argument it forwards is an array/object literal, or a local bound only to
-   one), or anything else. A wrapper whose every use is a visible caller is *covered*: its own call site,
-   whose hidden argument is exactly its callers' arguments, is dropped.
-3. The files with visible callers, and the files of covered wrappers, are scanned again with the table:
-   each visible caller becomes a call site at the caller's line, ``[through NAME, FILE:LINE]``.
+   one), or anything else.
+3. The files with visible callers are scanned again with the table: each visible caller becomes a call
+   site at the caller's line, ``[through NAME, FILE:LINE]``.
+
+The wrapper's own call site is never dropped, even when every use found is a visible caller: a framework,
+a parent class outside the checkout, an attribute or decorator, an event listener, or a file this walk
+does not read may call it too. It stays as it is (possible, arguments not visible) beside its callers.
 
 One hop only: a caller that forwards a parameter of its own is not visible. Test files are not callers
-that send (their uses are ignored); vendored directories are never callers, but a definition there of
-the same name makes the name ambiguous. Work is bounded by the caps below: past one, nothing more is
-followed and the scan is exactly the per-file one. The fixer's oracle re-scans an edited file with the
-same table (:func:`scanner.scan_text`), so it sees the same call sites.
+that send (their uses are ignored). Every walk reads exactly the files :func:`scanner._iter_files` lists
+(dependency, vendored and build directories left out, symlinks and files over the size cap skipped), so a
+scan finds the same callers on every machine whatever is installed. Work is bounded by the caps below:
+past one, nothing more is followed and the scan is exactly the per-file one. The fixer's oracle re-scans
+an edited file with the same table (:func:`scanner.scan_text`), so it sees the same call sites.
 """
 
 from __future__ import annotations
 
 import json
-import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -74,7 +78,6 @@ class Table:
     collecting: bool = True
     candidates: dict[tuple[str, str], list[Wrapper]] = field(default_factory=dict)
     followed: dict[tuple[str, str], Wrapper] = field(default_factory=dict)
-    covered: set[tuple[str, str]] = field(default_factory=set)
     callers: dict[tuple[str, str], list[tuple[str, int]]] = field(default_factory=dict)  # visible callers
     unaccounted: dict[tuple[str, str], list[tuple[str, int]]] = field(default_factory=dict)  # other uses
     facts: dict[str, object] = field(default_factory=dict)  # language -> what its module learnt from the walk
@@ -88,13 +91,6 @@ class Table:
 
     def wrappers(self, language: str) -> list[Wrapper]:
         return [w for (lang, _), w in sorted(self.followed.items()) if lang == language]
-
-    def drops(self, language: str, file: str, line: int, call: str, path: str) -> bool:
-        """The SDK call at ``file:line`` is a covered wrapper's own: its callers are the call sites."""
-        return any(
-            w.file == file and w.line == line and w.call == call and w.resolved.path == path
-            for w in self.wrappers(language) if w.key in self.covered
-        )
 
     def note(self, w: Wrapper, why: str) -> None:
         self.notes.append(f"{w.file}:{w.line} {w.name}: {why}")
@@ -119,40 +115,66 @@ def single(table: Table, language: str) -> dict[tuple[str, str], Wrapper]:
 
 
 def walk(base: Path, suffixes: set[str], skip=None, needles: tuple[bytes, ...] = ()):
-    """Every file of the language under ``base``, vendored and test directories included (a definition
-    anywhere makes a name ambiguous), as (path, text); ``skip(rel)`` leaves a file unread, and with
-    ``needles`` a file holding none of them is read but not yielded. Yields None once a cap is passed: the
-    caller must then follow nothing."""
+    """Every file of the language the scan would read under ``base`` (:func:`scanner._iter_files`: the same
+    files on every machine), as (path, text); ``skip(rel)`` leaves a file unread, and with ``needles`` a
+    file holding none of them is read but not yielded. Binary files are left out. Yields None once a cap is
+    passed: the caller must then follow nothing."""
+    from . import scanner
+
     files = size = 0
-    for dirpath, dirs, names in os.walk(base):
-        dirs[:] = sorted(d for d in dirs if d not in (".git", ".hg", ".svn"))
-        for name in sorted(names):
-            path = Path(dirpath) / name
-            if path.suffix.lower() not in suffixes or path.is_symlink():
-                continue
-            if skip is not None and skip(path.relative_to(base).as_posix()):
-                continue
-            files += 1
+    for path in scanner._iter_files(base, suffixes)[0]:
+        if skip is not None and skip(path.relative_to(base).as_posix()):
+            continue
+        files += 1
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        size += len(raw)
+        if files > MAX_WALK_FILES or size > MAX_WALK_BYTES:
+            yield None
+            return
+        if b"\x00" in raw[:8192]:
+            continue
+        if not needles or any(n in raw for n in needles):
+            yield path, raw.decode("utf-8", errors="replace")
+
+
+WP_HEADER = re.compile(rb"^[ \t/*#@]*Plugin Name\s*:", re.M)
+
+
+def php_package(base: Path, rel: str) -> str | None:
+    """Why the PHP file at ``rel`` belongs to a package others install or extend (None: an application).
+
+    The nearest ``composer.json`` above it decides: anything but ``"type": "project"`` (the default type
+    is ``library``; a ``wordpress-plugin`` such as GiveWP has add-ons that call and subclass it), and an
+    unreadable one too. A directory on the way up holding a PHP file with a WordPress ``Plugin Name:``
+    header is a plugin whatever Composer says."""
+    here = (base / rel).parent
+    composer_seen = False
+    while True:
+        if not composer_seen and (here / "composer.json").is_file():
+            composer_seen = True
             try:
-                raw = path.read_bytes()
+                composer = json.loads((here / "composer.json").read_text(errors="replace"))
+            except (OSError, ValueError):
+                composer = None
+            if not isinstance(composer, dict) or composer.get("type", "library") != "project":
+                return "a Composer library: callers outside the repository"
+        try:
+            heads = [p for p in sorted(here.iterdir()) if p.suffix.lower() == ".php" and p.is_file() and not p.is_symlink()]
+        except OSError:
+            heads = []
+        for p in heads:
+            try:
+                with p.open("rb") as f:
+                    if WP_HEADER.search(f.read(8192)):
+                        return "a WordPress plugin: callers outside the repository"
             except OSError:
                 continue
-            size += len(raw)
-            if files > MAX_WALK_FILES or size > MAX_WALK_BYTES:
-                yield None
-                return
-            if not needles or any(n in raw for n in needles):
-                yield path, raw.decode("utf-8", errors="replace")
-
-
-def composer_library(base: Path) -> bool:
-    """A Composer package others install or extend: anything but an application (``"type": "project"``). The
-    default type is ``library``; a ``wordpress-plugin`` (GiveWP) has add-ons that call and subclass it."""
-    try:
-        composer = json.loads((base / "composer.json").read_text(errors="replace"))
-    except (OSError, ValueError):
-        return False
-    return isinstance(composer, dict) and composer.get("type", "library") != "project"
+        if here == base or base not in here.parents:
+            return None
+        here = here.parent
 
 
 def record(table: Table, w: Wrapper, file: str, line: int, visible: bool) -> None:
@@ -163,19 +185,13 @@ def record(table: Table, w: Wrapper, file: str, line: int, visible: bool) -> Non
 
 
 def settle(table: Table, language: str) -> None:
-    """Covered wrappers: at least one visible caller and no other use. Past the caller cap, nothing of the
-    language is followed (the scan is then the per-file one)."""
+    """Past the caller cap, nothing of the language is followed (the scan is then the per-file one)."""
     if sum(len(v) for k, v in table.callers.items() if k[0] == language) > MAX_CALLERS:
         for key, w in list(table.followed.items()):
             if key[0] == language:
                 table.note(w, "cap: too many callers")
                 del table.followed[key]
         table.rescan = {f for f in table.rescan if f not in {f for k, v in table.callers.items() for f, _ in v if k[0] == language}}
-        return
-    for key, w in table.followed.items():
-        if key[0] == language and table.callers.get(key) and not table.unaccounted.get(key):
-            table.covered.add(key)
-            table.rescan.add(w.file)
 
 
 def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:

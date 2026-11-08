@@ -4,19 +4,24 @@ A candidate is a function or class method whose body hands one of its parameters
 nowhere else, to one SDK call as that call's only parameters argument (``return
 this.stripe.subscriptions.update(id, updateData)``). It is followed into other files when:
 
-- a *method* of class ``C``: ``C`` is declared once in the repository's source, nothing ``extends`` it or
-  overrides it through dependency injection (``provide: C``) or ``C.prototype``, and the method is
-  defined once in ``C``. A caller reaches it only through ``this.NAME(`` inside ``C``, or ``this.P.NAME(``
-  where ``P`` is a ``private`` or ``readonly`` property of the caller's class *declared with type* ``C``
-  (a constructor parameter property ``private readonly p: C`` or such a typed field), ``C`` imported from
-  the wrapper's own module, and ``P`` never assigned in the class (other definitions of the same method name in unrelated classes do not matter:
-  TypeScript checks the declared type, and no subclass exists);
+- a *method* of class ``C``: ``C`` is declared once in the repository's source, nothing ``extends`` or
+  ``implements`` it, it is named in no dependency-injection provider object and has no ``C.prototype``
+  use, and the method is defined once in ``C``. A caller reaches it only through ``this.NAME(`` inside
+  ``C``, or ``this.P.NAME(`` where ``P`` is a ``private`` or ``readonly`` undecorated property of the
+  caller's class typed exactly ``C`` (imported from the wrapper's own module) and set only from a
+  constructor parameter typed exactly ``C``, in a class the source never builds with ``new`` nor extends
+  (:func:`jsreach.typed_property`); ``this`` must be the instance (:func:`jsreach.this_is_instance`).
+  Other definitions of the same method name in unrelated classes do not matter: TypeScript checks the
+  declared type;
 - an exported *function*: it is defined once in the repository's source, and a caller imports it by name
   (``import { f }`` / ``import { f as g }`` / ``import * as m``) from a specifier that resolves to the
-  wrapper's file (relative, or through the nearest ``tsconfig.json`` ``paths``).
+  wrapper's file (relative, or through the nearest ``tsconfig.json`` ``paths``), in a file where that
+  local name is never anything else (a parameter, a local, a nested function: :func:`jsreach.shadowed`).
 
 The caller's argument must be an object literal without spreads, or a local bound only to one with only
-keyed writes. Test files are not callers; vendored files are never read as callers. Ruby is not followed.
+keyed writes. Test files are not callers. Every walk reads the files the scan reads (dependency and build
+directories left out); ``.vue``, ``.svelte`` and ``.astro`` files count as definitions of a name but are
+not read as callers. Ruby is not followed. The wrapper's own call site always stays (:mod:`crosstable`).
 """
 
 from __future__ import annotations
@@ -26,13 +31,14 @@ import re
 from collections import Counter
 from pathlib import Path
 
-from . import crosstable, jsparse, jsroots, scanner
+from . import crosstable, jsparse, jsreach, jsroots, scanner
 from .crosstable import Table, Wrapper
 from .jshelpers import Helpers
 from .jsparse import Fields, Found, Mask, Source
 
 LANG = "js"
-SUFFIXES = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
+SUFFIXES = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}  # read as callers
+DEFINES = SUFFIXES | {".vue", ".svelte", ".astro"}  # may define the name (in a script block)
 EXTS = (".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs")
 IDENT = r"[A-Za-z_$][\w$]*"
 IMPORT = re.compile(rf"\bimport\s+(?:type\s+)?(?:({IDENT})\s*,?\s*)?(?:\{{([^}}]*)\}}|\*\s*as\s+({IDENT}))?\s*from\s*['\"]([^'\"]+)['\"]")
@@ -169,42 +175,33 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
             names[key] = w
     if not names:
         return
-    owners = {w.owner for w in names.values() if w.method}
     funcs = [w.name for w in names.values() if not w.method]
     source = {str(p) for p in sources}
-    classes, extended, provided, prototyped = Counter(), set(), set(), set()
+    facts = jsreach.Facts()
     defined: Counter[str] = Counter()
     mention = re.compile(rf"(?<![\w$])(?:{'|'.join(re.escape(w.name) for w in names.values())})(?![\w$])")
     mentioned: list[Path] = []
     test = lambda rel: scanner._doc_like(rel, Path(rel).suffix.lower())  # noqa: E731  a test's mocks reach its own calls
-    needles = tuple({n.encode() for n in owners | {w.name for w in names.values()}})
-    for item in crosstable.walk(base, SUFFIXES, skip=test, needles=needles):
+    for item in crosstable.walk(base, DEFINES, skip=test):
         if item is None:
             for w in names.values():
                 table.note(w, "cap: too many JS/TS files")
             return
         path, text = item
-        for o in owners:
-            if o in text:
-                classes[o] += len(re.findall(rf"\bclass\s+{re.escape(o)}\b", text))
-        if "extends" in text:
-            extended |= set(re.findall(rf"\bextends\s+(?:{IDENT}\.)*({IDENT})", text))
-        if "provide" in text:
-            provided |= set(re.findall(rf"\bprovide\s*:\s*({IDENT})", text))
-        if "prototype" in text:
-            prototyped |= set(re.findall(rf"\b({IDENT})\s*\.\s*prototype\b", text))
+        facts.learn(text)
         for f in funcs:
             if f in text:
-                defined[f] += len(re.findall(rf"\bfunction\s*\*?\s*{re.escape(f)}\s*[<(]|\b(?:const|let|var)\s+{re.escape(f)}\b", text))
-        if str(path) in source and mention.search(text):
+                defined[f] += len(re.findall(rf"(?<![\w$])function\s*\*?\s*{re.escape(f)}\s*[<(]|(?<![\w$])(?:const|let|var)\s+{re.escape(f)}(?![\w$])", text))
+        if str(path) in source and path.suffix.lower() in SUFFIXES and mention.search(text):
             mentioned.append(path)
     for key, w in names.items():
-        if w.method and (classes[w.owner] != 1 or w.owner in extended | provided | prototyped):
-            table.note(w, "the class is declared twice, extended or replaced")
+        if w.method and (facts.classes.get(w.owner, 0) != 1 or w.owner in facts.replaced | facts.provided | facts.prototyped):
+            table.note(w, "the class is declared twice, extended, implemented or replaced")
         elif not w.method and defined[w.name] != 1:
             table.note(w, f"{defined[w.name]} definitions of the name")
         else:
             table.followed[key] = w
+    table.facts[LANG] = facts
     followed = table.wrappers(LANG)
     if len(mentioned) > crosstable.MAX_PARSE_FILES:
         for w in followed:
@@ -215,7 +212,7 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
         rel, text = path.relative_to(base).as_posix(), scanner._read(path)
         ctx = Context(text) if text is not None else None
         for w in followed:
-            for line, _, visible in (uses(ctx, w, rel, base) if ctx else [(0, -1, None)]):
+            for line, _, visible in (uses(ctx, w, rel, table) if ctx else [(0, -1, None)]):
                 crosstable.record(table, w, rel, line, visible is not None)
     crosstable.settle(table, LANG)
 
@@ -238,10 +235,11 @@ def _library(base: Path, rel: str) -> bool:
 # --- uses ----------------------------------------------------------------------------------
 
 
-def uses(ctx: Context, w: Wrapper, rel: str, base: Path):
+def uses(ctx: Context, w: Wrapper, rel: str, table: Table):
     """(line, ``(``, (argument span, fields) or None) for each use of ``w``'s name, or of a local name it is
     imported under, that may reach it; uses that provably reach something else are skipped."""
     src, text = ctx.src, ctx.src.text
+    base, facts = table.base, table.facts.get(LANG)
     own = None
     if rel == w.file:
         kind = "method" if w.method else "function"
@@ -273,19 +271,20 @@ def uses(ctx: Context, w: Wrapper, rel: str, base: Path):
             is_call = text.startswith("(", paren)
             if w.method:
                 here = ctx.class_name(p)
-                if re.search(r"\bthis\s*\.$", before):
+                if re.search(r"(?<![\w$.])this\s*\.$", before):
                     if here is not None and here[1] != w.owner:
                         continue  # ``this`` of an unrelated class (nothing extends the owner): its own method
-                    reach = here is not None and is_call
+                    reach = here is not None and is_call and jsreach.this_is_instance(ctx, p, here[0])
                 else:
-                    hit = re.search(rf"\bthis\s*\.\s*({IDENT})\s*\.$", before)
-                    reach = is_call and hit is not None and here is not None and _typed(ctx, here, hit.group(1), w, rel, base)
+                    hit = re.search(rf"(?<![\w$.])this\s*\.\s*({IDENT})\s*\.$", before)
+                    reach = (is_call and hit is not None and here is not None and jsreach.this_is_instance(ctx, p, here[0])
+                             and _typed(ctx, here, hit.group(1), w, rel, base, facts))
                     if not reach and _definition(ctx, p, here, w):
                         continue  # the same name defined in an unrelated class
             elif re.search(r"export\s*\{[^}]*$", before) and rel == w.file:
                 continue  # ``export { name }``
             else:
-                reach = is_call and _imported(ctx, before, name, aliases, w, rel, base)
+                reach = is_call and _imported(ctx, before, name, aliases, w, rel, base, own)
             if not reach or (own is not None and own.open <= p < own.close):
                 yield line, paren if is_call else -1, None
                 continue
@@ -302,35 +301,43 @@ def _definition(ctx: Context, p: int, here, w: Wrapper) -> bool:
     return here is not None and here[1] != w.owner and any(d.pos == p and d.kind == "method" for d in ctx.helpers.defs.get(w.name, ()))
 
 
-def _typed(ctx: Context, here, prop: str, w: Wrapper, rel: str, base: Path) -> bool:
-    """``this.prop`` is declared in the caller's class with the wrapper's class as its type, and never set."""
-    (lo, hi), _ = here
-    body, p = ctx.src.text[lo:hi], re.escape(prop)
-    decl = re.search(rf"(?:(?:private|protected|public|readonly)\s+)+{p}\s*[?!]?\s*:\s*({IDENT})\s*[,)=;\n]"
-                     rf"|^\s*(?:(?:private|protected|public|readonly)\s+)*{p}\s*[?!]?\s*:\s*({IDENT})\s*[;=\n]", body, re.M)
-    if decl is None or re.search(rf"this\s*\.\s*{p}\s*=(?![=>])", body):
+def _typed(ctx: Context, here, prop: str, w: Wrapper, rel: str, base: Path, facts) -> bool:
+    """``this.prop`` provably holds the wrapper's class: :func:`jsreach.typed_property`, with the class it
+    is typed as written here resolving to the wrapper's (its own file, or imported from its module)."""
+    (lo, hi), cls_name = here
+    m = re.search(rf"(?<![\w$.]){re.escape(prop)}\s*[?!]?\s*:\s*({IDENT})", ctx.src.text[lo:hi])
+    local = m.group(1) if m else None
+    if local is None:
         return False
-    if not re.search(r"\b(?:private|readonly)\b", decl.group(0)):
-        return False  # only a private or readonly property is one TypeScript lets nothing else set
-    local = decl.group(1) or decl.group(2)
     if rel == w.file:
-        return local == w.owner
-    imported = ctx.imports.get(local)
-    return imported is not None and imported[0] == w.owner and _resolves(base, rel, imported[1], w.file)
+        if local != w.owner or local in ctx.imports:
+            return False
+    else:
+        imported = ctx.imports.get(local)
+        if imported is None or imported[0] != w.owner or not _resolves(base, rel, imported[1], w.file):
+            return False
+        if re.search(rf"(?<![\w$.])(?:class|interface|type|enum|namespace)\s+{re.escape(local)}(?![\w$])", ctx.src.text):
+            return False  # a type of the same name declared here may shadow the import
+    return jsreach.typed_property(ctx, (lo, hi), cls_name, prop, local, facts)
 
 
-def _imported(ctx: Context, before: str, name: str, aliases: set[str], w: Wrapper, rel: str, base: Path) -> bool:
+def _imported(ctx: Context, before: str, name: str, aliases: set[str], w: Wrapper, rel: str, base: Path, own=None) -> bool:
     """A call of ``name`` reaches the wrapper function: a local it is imported under, ``ns.NAME(`` of a
-    namespace import of its module, or a plain call in its own file."""
+    namespace import of its module, or a plain call in its own file; never where the local name is also
+    something else in the file (a parameter, a local, a nested function of that name)."""
     qualified = re.search(rf"({IDENT})\s*\.$", before)
     if qualified:
         got = ctx.imports.get(qualified.group(1))
-        return name == w.name and got is not None and got[0] == "*" and _resolves(base, rel, got[1], w.file)
+        return (name == w.name and got is not None and got[0] == "*" and _resolves(base, rel, got[1], w.file)
+                and not jsreach.shadowed(ctx, qualified.group(1), member=True))
     if before.endswith((".", "?.")):
         return False
     if name in aliases:
-        return True
-    return rel == w.file and name == w.name and name not in ctx.imports
+        return not jsreach.shadowed(ctx, name, member=False)
+    if rel != w.file or name != w.name or name in ctx.imports:
+        return False
+    exports = {m.start(1) for m in re.finditer(rf"export\s*\{{[^}}]*?(?<![\w$])({re.escape(name)})(?![\w$])", ctx.src.text)}
+    return not jsreach.shadowed(ctx, name, member=False, skip=exports | ({own.pos} if own is not None else set()))
 
 
 def _resolves(base: Path, rel: str, spec: str, target: str) -> bool:
@@ -391,7 +398,7 @@ def argument(ctx: Context, a: int, b: int) -> Fields | None:
 
 
 def extend(text: str, table: Table | None, rel: str, found: list[Found], calls, helpers, ruby: bool) -> list[Found]:
-    """``found`` with the table applied: a covered wrapper's own site dropped, visible callers added."""
+    """``found`` with each visible caller of a wrapper defined elsewhere added (the wrapper's own site stays)."""
     bindings = calls[0].bindings if calls else None
     if table is None or ruby:
         return found
@@ -399,7 +406,7 @@ def extend(text: str, table: Table | None, rel: str, found: list[Found], calls, 
         if calls:
             collect(calls, helpers, table, rel)
         return found
-    out = [f for f in found if not table.drops(LANG, rel, f.line, f.call, f.resolved.path)]
+    out = list(found)
     wrappers = [w for w in table.wrappers(LANG) if w.name in text]
     if not wrappers or scanner._doc_like(rel, Path(rel).suffix.lower()):
         return out
@@ -409,9 +416,8 @@ def extend(text: str, table: Table | None, rel: str, found: list[Found], calls, 
 
 
 def sites(ctx: Context, table: Table, rel: str):
-    base = getattr(table, "base", None)
     for w in table.wrappers(LANG):
         if w.name in ctx.src.text:
-            for line, paren, visible in uses(ctx, w, rel, base):
+            for line, paren, visible in uses(ctx, w, rel, table):
                 if visible is not None:
                     yield w, line, paren, visible
