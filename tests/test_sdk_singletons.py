@@ -147,3 +147,17 @@ def test_a_python_keyword_named_like_the_path_id_passes_the_id(index):
         "GET /v1/accounts/{account}", "GET /v1/account", "GET /v1/financial_connections/accounts/{account}",
         "GET /v1/accounts/{account}", "GET /v1/account",
     ]
+
+
+def test_a_written_nil_id_is_the_id_slot_not_params(index):
+    text = (
+        "const stripe = new Stripe(k);\n"
+        "stripe.accounts.retrieve(null, { expand: ['settings'] });\n"
+        "stripe.accounts.retrieve(undefined, { expand: ['x'] }, { stripeAccount: id });\n"
+    )
+    usages, _, _ = scan_text(text, "a.js", index)
+    assert [(u.label, sorted(u.fields), u.complete) for u in usages] == [
+        ("GET /v1/account", ["expand"], True), ("GET /v1/account", ["expand"], True),
+    ]
+    usages, _, _ = scan_text("a = Stripe::Account.retrieve(nil, { api_key: k })\n", "a.rb", index)
+    assert [(u.label, u.complete) for u in usages] == [("GET /v1/account", True)]

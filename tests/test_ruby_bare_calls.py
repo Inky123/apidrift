@@ -102,3 +102,62 @@ def test_ruby_keywords_after_a_bare_call_are_not_arguments(index):
 def test_javascript_has_no_bare_calls(index):
     text = "const stripe = new Stripe(k);\nconst x = stripe.customers.list;\nstripe.balance.retrieve;\n"
     assert calls(index, text, "a.js")[0] == []
+
+
+def test_bang_and_predicate_methods_are_the_apps_own(index):
+    text = (
+        "def x\n"
+        "  Stripe::Customer.create!(email: e)\n"
+        "  Stripe::Customer.list?\n"
+        "  StripeService::Customer.update!\n"
+        "  ok = Stripe::Customer.list.empty?\n"  # the call is list; empty? reads its result
+        "  same = Stripe::Balance.retrieve != cached\n"
+        "end\n"
+    )
+    assert [(line, label) for line, _, label, _, _ in calls(index, text)[0]] == [
+        (5, "GET /v1/customers"), (6, "GET /v1/balance"),
+    ]
+
+
+def test_heredocs_and_block_comments_are_text(index):
+    text = (
+        "def x\n"
+        "  t = <<~TXT\n"
+        "    Stripe::Balance.retrieve\n"
+        "  TXT\n"
+        "  u = <<-'SQL'\n"
+        "    Stripe::Customer.list\n"
+        "  SQL\n"
+        "=begin\n"
+        "  Stripe::Balance.retrieve\n"
+        "=end\n"
+        "  Stripe::Customer.list\n"
+        "  items << Stripe::Balance.retrieve\n"  # << is an append here, not a heredoc
+        "end\n"
+    )
+    assert [(line, label) for line, _, label, _, _ in calls(index, text)[0]] == [
+        (11, "GET /v1/customers"), (12, "GET /v1/balance"),
+    ]
+
+
+def test_a_bare_call_starts_at_the_sdk(index):
+    text = (
+        "def x\n"
+        "  stripe_customer.subscriptions.create attrs\n"
+        "  @stripe_account.customers.list\n"
+        "  user.stripe_customers.list\n"
+        "  cli = Stripe::StripeClient.new(k)\n"
+        "  cli.customers.list\n"
+        "  @client.v1.customers.list\n"
+        "  StripeService.customers.list\n"
+        "end\n"
+    )
+    assert [(line, call) for line, call, _, _, _ in calls(index, text)[0]] == [
+        (6, "cli.customers.list"), (7, "client.v1.customers.list"), (8, "StripeService.customers.list"),
+    ]
+
+
+def test_a_chain_read_without_parentheses_is_not_also_unresolved(index):
+    found, unresolved = calls(index, "x = Stripe::Customer.list.data.first(3)\ny = Stripe::Charge.frobnicate(1)\n")
+    assert [(line, label) for line, _, label, _, _ in found] == [(1, "GET /v1/customers")]
+    assert unresolved == ["Stripe::Charge.frobnicate"]
