@@ -75,7 +75,7 @@ class Registry:
 
     def collect(self, text: str, rel: str) -> None:
         """Note the wrappers one file defines, the function names it defines and the names it calls."""
-        from . import httpgo, httpphp, httppy, phpfilters
+        from . import httpgo, httpphp, httppy
 
         lang = _language(rel)
         if lang == "go":
@@ -83,7 +83,7 @@ class Registry:
             found, defined, called = httpgo.survey(text, rel)
         elif lang in ("php", "python"):
             if lang == "php" and "add_filter" in text:
-                self.hooks |= phpfilters.registered({rel: text})
+                self.hooks |= production_hooks(rel, text)
             found, defined, called = (httpphp if lang == "php" else httppy).survey(text, rel)
         else:
             return
@@ -143,6 +143,20 @@ class Registry:
 
     def unique(self, language: str, name: str) -> bool:
         return self.names.get(language, {}).get(name.lower() if language == "php" else name, 0) == 1
+
+
+def production_hooks(rel: str, text: str) -> set[str]:
+    """Filter hooks a file registers (:func:`phpfilters.registered`), unless it is a test, fixture or
+    documentation file (the scanner's TEST_DIRS / TEST_FILE / DOC_DIRS rules): a test's callback is not
+    the customer's production code, so it does not make a filtered body invisible."""
+    import os
+
+    from . import phpfilters
+    from .scanner import _doc_like
+
+    if _doc_like(rel, os.path.splitext(rel)[1].lower()):
+        return set()
+    return phpfilters.registered({rel: text})
 
 
 LITERAL_ARGS = re.compile(r"""(?:\s*::\s*\w+\s*\()?[^()]{0,300}?['"]""")

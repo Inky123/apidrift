@@ -30,8 +30,11 @@ CALL_PI = P + "My_Stripe_API::request(['payment_method_types' => ['card']], 'pay
 
 @pytest.mark.parametrize("extra,complete", [
     ({}, True),  # policy: a literal hook nothing in the checkout hooks into passes the body through
-    ({"tests/hooks.php": P + "add_filter('my_body', function ($b) { return $b; });\n"}, False),
+    ({"inc/hooks.php": P + "add_filter('my_body', function ($b) { return $b; });\n"}, False),
     ({"x/hooks.php": P + "add_filter( \"old_body\", 'cb' );\n"}, False),
+    # a callback registered only by tests, fixtures or docs is not production code: still passed through
+    ({"tests/phpunit/hooks-test.php": P + "add_filter('my_body', function ($b) { return $b; });\n"}, True),
+    ({"docs/example.php": P + "add_filter('old_body', 'cb');\n"}, True),
 ])
 def test_apply_filters_passes_the_body_through_unless_the_checkout_hooks_it(tmp_path, index, extra, complete):
     root = _repo(tmp_path, {"inc/api.php": FILTERED, "inc/pay.php": CALL_PI, **extra})

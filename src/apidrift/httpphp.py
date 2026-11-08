@@ -444,7 +444,7 @@ def sites(text: str, rel: str, index, reads: frozenset[str], language: str, regi
     here = wrappers_in(f, rel, known) if "stripe.com" in text or known else []
     wrappers = here + [w for w in known if w.rel != rel]
     out = httpphppath.constant_sites(f, text, rel, index, reads, language) if f.consts else []
-    hooks = registry.hooks if registry is not None else phpfilters.registered({rel: text})
+    hooks = registry.hooks if registry is not None else httpwrap.production_hooks(rel, text)
     for w, start, paren, display in _calls(f, wrappers, rel, registry):
         if w.filters & hooks:
             w = replace(w, rewrites=True)
