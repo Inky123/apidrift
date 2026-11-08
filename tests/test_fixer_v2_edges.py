@@ -206,7 +206,7 @@ def test_a_literal_shared_by_two_calls_is_not_edited(tmp_path):
         "stripe.subscriptions.update('sub_1', params);\n"
         "stripe.subscriptions.resume('sub_1', params);\n"
     )})
-    assert plan.fixes == [] and [w for _, _, w in whys(plan)] == ["incomplete_binding"] * 2
+    assert plan.fixes == [] and [w for _, _, w in whys(plan)] == ["shared_literal"] * 2
 
 
 def test_a_literal_also_fed_to_an_endpoint_outside_the_table_is_not_edited(tmp_path):
@@ -215,7 +215,7 @@ def test_a_literal_also_fed_to_an_endpoint_outside_the_table_is_not_edited(tmp_p
         "stripe.paymentMethods.update('pm_1', params);\n"
         "stripe.charges.create(params);\n"
     )})
-    assert plan.fixes == [] and whys(plan) == [(3, "payto", "incomplete_binding")]
+    assert plan.fixes == [] and whys(plan) == [(3, "payto", "shared_literal")]
 
 
 @pytest.mark.parametrize("language,text,expected", [

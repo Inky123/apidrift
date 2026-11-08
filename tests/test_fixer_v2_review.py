@@ -71,11 +71,11 @@ REFUSED = {
     "r_rb_bang": ("a.rb", FC_RB % "cs.compact!", "unsupported_value"),
     "r_rb_block": ("a.rb", FC_RB % "cs.map { |c| c.upcase }", "unsupported_value"),
     # M1: the bound literal is also used elsewhere, so editing it would change that use too
-    "x_returned": ("a.js", "function f() {\n  const p = { payto: { pay_id: 'a' }, metadata: {} };\n  stripe.paymentMethods.update('pm_1', p);\n  return p;\n}\n", "incomplete_binding"),
-    "x_passed_to_fn": ("a.js", "const p = { payto: { pay_id: 'a' }, metadata: {} };\nstripe.paymentMethods.update('pm_1', p);\nauditLog(p);\n", "incomplete_binding"),
-    "x_wrap_shared_spread": ("a.js", "const p = { billing_cycle_anchor: 'now' };\nstripe.subscriptions.update('sub_1', p);\nlegacyClient.subscriptions.update('sub_2', { ...p });\n", "incomplete_binding"),
-    "x_wrap_py_read_after": ("a.py", "def f():\n    p = {'billing_cycle_anchor': 'now'}\n    stripe.Subscription.modify('sub_1', **p)\n    if p['billing_cycle_anchor'] == 'now':\n        notify()\n", "incomplete_binding"),
-    "x_rb_aliased": ("a.rb", "def f\n  p = { payto: { pay_id: 'a' }, metadata: {} }\n  q = p\n  Stripe::PaymentMethod.update('pm_1', p)\nend\n", "incomplete_binding"),
+    "x_returned": ("a.js", "function f() {\n  const p = { payto: { pay_id: 'a' }, metadata: {} };\n  stripe.paymentMethods.update('pm_1', p);\n  return p;\n}\n", "shared_literal"),
+    "x_passed_to_fn": ("a.js", "const p = { payto: { pay_id: 'a' }, metadata: {} };\nstripe.paymentMethods.update('pm_1', p);\nauditLog(p);\n", "shared_literal"),
+    "x_wrap_shared_spread": ("a.js", "const p = { billing_cycle_anchor: 'now' };\nstripe.subscriptions.update('sub_1', p);\nlegacyClient.subscriptions.update('sub_2', { ...p });\n", "shared_literal"),
+    "x_wrap_py_read_after": ("a.py", "def f():\n    p = {'billing_cycle_anchor': 'now'}\n    stripe.Subscription.modify('sub_1', **p)\n    if p['billing_cycle_anchor'] == 'now':\n        notify()\n", "shared_literal"),
+    "x_rb_aliased": ("a.rb", "def f\n  p = { payto: { pay_id: 'a' }, metadata: {} }\n  q = p\n  Stripe::PaymentMethod.update('pm_1', p)\nend\n", "shared_literal"),
     # H8: a read of the wrapped key elsewhere would now see an object
     "x_wrap_read_elsewhere": ("a.js", SUB % "'now'" + "if (current.billing_cycle_anchor === 'now') notify();\n", "leftover_tokens"),
     "x_wrap_py_read_elsewhere": ("a.py", SUB_PY % "'now'" + "print(current['billing_cycle_anchor'])\n", "leftover_tokens"),

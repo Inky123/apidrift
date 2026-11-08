@@ -142,7 +142,7 @@ def test_a_shared_local_is_refused(tmp_path):
         f"    const p = {{ amount: 100, {OLD}: ['card'] }};\n    audit(p);\n    return this.paymentService.createIntent(p);\n",
     )
     plan = plan_for(tmp_path, {**FILES, "src/checkout/checkout.ts": caller})
-    assert plan.fixes == [] and [u.why for u in plan.unfixable] == ["helper_shared"]
+    assert plan.fixes == [] and [u.why for u in plan.unfixable] == ["shared_literal"]  # the caller's own local escapes
 
 
 FUNC = (

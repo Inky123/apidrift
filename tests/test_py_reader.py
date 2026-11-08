@@ -257,7 +257,7 @@ def test_async_calls_are_fixed_exactly_as_sync_calls(tmp_path):
         "    await client.v1.payment_intents.create_async(params={'amount': 1, 'payment_method_types': ['card']})\n"
         "    v1 = client.v1\n"
         "    p = {'amount': 2, 'payment_method_types': ['sepa_debit']}\n"
-        "    await v1.payment_intents.create_async(params=p)\n"
+        "    await v1.payment_intents.create_async(params={'amount': 3})\n"  # ``v1`` is not resolved: ``p`` must not feed it
         "    PI = stripe.PaymentIntent\n"
         "    await PI.create_async(**p)\n"
     )}))

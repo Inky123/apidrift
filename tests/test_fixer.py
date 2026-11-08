@@ -137,7 +137,7 @@ def test_a_shared_literal_fed_to_an_endpoint_outside_the_table_drops_the_file(tm
         "  await stripe.charges.create(params);\n"
         "}\n")})
     assert plan.fixes == []
-    assert [(u.file, u.line, u.why) for u in plan.unfixable] == [("pay.js", 4, "oracle_changed_other_calls")]
+    assert [(u.file, u.line, u.why) for u in plan.unfixable] == [("pay.js", 4, "shared_literal")]  # refused before the oracle
 
 
 def test_if_else_bindings_are_all_renamed_but_an_unconditional_rebinding_ends_the_walk(tmp_path):
@@ -292,7 +292,7 @@ def test_fix_command_prints_diffs_pins_and_exits_zero(tmp_path, capsys):
     assert "--- a/inline.js" in out and "+stripe.paymentIntents.create({ allowed_payment_method_types: ['card'], amount: 1 });" in out
     assert "--- a/shared.js" not in out
     assert "API-version pins" in out and "inline.js:1  2023-10-16" in out
-    assert "left for you:" in out and "shared.js:3  payment_method_types  /v1/payment_intents  (oracle_changed_other_calls)" in out
+    assert "left for you:" in out and "shared.js:3  payment_method_types  /v1/payment_intents  (shared_literal)" in out
     assert main(["fix", str(repo), "--old", str(tmp_path / "a.json"), "--new", str(tmp_path / "b.json"), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert set(payload) == {

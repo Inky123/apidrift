@@ -10,7 +10,7 @@ import ast
 import re
 from dataclasses import dataclass
 
-from . import jsparse, phplex
+from . import jsparse, strholes
 from .jsparse import QUOTES, Source
 
 PY_MASK = re.compile(
@@ -34,10 +34,9 @@ class Token:
 
 
 def tokens(text: str, language: str, key: str) -> list[Token]:
-    """Where ``key`` appears as a token in code: outside strings and comments, or as the whole content of
-    a string literal (a quoted key)."""
-    mask_re = PY_MASK if language == "python" else (jsparse.RUBY_MASK if language == "ruby" else jsparse.JS_MASK)
-    spans = phplex.mask_spans(text) if language == "php" else [(m.start(), m.end()) for m in mask_re.finditer(text)]
+    """Where ``key`` appears as a token in code: outside strings and comments (code inside an interpolation
+    hole counts, :mod:`strholes`), or as the whole content of a string literal (a quoted key)."""
+    spans = strholes.masked_spans(text, language)
     quoted = {a for a, b in spans if text[a] in "'\"" and text[a + 1 : b - 1] == key}
     out: list[Token] = []
     k = 0

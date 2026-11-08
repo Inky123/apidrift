@@ -447,7 +447,7 @@ def test_a_fix_whose_array_also_reaches_a_wrapper_is_refused(tmp_path):
 """
     plan = plan_for(tmp_path, {"inc/pay.php": src})
     assert plan.fixes == []
-    assert [u.why for u in plan.unfixable] == ["oracle_changed_other_calls"]
+    assert [u.why for u in plan.unfixable] == ["shared_literal"]  # the array also reaches the wrapper: refused before the oracle
 
 
 def test_a_fix_beside_a_wrapper_call_leaves_the_wrapper_call_alone(tmp_path):
