@@ -14,7 +14,7 @@ the request options, which are never read as parameters.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import phpdispatch, phpflow, phpinstance, phpvendor
 from .jsparse import Fields, Found, Span
@@ -84,6 +84,7 @@ class Parsed:
     bindings: Bindings
     calls: list[Call]
     unresolved: list[tuple[int, str]]
+    memo: dict = field(default_factory=dict)  # per-parse caches of the modules that read it (phpinstance)
 
 
 def extract(text: str, resolve) -> tuple[list[Found], list[tuple[int, str]]]:
