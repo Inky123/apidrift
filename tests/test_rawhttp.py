@@ -56,8 +56,15 @@ def one(text, rel, index):
 @pytest.mark.parametrize("rel,src,expected", [
     ("a.php", P + "$r = wp_remote_get('https://api.stripe.com/v1/tokens/' . $token_id, ['method' => 'GET']);\n",
      ("get", "/v1/tokens/{token}")),
+    # PMPro upgrade_1_8_9_1.php:79: the literal ends in "/" before the join; wp_remote_get names GET
     ("a.php", P + "$r = wp_remote_get('https://api.stripe.com/v1/subscriptions/' . $id);\n",
      ("get", "/v1/subscriptions/{subscription}")),
+    ("a.php", P + "wp_remote_request('https://api.stripe.com/v1/subscriptions/' . $id, ['method' => 'DELETE']);\n",
+     ("delete", "/v1/subscriptions/{subscription}")),
+    ("a.php", P + "wp_remote_post('https://api.stripe.com/v1/subscriptions/' . $id, array('method' => 'GET'));\n",
+     ("get", "/v1/subscriptions/{subscription}")),
+    ("a.php", P + "wp_remote_post('https://api.stripe.com/v1/subscriptions/' . $id, ['body' => $b]);\n",
+     ("post", "/v1/subscriptions/{subscription}")),
     ("a.go", 'package x\nfunc f() { http.NewRequest(http.MethodDelete, "https://api.stripe.com/v1/subscriptions/"+id, nil) }\n',
      ("delete", "/v1/subscriptions/{subscription}")),
     ("a.py", 'import stripe, requests\nrequests.post("https://api.stripe.com/v1/subscriptions/" + sid, data={})\n',
