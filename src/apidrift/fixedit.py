@@ -24,6 +24,7 @@ from .scanner import Usage
 from .sdkmap import SdkIndex
 
 BAD_HEAD = re.compile(r"-?\.?\d|(?:null|undefined|nil|true|false|NaN)\b")  # a number or keyword literal
+SHARED_LITERAL = "shared_literal"  # the parameters literal is also used elsewhere in its function: an edit reaches that use
 
 
 @dataclass
@@ -229,8 +230,27 @@ class Locator:
                 out.incomplete = True  # params.merge!(other), Object.assign(params, other)
         if any(t.key == head for t in c.bindings.touches(name, stop, at)):
             out.incomplete = True  # the key is read, deleted or changed in place: not a plain edit
-        if m.action != "rename" and c.bindings.escapes(name, at):
-            out.incomplete = True  # the literal is also used elsewhere: editing it would change that use too
+        if c.bindings.escapes(name, at, allowed=self._js_same_endpoint(c, name), key=head):
+            # The literal is also used elsewhere (aliased, returned, passed on, read, interpolated): editing it
+            # would change that use too. A rename is no exception: ``paymentLinks.create(q)`` still takes the old key.
+            out.why = out.why or SHARED_LITERAL
+
+    def _js_same_endpoint(self, c, name: str) -> set[int]:
+        """Where ``name`` is the whole argument of another call of ``c``'s endpoint in this file: a use the
+        oracle answers for (it checks every call's fields), so not an escape."""
+        resolved = getattr(c, "resolved", None)
+        out: set[int] = set()
+        if resolved is None:
+            return out
+        for other in self.js_calls:
+            if other is c or (other.resolved.path, other.resolved.method) != (resolved.path, resolved.method):
+                continue
+            text = other.args_src.text
+            for a, b in other.spans:
+                i = other.args_src.skip_space(a)
+                if text[i:b].strip() == name:
+                    out.add(i)
+        return out
 
     # --- Python -----------------------------------------------------------------
 
@@ -291,8 +311,23 @@ class Locator:
                 out.incomplete = True  # params.update(other), params.pop(...)
         if segs[0] in c.scopes.touched_keys(name, scope, stop, c.node.lineno):
             out.incomplete = True  # params['k'].append(x), del params['k'], params.get('k')
-        if m.action != "rename" and c.scopes.escapes(name, scope, value):
-            out.incomplete = True  # the dict is also used elsewhere: editing it would change that use too
+        if c.scopes.escapes(name, scope, value, allowed=self._py_same_endpoint(c, name), key=segs[0]):
+            out.why = out.why or SHARED_LITERAL  # the dict is also used elsewhere: editing it would change that use too
+
+    def _py_same_endpoint(self, c, name: str) -> list[ast.expr]:
+        """The ``**name`` / ``params=name`` values of other calls of ``c``'s endpoint: uses the oracle answers for."""
+        resolved = getattr(c, "resolved", None)
+        out: list[ast.expr] = []
+        if resolved is None:
+            return out
+        for other in self.py_calls:
+            if other is c or (other.resolved.path, other.resolved.method) != (resolved.path, resolved.method):
+                continue
+            out += [
+                kw.value for kw in other.node.keywords
+                if (kw.arg is None or kw.arg == "params") and isinstance(kw.value, ast.Name) and kw.value.id == name
+            ]
+        return out
 
     def _py_walk(self, node: ast.expr, segs: list[str], m: Migration, out: Sites) -> None:
         """Entries named ``segs[0]`` in a dict literal, ``dict(...)`` or the SDK call's keywords; deeper

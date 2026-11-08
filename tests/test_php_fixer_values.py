@@ -72,7 +72,7 @@ def test_delete_next_to_a_spread_is_done_and_reported_as_possibly_still_sent(tmp
 
 @pytest.mark.parametrize("body,why", [
     (f"{PM}($id, ['payto' => ['pay_id' => 'a']]);\n", "would_empty_literal"),
-    (f"function f($id) {{\n  $p = ['payto' => ['pay_id' => 'a'], 'metadata' => []];\n  {PM}($id, $p);\n  audit($p);\n}}\n", "incomplete_binding"),
+    (f"function f($id) {{\n  $p = ['payto' => ['pay_id' => 'a'], 'metadata' => []];\n  {PM}($id, $p);\n  audit($p);\n}}\n", "shared_literal"),
     (f"function f($id) {{\n  $p = ['metadata' => []];\n  $p['payto'] = ['pay_id' => 'a'];\n  return {PM}($id, $p);\n}}\n", "incomplete_binding"),
     (f"function f($id, $o) {{\n  return {PM}($id, array_merge(['payto' => 1, 'metadata' => []], $o));\n}}\n", "incomplete_binding"),
     (f"function f($id) {{\n  return {PM}($id, ['payto' => <<<X\n  a\n  X, 'metadata' => []]);\n}}\n", "unbounded"),

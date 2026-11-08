@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 
 if TYPE_CHECKING:
     from .jsparse import Mask, Source
+    from .strholes import Holes
 
 NAME = r"[A-Za-z_$][\w$]*"
 TYPE_ANN = r"(?:[ \t]*:[ \t]*[\w.<>\[\]|, ]+?)?"  # a type annotation never crosses a newline (``default:`` is a label)
@@ -67,6 +68,10 @@ class Mutation:
 
 KEY_AFTER = re.compile(r"[ \t]*(?::(?!:)|=>)")
 RUBY_WINDOW = re.compile(r"^[ \t]*(def|do|get|post|put|delete|patch)\b", re.M)
+DECLARED = re.compile(r"(?<![\w$])(?:const|let|var)\s+$")
+# ``.k`` / ``?.k`` not called, or ``['k']``: the value of one key, read (group 1 or 3 is the key)
+JS_KEY_READ = re.compile(rf"\s*\??\.\s*({NAME})(?![\w$]|\s*\()|\s*\[\s*(['\"])([\w$]+)\2\s*\]")
+RUBY_KEY_READ = re.compile(r"\s*\[\s*(?::([A-Za-z_]\w*)|(['\"])([A-Za-z_]\w*)\2)\s*\]")
 
 
 class Scopes:
@@ -122,6 +127,7 @@ class Bindings:
 
     def __init__(self, src: Source, mask: Mask, scopes: Scopes) -> None:
         self.src, self.mask, self.scopes = src, mask, scopes
+        self._text_only: Holes | None = None  # the mask with interpolation holes cut out (built on first use)
         self.by_name: dict[str, list[Binding]] = {}
         for m in ASSIGN.finditer(src.text):
             if mask.covers(m.start()):
@@ -152,14 +158,27 @@ class Bindings:
         """Reads, in-place operations and deletes of a key through ``name`` (``params.k.push(x)``,
         ``delete params.k``, ``opts[:k] << x``): anything but a plain ``name.k = value`` write."""
         out: list[Mutation] = []
-        for m in self._in_function(_touch_re(name), after, before):
+        for m in self._in_function(_touch_re(name), after, before, holes=True):
             group = next(g for g in ("attr", "key", "sym") if m.group(g))
             out.append(Mutation(m.group(group), None, m.start(), m.end(), m.start(group), m.end(group)))
         return out
 
-    def escapes(self, name: str, at: int) -> bool:
+    def hidden(self, pos: int) -> bool:
+        """``pos`` is string text or a comment. Code inside an interpolation hole (```${p.k}```, ``"#{p[:k]}"``)
+        is not hidden: a read there is a read (:mod:`strholes`)."""
+        if self._text_only is None:
+            from .strholes import Holes
+
+            self._text_only = Holes(self.src.text, "ruby" if self.src.ruby else "javascript")
+        return self._text_only.covers(pos)
+
+    def escapes(self, name: str, at: int, *, allowed: Iterable[int] = (), key: str | None = None) -> bool:
         """``name`` is used in its scope other than by its own assignments, the writes into it, and the use
-        at ``at`` (returned, passed on, spread, read, aliased): an edit to its literal would reach that use too."""
+        at ``at`` (returned, passed on, spread, read, aliased, interpolated): an edit to its literal would
+        reach that use too. ``allowed`` are further uses the caller answers for (the same variable passed to
+        another call of the same endpoint: the oracle checks that call's fields). With ``key``, a read of
+        another literal key (``p.amount``, ``p['amount']``, ``p[:amount]``, never a call) is not an escape:
+        the edit touches one entry and cannot reach the value of another."""
         text, ruby = self.src.text, self.src.ruby
         if ruby:
             lo = self._ruby_window(at)[0]
@@ -169,28 +188,35 @@ class Bindings:
             real = [b.pos for b in self.reaching(name, at) if b.value >= 0]
             fn = self.scopes.innermost(min(real) if real else at)
             lo, hi = (fn[0], fn[1]) if fn else (0, self.src.n)
-        allowed = {b.pos for b in self.by_name.get(name, ())} | {at}
-        writes = [(m.start(), m.end()) for m in _mutation_re(name).finditer(text, lo, hi) if not self.mask.covers(m.start())]
+        allowed = {b.pos for b in self.by_name.get(name, ())} | {at} | set(allowed)
+        writes = [(m.start(), m.end()) for m in _mutation_re(name).finditer(text, lo, hi) if not self.hidden(m.start())]
+        read = RUBY_KEY_READ if ruby else JS_KEY_READ
         for m in re.compile(rf"(?<![\w$]){re.escape(name)}(?![\w$])").finditer(text, lo, hi):
             p = m.start()
-            if p in allowed or self.mask.covers(p) or any(a <= p < b for a, b in writes):
+            if p in allowed or self.hidden(p) or any(a <= p < b for a, b in writes):
                 continue
             before = text[max(lo, p - 3) : p]
             if before.endswith(".") and not before.endswith("...") or (ruby and before.endswith(":") and not before.endswith("::")):
                 continue  # another object's member, or a Ruby symbol
             if KEY_AFTER.match(text, m.end()) and text[lo:p].rstrip()[-1:] in ("{", ",", "("):
                 continue  # a key that happens to share the name
+            if not ruby and DECLARED.search(text, max(lo, p - 12), p):
+                continue  # ``let p;`` / ``let p: T;``: a declaration, assigned later
+            if key is not None and (got := read.match(text, m.end())) and (got.group(1) or got.group(3)) != key:
+                continue  # a read of another key
             return True
         return False
 
-    def _in_function(self, pattern: re.Pattern[str], after: int, before: int):
+    def _in_function(self, pattern: re.Pattern[str], after: int, before: int, *, holes: bool = False):
         """Matches between ``after`` and ``before`` outside strings, in the same innermost function as ``before``
-        (Ruby: inside the call's window)."""
+        (Ruby: inside the call's window). With ``holes``, code inside interpolation holes counts (the fixer's
+        read check); the scanner's write check keeps the plain mask."""
         if self.src.ruby:
             after = max(after, self._ruby_window(before)[0])
         fn = self.scopes.innermost(before)
+        covered = self.hidden if holes else self.mask.covers
         for m in pattern.finditer(self.src.text, after, before):
-            if not self.mask.covers(m.start()) and self.scopes.innermost(m.start()) == fn:
+            if not covered(m.start()) and self.scopes.innermost(m.start()) == fn:
                 yield m
 
     def reaching(self, name: str, at: int) -> list[Binding]:

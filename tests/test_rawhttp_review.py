@@ -182,7 +182,7 @@ def test_a_fix_whose_array_feeds_another_files_wrapper_is_refused(tmp_path):
 }
 """
     plan = plan_for(tmp_path, {"inc/api.php": API, "inc/pay.php": use})
-    assert plan.fixes == [] and [(u.file, u.why) for u in plan.unfixable] == [("inc/pay.php", "oracle_changed_other_calls")]
+    assert plan.fixes == [] and [(u.file, u.why) for u in plan.unfixable] == [("inc/pay.php", "shared_literal")]
     assert (tmp_path / "inc/pay.php").read_text() == use
 
 

@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 
 from . import fixhelpers, fixvalue, phpflow, phpparse
-from .fixedit import Sites, _checked
+from .fixedit import SHARED_LITERAL, Sites, _checked
 from .fixvalue import UNSUPPORTED, Container, Entry
 from .jsparse import Fields, Span
 from .migrations import Migration
@@ -261,8 +261,26 @@ class Locator:
                 out.incomplete = True  # $params[] = ..., $params[$k] = ..., $params += $more
         if head in bindings.touches(name, stop, at):
             out.incomplete = True  # the key is read, appended to or changed in place: not a plain edit
-        if m.action != "rename" and bindings.escapes(name, at):
-            out.incomplete = True  # the array is also used elsewhere: editing it would change that use too
+        if bindings.escapes(name, at, allowed=self._same_endpoint(at, name), key=head):
+            out.why = out.why or SHARED_LITERAL  # the array is also used elsewhere: editing it would change that use too
+
+    def _same_endpoint(self, at: int, name: str) -> set[int]:
+        """Where ``$name`` is the whole parameters argument of another call of the endpoint called at ``at``:
+        uses the oracle answers for (it checks every call's fields), so not escapes."""
+        src, text = self.src, self.src.text
+        mine = next((c for c in self.parsed.calls if c.params is not None and src.skip_space(c.spans[c.params][0]) == at), None)
+        out: set[int] = set()
+        if mine is None:
+            return out
+        for other in self.parsed.calls:
+            if other is mine or other.params is None or (other.resolved.path, other.resolved.method) != (mine.resolved.path, mine.resolved.method):
+                continue
+            a, b = other.spans[other.params]
+            i = src.skip_space(a)
+            m = BARE_VARIABLE.match(text, i)
+            if m and m.group(1) == name and src.skip_space(m.end()) >= b:
+                out.add(i)
+        return out
 
 
 def _string(v: str) -> str | None:

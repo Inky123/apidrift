@@ -139,7 +139,7 @@ def test_a_read_after_the_call_is_a_blocking_leftover(tmp_path):
         "  const intent = await stripe.paymentIntents.create(params);\n"
         "  log(params.payment_method_types);\n"
         "}\n")})
-    assert unfixable_why(plan) == [(4, "leftover_tokens")] and plan.leftovers == [("pay.js", 5)]
+    assert unfixable_why(plan) == [(4, "shared_literal")] and plan.leftovers == []  # the read is an escape: refused before the oracle
 
 
 def test_a_rebinding_after_the_call_inside_a_loop_makes_the_site_unfixable(tmp_path):

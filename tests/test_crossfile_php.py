@@ -238,7 +238,7 @@ def test_a_key_the_caller_writes_by_statement_is_renamed_there(tmp_path):
 ])
 def test_a_later_use_the_literal_reaches_refuses(tmp_path, label, old, new):
     plan = plan_for(tmp_path, {"Driver.php": DRIVER, "Card.php": WRITES.replace(old, new)})
-    assert plan.fixes == [] and [u.why for u in plan.unfixable] == ["helper_shared"]
+    assert plan.fixes == [] and [u.why for u in plan.unfixable] == ["shared_literal"]
 
 
 def test_a_merge_into_the_callers_local_is_not_visible(tmp_path):

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Iterable
 
 from . import pyreach
 from .pyimports import import_aliases as _import_aliases
@@ -301,21 +301,15 @@ class _PyScopes:
         """Keys read, deleted or operated on in place through ``name`` on lines in ``(after, before)``."""
         return {k for line, k in self.touches[scope].get(name, ()) if after < line < before}
 
-    def escapes(self, name: str, scope: ast.AST | None, arg: ast.AST) -> bool:
-        """``name`` is read in ``scope`` other than as ``arg`` (the use at the call) or as the target of a write
-        into it (``p['k'] = v``, ``del p['k']``, ``p.update(...)``): returned, passed on, spread, aliased."""
-        for node in ast.walk(scope if scope is not None else self.tree):
-            if not isinstance(node, ast.Name) or node.id != name or node is arg or not isinstance(node.ctx, ast.Load):
-                continue
-            parent = self.parents.get(node)
-            if isinstance(parent, (ast.Subscript, ast.Attribute)) and parent.value is node:
-                if isinstance(parent.ctx, (ast.Store, ast.Del)):
-                    continue
-                call = self.parents.get(parent)
-                if isinstance(parent, ast.Attribute) and isinstance(call, ast.Call) and call.func is parent and parent.attr in DICT_MUTATORS:
-                    continue
-            return True
-        return False
+    def escapes(
+        self, name: str, scope: ast.AST | None, arg: ast.AST, *, allowed: Iterable[ast.AST] = (), key: str | None = None
+    ) -> bool:
+        """``name`` is read in ``scope`` other than as ``arg`` (the use at the call), as the target of a write
+        into it, as a use in ``allowed`` (the caller answers for it) or, given ``key``, as a read of another
+        key: returned, passed on, spread, aliased, interpolated (:mod:`pyescape`)."""
+        from .pyescape import escapes  # the fixer's read check, kept out of the reader
+
+        return escapes(self, name, scope, arg, allowed, key)
 
     def _ancestors(self, node: ast.AST) -> list[ast.AST]:
         out: list[ast.AST] = []

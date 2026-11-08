@@ -19,7 +19,7 @@ from pathlib import Path
 from . import fixhelpers, fixreads, fixscope, fixsdk, fixtestedit, fixtests, gofix, goowned, migrations
 from . import phpfix, phplex, phpvendor
 from .diff import BREAKING, Change
-from .fixedit import Edit, Locator, apply
+from .fixedit import SHARED_LITERAL, Edit, Locator, apply
 from .fixpins import Pin, find_pins
 from .fixtokens import accessed, app_names, tokens
 from .fixvalue import leaf
@@ -33,7 +33,7 @@ WHY = (
     "nested", "not_found", "incomplete_binding", "unsupported_key_form", "oracle_changed_other_calls",
     "oracle_finding_remains", "oracle_new_finding", "leftover_tokens", "not_utf8", "too_large", "cap",
     "nested_array", "unsupported_value", "would_empty_literal", "syntax", "unbounded", "in_string",
-    gofix.NO_REWRITE, *fixhelpers.REASONS,
+    SHARED_LITERAL, gofix.NO_REWRITE, *fixhelpers.REASONS,
 )
 NOT_VISIBLE = "arguments are not fully visible at this call"  # impact.py's reason at an incomplete call
 IN_STRING = "in_string"

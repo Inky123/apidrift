@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Iterable
 
 from .phplex import STRING, Lex
 
@@ -135,6 +136,7 @@ class Bindings:
         self.by_name: dict[str, list[Binding]] = {}
         self.uses: dict[str, list[Use]] = {}
         self._loops: list[tuple[int, int]] | None = None
+        self._holes = None  # string text with interpolation holes cut out, for ``escapes`` (built on first use)
         self._scope: dict[int, tuple | None] = {}  # occurrence -> the function body it is in
         text = src.text
         for m in VAR.finditer(src.code):
@@ -335,13 +337,39 @@ class Bindings:
             if after < u.pos < before and u.key is not None and (u.kind == INPLACE or (u.kind == WRITE and not u.plain))
         }
 
-    def escapes(self, name: str, at: int) -> bool:
+    def escapes(self, name: str, at: int, *, allowed: Iterable[int] = (), key: str | None = None) -> bool:
         """``name`` is used in its scope other than by its assignments, the writes into it and the use at
-        ``at`` (returned, passed on, captured, read by ``compact``): an edit to its literal reaches that use."""
+        ``at`` (returned, passed on, captured, interpolated, read by ``compact``): an edit to its literal
+        reaches that use. Not an escape: a use in ``allowed`` (the same array passed to another call of the
+        same endpoint, which the oracle checks), a read of another key when ``key`` is given
+        (``$p['amount']``), and a use that only a different, known binding of ``name`` reaches."""
         lo, hi = self.scopes.extent(at)
         if READS_ALL.search(self.src.code, lo, hi):
             return True
-        return any(u.pos != at and u.kind in (USED, INPLACE, OPAQUE) for u in self._in_scope(name, at))
+        ours = {b.pos for b in self.reaching(name, at)}
+        for u in self._in_scope(name, at):
+            if u.pos == at or u.pos in allowed or u.kind not in (USED, INPLACE, OPAQUE):
+                continue
+            if u.kind == OPAQUE:
+                return True
+            if u.kind == INPLACE and u.key is not None and key is not None and u.key != key:
+                continue
+            if any(b.value < 0 or b.pos in ours for b in self.reaching(name, u.pos)):
+                return True
+        return self._interpolated(name, lo, hi)
+
+    def _interpolated(self, name: str, lo: int, hi: int) -> bool:
+        """``$name`` read inside a double-quoted string, backtick string or heredoc between ``lo`` and ``hi``
+        (``"{$p['k']}"``, ``"$p[k]"``, ``"${p}"``): a use the blanked ``code`` never shows (:mod:`strholes`)."""
+        if self._holes is None:
+            from .strholes import Holes
+
+            self._holes = Holes(self.src.text, "php", self.src)
+        pattern = re.compile(rf"\$\{{?\s*({re.escape(name)})(?!\w)")  # ``$p`` or ``${p}``
+        return any(
+            self.src.masked(m.start(1)) and not self._holes.covers(m.start(1))
+            for m in pattern.finditer(self.src.text, lo, hi)
+        )
 
     def dynamic(self, name: str, at: int) -> bool:
         """The scope of the call at ``at`` reads all its variables by name (``compact``), or can change them

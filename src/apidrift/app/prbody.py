@@ -24,6 +24,8 @@ UNFIXABLE_WHY = {
     "would_empty_literal": "removing the field would leave the parameters empty, which apidrift leaves for a person to tidy",
     "not_found": "apidrift could not locate the key in the source text",
     "incomplete_binding": "the request parameters are built in code apidrift could not follow to a literal",
+    "shared_literal": "the parameters are also used for something other than this Stripe call (copied, returned, "
+    "passed on or read), so changing them here would change that use too",
     "oracle_changed_other_calls": "the rewrite would have changed another Stripe call in the same file",
     "oracle_finding_remains": "the rewrite did not clear the finding at this site",
     "oracle_new_finding": "the rewrite would have introduced a new finding",

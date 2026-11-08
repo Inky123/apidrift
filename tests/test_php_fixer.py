@@ -115,7 +115,7 @@ def test_one_binding_feeding_two_calls_of_the_same_endpoint_is_one_edit_and_two_
 REFUSED = {
     "one binding feeding another endpoint too": (
         f"function f() {{\n  $p = ['amount' => 1, '{OLD}' => ['card']];\n  {PI}($p);\n  \\Stripe\\Charge::create($p);\n}}\n",
-        "oracle_changed_other_calls"),
+        "shared_literal"),
     "array_merge around the literal": (f"function f($o) {{\n  return {PI}(array_merge(['{OLD}' => ['card']], $o));\n}}\n", "incomplete_binding"),
     "a union with more parameters": (f"function f($o) {{\n  return {PI}(['{OLD}' => ['card']] + $o);\n}}\n", "incomplete_binding"),
     "the key appended to after the literal":
