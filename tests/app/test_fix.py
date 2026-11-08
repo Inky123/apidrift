@@ -158,7 +158,7 @@ def test_opens_a_pull_request_from_a_branch_on_the_base_commit(scan, installed, 
         "**Merge together with your upgrade**", f"blob/{SHA}/server.py#L2 pins `2023-10-16`",
         f"Verified: apidrift re-scanned the changed files; 1 call site now sends what Stripe {NEW_VERSION} expects; "
         "every other Stripe call is unchanged.",
-        "on your current pinned version Stripe rejects the new shape.",
+        f"Stripe changed these fields in {NEW_VERSION}, so an older pinned version may not accept the new names; check it, or upgrade.",
         f"blob/{SHA}/server.py#L2 pins `2023-10-16`", "These files pin an API version that predates this change;",
         "**Left for you**", prbody.UNFIXABLE_WHY["incomplete_binding"], f"blob/{SHA}/server.rb#L7",
         f"Still mentions the old name at https://github.com/octo/shop/blob/{SHA}/server.js#L30", "Addresses #1",

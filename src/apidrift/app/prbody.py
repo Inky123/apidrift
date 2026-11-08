@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 
 from .. import fixsdk, migrations
-from . import fixcheck
+from . import fixcheck, prpins
 from .issue import FIELD_PATH_RE, METHOD_RE, VERSION_RE, code, escape, permalink, unread_note
 
 PR_MARKER_RE = re.compile(r"<!-- apidrift:pr=([0-9a-f]{64}) -->")
@@ -183,11 +183,8 @@ def render_pr(
     placed = {(f, ln, k[0]) for k, places in groups.items() for f, ln in places}
     possibly = _possibly_remaining(payload, placed)
     deletes_only = bool(groups) and all(action == "delete" for _, _, action, _ in groups)
-    if deletes_only:  # a field Stripe never acted on can be dropped on any API version
-        lede = "Removing these fields is safe on your current API version too, so this can merge any time."
-    else:
-        lede = ("Merge this together with your API-version and SDK upgrade; on your current pinned version Stripe "
-                "rejects the new shape.")
+    introduced = _introduced(groups, version)
+    lede = prpins.lede({action for _, _, action, _ in groups}, safe_version(introduced))
     lines = [f"Ready for Stripe {safe_version(version)}. {lede}"]
     if not deletes_only and any(str(fix.get("file")).endswith(".go") for fix in fixes):
         lines += ["", GO_NOTE]
@@ -223,6 +220,13 @@ def render_pr(
     lines += ["", f"Addresses #{issue_number}", pr_marker(fingerprint)]
     keys = {(action, old) for _, old, action, _ in groups}
     return pr_title(version, keys, len(placed)), "\n".join(lines) + "\n"
+
+
+def _introduced(groups: dict[tuple[str, str, str, str], list[tuple[str, int]]], version: str) -> str:
+    """The earliest release (from the parent's table) that changed a non-delete field here; else ``version``."""
+    found = [m.introduced for (path, old, action, new) in groups if action != "delete"
+             and (m := _migration(path, old, action, new)) is not None]
+    return min(found) if found else version
 
 
 def _pins(payload: dict, full_name: str, sha: str, deletes_only: bool) -> list[str]:

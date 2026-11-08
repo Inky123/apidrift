@@ -125,7 +125,7 @@ def test_each_action_has_its_own_heading_and_the_tables_note():
         assert prbody._note(_note(base)) in body
     assert f"[Changelog]({migrations.PAYTO_DOC})" in body and f"[Changelog]({migrations.ANCHOR_DOC})" in body
     assert "child note" not in body and "https://evil" not in body  # the child's migrations list is ignored
-    assert "Stripe rejects the new shape." in body
+    assert "so an older pinned version may not accept the new names; check it, or upgrade. The fields that become an object are rejected on your current pinned version." in body
     assert f"5 call sites now send what Stripe {ENDIVE} expects; every other Stripe call is unchanged." in body
 
 
