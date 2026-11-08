@@ -131,3 +131,19 @@ def test_a_ruby_hash_or_keywords_holding_id_pass_the_id(index):
         "GET /v1/accounts/{account}", "GET /v1/account", "GET /v1/accounts/{account}", "GET /v1/account",
         "GET /v1/account",
     ]
+
+
+def test_a_python_keyword_named_like_the_path_id_passes_the_id(index):
+    text = (
+        "import stripe\n"
+        "client = stripe.StripeClient(\"sk\")\n"
+        "client.v1.accounts.retrieve(account=acct_id)\n"
+        "client.v1.accounts.retrieve(params={\"expand\": [\"x\"]})\n"
+        "client.v1.financial_connections.accounts.retrieve(account=fca_id)\n"
+        "stripe.Account.retrieve(id=acct_id)\n"
+        "stripe.Account.retrieve(stripe_account=acct_id)\n"
+    )
+    assert [label for _, label in found(index, text, "a.py")[0]] == [
+        "GET /v1/accounts/{account}", "GET /v1/account", "GET /v1/financial_connections/accounts/{account}",
+        "GET /v1/accounts/{account}", "GET /v1/account",
+    ]

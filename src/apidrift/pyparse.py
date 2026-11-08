@@ -79,17 +79,19 @@ def calls(text: str, resolve: Callable[[list[str]], Resolved | None]) -> tuple[l
         if resolved is None:
             unresolved.append((node.lineno, call))
             continue
-        if _no_id(node):  # stripe.Account.retrieve() is GET /v1/account
+        if _no_id(node, resolved.path):  # stripe.Account.retrieve() is GET /v1/account
             resolved = without_id(resolve, resolved)
         found.append(PyCall(node, fn, call, resolved, scopes))
     return found, unresolved
 
 
-def _no_id(node: ast.Call) -> bool:
-    """The call passes no id: no positional argument (or ``None``), no ``id=`` and no ``**kwargs``."""
+def _no_id(node: ast.Call, path: str) -> bool:
+    """The call passes no id: no positional argument (or ``None``), no ``**kwargs``, and no ``id=`` or keyword
+    named like the path's id (StripeClient services: ``accounts.retrieve(account=...)``)."""
     if node.args:
         return isinstance(node.args[0], ast.Constant) and node.args[0].value is None
-    return all(k.arg not in (None, "id") for k in node.keywords)
+    ids = {None, "id", *(part[1:-1] for part in path.split("/") if part.startswith("{"))}
+    return all(k.arg not in ids for k in node.keywords)
 
 
 def stripe_like(chain: list[str]) -> bool:
