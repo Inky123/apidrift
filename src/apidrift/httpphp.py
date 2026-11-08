@@ -16,7 +16,7 @@ from typing import NamedTuple
 from . import httpphpbody, httpphppath, httpurl, httpwrap, phpfilters, phpparse
 from .httpphpbody import Writes, _writes
 from .jsparse import Fields
-from .phplex import STRING, Lex
+from .phplex import STRING, lex
 
 FUNC = re.compile(r"(?<![\w$>:\\])function\s*(?:&\s*)?([A-Za-z_]\w*)\s*\(")
 CLASS = re.compile(r"(?<![\w$>:\\])(?:class|trait)\s+([A-Za-z_]\w*)[^{;]*?\{")
@@ -56,7 +56,7 @@ class Func:
 class File:
     def __init__(self, text: str) -> None:
         self.text = text
-        self.src = src = Lex(text)
+        self.src = src = lex(text)
         self.code = src.code
         ns = NAMESPACE.search(self.code)
         self.namespace = ns.group(1).strip("\\") if ns else ""

@@ -14,6 +14,7 @@ span and every bracket pair outside itself exactly where it was.
 from __future__ import annotations
 
 import bisect
+import functools
 import re
 
 OPEN_TAG = re.compile(r"<\?(?:php(?=\s|$)|=)", re.I)
@@ -264,17 +265,25 @@ class Lex:
         return m.end() - 1 if m and (m.end() - 1) in self.pairs else None
 
 
+@functools.lru_cache(maxsize=16)
+def lex(text: str, fragment: bool = False) -> Lex:
+    """:class:`Lex` of ``text``, the last few kept: the readers, the wrapper surveys, the cross-file passes
+    and the fixer's oracle each read the same file, and a Lex is a pure function of its text that nothing
+    writes to after construction."""
+    return Lex(text, fragment=fragment)
+
+
 def mask_spans(text: str) -> list[tuple[int, int]]:
     """Strings, heredocs, comments and inline HTML of a PHP file, for the fixer's token count. Text with no
     open tag is the replacement text of an edit, which is code."""
-    return [(a, b) for a, b, _ in Lex(text, fragment=OPEN_TAG.search(text) is None).spans]
+    return [(a, b) for a, b, _ in lex(text, OPEN_TAG.search(text) is None).spans]
 
 
 def same_structure(before: str, after: str, edits) -> bool:
     """Both texts read cleanly, and the edits changed nothing about how the rest of the file is read: every
     opaque span and bracket pair that lies outside the edits is found again at its shifted place, and
     anything new sits wholly inside the text an edit wrote. There is no ``php -l`` to ask."""
-    a, b = Lex(before), Lex(after)
+    a, b = lex(before), lex(after)
     if not (a.balanced and b.balanced) or a.uncertain or b.uncertain:
         return False
     ranges = sorted({(e.start, e.end, len(e.text)) for e in edits})

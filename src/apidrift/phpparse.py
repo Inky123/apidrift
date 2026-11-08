@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from . import phpdispatch, phpflow, phpinstance, phpvendor
 from .jsparse import Fields, Found, Span
-from .phplex import OPENERS, STRING, Lex
+from .phplex import OPENERS, STRING, Lex, lex
 from .phpscope import WRITE, Bindings, Scopes
 from .sdkmap import Resolved, without_id
 
@@ -113,7 +113,7 @@ def extract(text: str, resolve, table=None, rel: str = "") -> tuple[list[Found],
 
 
 def parse(text: str, resolve) -> Parsed:
-    src = Lex(text)
+    src = lex(text)
     scopes = Scopes(src)
     parsed = Parsed(src, scopes, Bindings(src, scopes), [], [])
     uses = _uses(src)

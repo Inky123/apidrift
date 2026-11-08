@@ -31,7 +31,7 @@ import re
 from dataclasses import dataclass, field
 
 from . import phpinstance, phpvendor
-from .phplex import STRING, Lex
+from .phplex import STRING, Lex, lex
 from .phpscope import BIND, OPAQUE, WRITE, Bindings, Scopes
 
 NAMED_FUNC = re.compile(r"(?<![\w$>:\\])function\s*&?\s*([A-Za-z_]\w*)\s*\(")
@@ -208,7 +208,7 @@ def _definitions(key: tuple, paths) -> int:
         raw = _read(path)
         if raw is None or short.encode() not in raw.lower():
             continue
-        src = Lex(raw.decode("utf-8", errors="replace"))
+        src = lex(raw.decode("utf-8", errors="replace"))
         if key[0] == "func":
             count += sum(1 for m in NAMED_FUNC.finditer(src.code) if m.group(1).lower() == short)
         else:
@@ -222,7 +222,7 @@ def _definitions(key: tuple, paths) -> int:
 def _functions(text: str) -> list[_Fn]:
     from .phpparse import _uses  # phpparse builds on this module
 
-    src = Lex(text)
+    src = lex(text)
     if not src.balanced or src.uncertain:
         return []
     scopes = Scopes(src)
