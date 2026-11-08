@@ -173,11 +173,22 @@ def test_save_sends_the_properties_assigned_before_it(index):
     ("helper($s);", [], False),  # passed on
     ("$s->updateAttributes(['metadata' => []]);", [], False),  # a method of the object
     ("$s['default_payment_method'] = 'x';", [], False),  # ArrayAccess
+    ("$this->sub = $s;", [], False),  # stored where another method can reach it
+    ("$this->fill();", [], False),  # a method of $this may set values through a property
+    ("$vars = compact('s');", [], False),
+    ("$alias = $s; $alias->metadata = [];", [], False),
 ])
 def test_save_hides_what_it_cannot_follow(index, between, fields, complete):
     text = f"function f($id) {{\n  $s = \\Stripe\\Subscription::retrieve($id);\n  {between}\n  $s->save();\n}}\n"
     found = read(text, index)
     assert [(f, c) for _, label, call, f, c in found if call == "$s->save"] == [(fields, complete)]
+
+
+def test_save_on_an_object_made_elsewhere_hides_what_its_maker_set(index):
+    text = "function f(\\Stripe\\Subscription $s, $pm) {\n  $s->default_payment_method = $pm;\n  $s->save();\n}\n"
+    assert [(f, c) for _, _, call, f, c in read(text, index) if call == "$s->save"] == [(["default_payment_method"], False)]
+    text = "function f(\\Stripe\\Subscription $s) {\n  $s->save();\n}\n"
+    assert [(f, c) for _, _, call, f, c in read(text, index) if call == "$s->save"] == [([], False)]
 
 
 def test_save_with_nothing_assigned_sends_no_request_and_is_not_listed(index):

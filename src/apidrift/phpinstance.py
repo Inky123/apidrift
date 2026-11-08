@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 
 from .jsparse import Fields
-from .phpscope import BIND, OPAQUE
+from .phpscope import BIND, OPAQUE, READS_ALL
 
 Owner = tuple[str, ...]  # an object's collection path below /v1: ("payment_intents",), ("checkout", "sessions")
 
@@ -31,6 +31,7 @@ STATIC_ONLY = RETURNS_RESOURCE | {"list", "all", "search", "constructFrom"}
 INSTANCE_STANDARD = {"save": ("update", "post"), "delete": ("delete", "delete"), "refresh": ("retrieve", "get")}
 COLLECTION_VERBS = {"create": "create", "all": "list", "retrieve": "retrieve"}
 PARAM = r"^\s*(?:(?:public|private|protected|readonly)\s+)*\??(\\?[A-Za-z_][\w\\]*)\s+\${}\s*(?:=|$)"
+THIS_CALL = re.compile(r"\$this\s*->\s*[A-Za-z_]\w*\s*\(")
 PROPERTY = re.compile(r"\s*->\s*([A-Za-z_]\w*)")
 OP_ASSIGN = re.compile(r"(?:\*\*|<<|>>|\?\?|[-+*/.%&|^])=|\+\+|--")
 CLIENT_WORDS = {"stripe", "client", "api", "sdk", "get", "service", "instance", "default", "new", "make", "the", "my", "app"}
@@ -165,8 +166,13 @@ def saved_fields(parsed, name: str, start: int, at: int, out: Fields) -> None:
 
     src, text, bindings = parsed.src, parsed.src.text, parsed.bindings
     body = parsed.scopes.innermost(at)
+    lo, hi = parsed.scopes.extent(at)
     if bindings._same_loop(at, at):
         out.hide("")  # values assigned after the call reach it on the next pass
+    if not any(bindings._scope[b.pos] == body and b.pos < at for b in bindings.by_name.get(name, ())):
+        out.hide("")  # not made here (a parameter): whoever made it may have set values that save() sends too
+    if READS_ALL.search(src.code, lo, hi) or THIS_CALL.search(src.code, start, at):
+        out.hide("")  # ``compact()``, or a method of ``$this`` that may reach the object through a property
     for u in bindings.uses.get(name, ()):
         if bindings._scope[u.pos] != body or not start <= u.pos < at or u.kind == BIND:
             continue
