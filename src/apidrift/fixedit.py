@@ -239,6 +239,8 @@ class Locator:
         self._call = c
         self._py_walk(c.node, segs, m, out)
         for kw in c.node.keywords:
+            if kw.arg is None and c.scopes.options(kw.value):
+                continue  # **self.api_kwargs: request options only, as the scanner reads it (pyself)
             if kw.arg is None or kw.arg == "params":
                 if not ("[fields from " in usage.call and fixhelpers.py_sites(self, c, kw.value, segs, m, out)):
                     self._py_value(c, kw.value, segs, m, out)

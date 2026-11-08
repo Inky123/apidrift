@@ -9,6 +9,7 @@ HTTP stubs) those are tagged ``language="doc"`` and reported separately.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -16,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import goparse, httplit, httpurl, httpwrap, jsparse, phpparse, phpvendor, pyparse
+from . import goparse, httplit, httpurl, httpwrap, jsparse, phpparse, phpvendor, pyparse, pyrepo
 from .sdkmap import Resolved, SdkIndex
 
 SKIP_DIRS = {"node_modules", "vendor", "site-packages", "__pycache__"}  # skipped anywhere
@@ -179,6 +180,8 @@ def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> Scan
     unread: dict[str, int] = {}
     scanned = 0
     registry = httpwrap.Registry() if reader.scan_text is None and root.is_dir() else None  # raw-HTTP wrappers
+    if reader.scan_text is None:  # Python calls through self: the checkout's classes, read on demand (pyrepo)
+        read = functools.partial(scan_text, repo=pyrepo.Repo(base, files))
     for path in files:
         text = _read(path)
         if text is None:
@@ -204,9 +207,10 @@ def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> Scan
 
 
 def scan_text(
-    text: str, rel: str, index: SdkIndex, table=None
+    text: str, rel: str, index: SdkIndex, table=None, *, repo: pyrepo.Repo | None = None
 ) -> tuple[list[Usage], list[tuple[str, int, str]], str | None]:
-    """Usages and unresolved calls of one file's text at repo-relative path ``rel``, with no filesystem.
+    """Usages and unresolved calls of one file's text at repo-relative path ``rel``, with no filesystem
+    (``repo`` answers questions about the checkout's other Python files).
 
     The third item names the language when the file is in one the scanner cannot parse yet (else None).
     ``table`` carries what a whole-repo scan learnt about other files (:class:`httpwrap.Registry`).
@@ -217,7 +221,7 @@ def scan_text(
     found: list[Usage] = []
     unread_name: str | None = None
     if language == "python":
-        found, missing = _scan_python(text, rel, index, reads)
+        found, missing = _scan_python(text, rel, index, reads, repo=repo)
     elif language == "go":
         found, missing, unread_name = _scan_go(text, rel, index)
     elif language:
@@ -332,8 +336,8 @@ def _resolve(index: SdkIndex, chain: list[str]) -> Resolved | None:
 # --- Python -----------------------------------------------------------------
 
 
-def _scan_python(text: str, rel: str, index: SdkIndex, reads: frozenset[str]):
-    found, missing = pyparse.extract(text, lambda chain: _resolve(index, chain))
+def _scan_python(text: str, rel: str, index: SdkIndex, reads: frozenset[str], *, repo=None):
+    found, missing = pyparse.extract(text, lambda chain: _resolve(index, chain), repo=repo)
     usages = [
         Usage(rel, f.line, f.resolved.method, f.resolved.path, f.call, frozenset(f.fields), f.complete, "python", reads, f.hidden)
         for f in found

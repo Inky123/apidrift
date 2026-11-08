@@ -12,6 +12,7 @@ import ast
 from dataclasses import dataclass
 from typing import Callable
 
+from . import pyreach
 from .sdkmap import Resolved, without_id
 
 OPTION_KWARGS = {
@@ -42,40 +43,57 @@ class PyCall:
     scopes: "_PyScopes"
 
 
-def extract(text: str, resolve: Callable[[list[str]], Resolved | None]) -> tuple[list[PyFound], list[tuple[int, str]]]:
-    """Stripe SDK calls in a Python source, plus (line, call) pairs that matched no endpoint."""
+def extract(
+    text: str, resolve: Callable[[list[str]], Resolved | None], *, repo=None
+) -> tuple[list[PyFound], list[tuple[int, str]]]:
+    """Stripe SDK calls in a Python source, plus (line, call) pairs that matched no endpoint. ``repo`` (a
+    :class:`pyrepo.Repo`) lets calls and spreads through ``self`` be followed (:mod:`pyself`)."""
     from . import pyhelpers  # builds on this module
 
-    resolved_calls, unresolved = calls(text, resolve)
+    resolved_calls, unresolved = calls(text, resolve, repo=repo)
     found: list[PyFound] = []
     helpers =pyhelpers.PyHelpers(resolved_calls[0].scopes) if resolved_calls else None
     for c in resolved_calls:
         via = pyhelpers.Via(helpers, c)
-        fields, hidden = _py_fields(c.node, c.scopes.lookup(c.node.lineno, c.fn), via)
+        fields, hidden = _py_fields(c.node, c.scopes.lookup(c.node.lineno, c.fn, c.node), via)
         found.append(PyFound(c.node.lineno, c.call + via.suffix, c.resolved, fields, not hidden, frozenset(hidden)))
     return found, unresolved
 
 
-def calls(text: str, resolve: Callable[[list[str]], Resolved | None]) -> tuple[list[PyCall], list[tuple[int, str]]]:
+def calls(
+    text: str, resolve: Callable[[list[str]], Resolved | None], *, repo=None
+) -> tuple[list[PyCall], list[tuple[int, str]]]:
     """Resolved SDK calls (arguments not yet read), plus the (line, call) pairs that matched no endpoint."""
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError, ValueError):
+    from . import pyalias, pyself, pysyntax  # pyalias and pyself build on this module
+
+    tree = pysyntax.parse(text)
+    if tree is None:
         return [], []
     aliases = _import_aliases(tree)
     scopes = _PyScopes(tree)
+    binders = scopes.binders
+    scopes.options = lambda value: pyself.options_only(value, binders, scopes.parents, repo, OPTION_KWARGS)
     found: list[PyCall] = []
     unresolved: list[tuple[int, str]] = []
     for node, fn in scopes.calls:
         chain = _chain(node.func)
         if not chain:
             continue
+        call = ""
         if chain[0] in aliases:
             chain = aliases[chain[0]].split(".") + chain[1:]
+        else:
+            expanded = (
+                pyalias.expand(binders, node.func, chain, aliases) if chain[0] not in ("self", "cls") else pyself.expand(
+                    node.func, chain, binders, scopes.parents, aliases, repo,
+                    lambda ch, n=node: pyalias.resolve(ch, n, resolve) is not None)
+            )
+            if expanded is not None:
+                call, chain = ".".join(chain), expanded  # shown as written; resolved through the alias
         if not stripe_like(chain):
             continue
-        call = ".".join(chain)
-        resolved = resolve(chain)
+        call = call or ".".join(chain)
+        resolved = pyalias.resolve(chain, node, resolve)
         if resolved is None:
             unresolved.append((node.lineno, call))
             continue
@@ -126,6 +144,8 @@ class _PyScopes:
         self.touches: dict[ast.AST | None, dict[str, list[tuple[int, str]]]] = {None: {}}  # reads/deletes of a key
         self.calls: list[tuple[ast.Call, ast.AST | None]] = []
         self.tree = tree
+        self._binders = None
+        self.options: Callable[[ast.expr], bool] = lambda value: False  # set by calls(): **self.<request options>
         self._visit(tree, None)
 
     def _visit(self, node: ast.AST, fn: ast.AST | None) -> None:
@@ -192,8 +212,9 @@ class _PyScopes:
     def _touch(self, fn: ast.AST | None, name: str, line: int, key: str) -> None:
         self.touches[fn].setdefault(name, []).append((line, key))
 
-    def lookup(self, line: int, fn: ast.AST | None) -> "_PyLookup":
-        return _PyLookup(self, line, fn)
+    def lookup(self, line: int, fn: ast.AST | None, at: ast.AST | None = None) -> "_PyLookup":
+        """Dict literals names hold at ``line``; with ``at`` (the call), every binding that can reach it."""
+        return _PyLookup(self, line, fn, at)
 
     def reaching(self, name: str, call: ast.Call, fn: ast.AST | None) -> tuple[list[Binding], ast.AST | None, bool]:
         """Bindings of ``name`` that can be in force at ``call`` (nearest first), the scope they live in, and
@@ -211,6 +232,8 @@ class _PyScopes:
             if candidates or scope is None:
                 break
             scope = self.parent[scope]
+        if self.unmodelled(name, fn, scope):
+            return [], scope, False  # a loop / comprehension / with target (...) may be what the call sees
         enclosing = self._lists_enclosing(call)
         out: list[Binding] = []
         dominated = False
@@ -220,6 +243,24 @@ class _PyScopes:
                 dominated = True
                 break
         return out, scope, dominated
+
+    @property
+    def binders(self):
+        """Every binding form of every name, per real scope (:class:`pyalias.Binders`), built on first use."""
+        if self._binders is None:
+            from .pyalias import Binders  # pyalias builds on this module
+
+            self._binders = Binders(self.tree)
+        return self._binders
+
+    def unmodelled(self, name: str, fn: ast.AST | None, upto: ast.AST | None) -> bool:
+        """``name`` is bound in ``fn`` or a scope out to ``upto`` by a form not followed (:meth:`pyalias.Binders.unmodelled`)."""
+        chain, current = [], fn
+        while True:
+            chain.append(current if current is not None else self.tree)
+            if current is upto or current is None:
+                return self.binders.unmodelled(name, chain)
+            current = self.parent[current]
 
     def shadowed_by_parameter(self, name: str, fn: ast.AST | None, scope: ast.AST | None, dominated: bool) -> bool:
         """A function enclosing the call takes ``name`` as a parameter and no unconditional binding inside it
@@ -235,14 +276,18 @@ class _PyScopes:
 
     def rebound_in_loop(self, name: str, call: ast.Call, scope: ast.AST | None) -> bool:
         """``name`` is bound again after the call inside a loop that also holds the call."""
+        return bool(self.loop_rebindings(name, call, scope))
+
+    def loop_rebindings(self, name: str, call: ast.AST, scope: ast.AST | None) -> list[ast.expr]:
+        """Values ``name`` is bound to after the call inside a loop that also holds the call."""
         call_ancestors = self._ancestors(call)
-        for line, _, stmt in self.bindings[scope].get(name, ()):
-            if line <= call.lineno:
-                continue
-            for node in self._ancestors(stmt):
-                if isinstance(node, (ast.For, ast.AsyncFor, ast.While)) and node in call_ancestors:
-                    return True
-        return False
+        out: list[ast.expr] = []
+        for line, value, stmt in self.bindings[scope].get(name, ()):
+            if line > call.lineno and any(
+                isinstance(node, (ast.For, ast.AsyncFor, ast.While)) and node in call_ancestors for node in self._ancestors(stmt)
+            ):
+                out.append(value)
+        return out
 
     def mutation_nodes(self, name: str, scope: ast.AST | None, after: int, before: int) -> list[MutationRec]:
         """Writes into ``name`` recorded in ``scope`` on lines in ``(after, before)``."""
@@ -289,14 +334,19 @@ class _PyScopes:
 class _PyLookup:
     """``get(name)``: the dict literal ``name`` holds at a call site, with later writes folded in; None otherwise."""
 
-    def __init__(self, scopes: _PyScopes, line: int, fn: ast.AST | None) -> None:
-        self.scopes, self.line, self.fn = scopes, line, fn
+    def __init__(self, scopes: _PyScopes, line: int, fn: ast.AST | None, at: ast.AST | None = None) -> None:
+        self.scopes, self.line, self.fn, self.at = scopes, line, fn, at
+        self.options = scopes.options
 
     def get(self, name: str) -> ast.expr | None:
+        if self.at is not None:
+            return pyreach.reaching_literal(self.scopes, name, self.at, self.fn)  # every reaching literal
         scope = self.fn
         while True:
             found = self._in(scope, name)
             if found is not None:
+                if self.scopes.unmodelled(name, self.fn, scope):
+                    return None
                 bound_line, value, _ = found
                 if _as_dict(value, _NOTHING) is None:
                     return None  # bound to something that is not a literal (a call, a parameter)
@@ -389,6 +439,8 @@ def _py_fields(call: ast.Call, assigned, helper=None) -> tuple[set[str], set[str
     for kw in call.keywords:
         if kw.arg is None or kw.arg == "params":
             node = _as_dict(kw.value, assigned)
+            if node is None and kw.arg is None and getattr(assigned, "options", lambda v: False)(kw.value):
+                continue  # **self.api_kwargs: a property returning only request options (pyself)
             if node is None:
                 if helper is None or not helper(kw.value, fields, hidden):  # a same-file helper's dict (pyhelpers)
                     hidden.add("")
@@ -432,3 +484,5 @@ def _nested(value: ast.expr, path: str, fields: set[str], assigned, hidden: set[
                 _dict_fields(inner, path + "[].", fields, assigned, hidden)
             elif isinstance(item, ast.Starred):
                 hidden.add(path + "[].")
+    elif isinstance(value, (ast.ListComp, ast.GeneratorExp)) and (inner := _as_dict(value.elt, _NOTHING)) is not None:
+        _dict_fields(inner, path + "[].", fields, assigned, hidden)  # [{"price": p} for p in ids]: every item's keys
