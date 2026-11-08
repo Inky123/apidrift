@@ -55,7 +55,10 @@ def extract(
     helpers =pyhelpers.PyHelpers(resolved_calls[0].scopes) if resolved_calls else None
     for c in resolved_calls:
         via = pyhelpers.Via(helpers, c)
-        fields, hidden = _py_fields(c.node, c.scopes.lookup(c.node.lineno, c.fn, c.node), via)
+        try:
+            fields, hidden = _py_fields(c.node, c.scopes.lookup(c.node.lineno, c.fn, c.node), via)
+        except RecursionError:  # arguments nested too deeply to read: the call, with nothing visible
+            fields, hidden = set(), {""}
         found.append(PyFound(c.node.lineno, c.call + via.suffix, c.resolved, fields, not hidden, frozenset(hidden)))
     return found, unresolved
 
@@ -64,6 +67,13 @@ def calls(
     text: str, resolve: Callable[[list[str]], Resolved | None], *, repo=None
 ) -> tuple[list[PyCall], list[tuple[int, str]]]:
     """Resolved SDK calls (arguments not yet read), plus the (line, call) pairs that matched no endpoint."""
+    try:
+        return _calls(text, resolve, repo)
+    except RecursionError:  # nested too deeply to walk: not read, like a file that does not parse
+        return [], []
+
+
+def _calls(text: str, resolve, repo) -> tuple[list[PyCall], list[tuple[int, str]]]:
     from . import pyalias, pyself, pysyntax  # pyalias and pyself build on this module
 
     tree = pysyntax.parse(text)
@@ -72,6 +82,7 @@ def calls(
     aliases = _import_aliases(tree)
     scopes = _PyScopes(tree)
     binders = scopes.binders
+    binders.repo = repo
     scopes.options = lambda value: pyself.options_only(value, binders, scopes.parents, repo, OPTION_KWARGS)
     found: list[PyCall] = []
     unresolved: list[tuple[int, str]] = []

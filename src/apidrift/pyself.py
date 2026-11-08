@@ -1,15 +1,18 @@
-"""Calls and spreads through ``self`` / ``cls`` that the whole checkout (:class:`pyrepo.Repo`) proves.
+"""Calls and spreads through ``self`` / ``cls`` that the whole checkout (:class:`pyrepo.Repo`) proves. Every
+check fails closed: a question the checkout cannot answer (:class:`pyrepo.Unknown`) means not followed.
 
 * ``self.stripe_class.create(...)`` / ``cls.stripe_class.list(...)`` in a method of class ``C``: ``C`` (or its
-  single in-file base) binds the attribute once to an SDK chain (:meth:`pyalias.Binders.class_attr`), no class
-  anywhere that subclasses ``C`` binds it, and nothing outside tests writes ``.stripe_class``.
-* ``self.api.Customer.create(...)`` where ``C.__init__`` does ``self.api = api`` unconditionally: ``C`` binds no
-  ``api`` itself, no subclass defines ``__init__`` / ``__new__`` or binds ``api``, that is the only write of
-  ``.api`` outside tests, and every construction of ``C`` or a subclass outside tests passes the stripe module
-  as that argument (:meth:`pyrepo.Repo.injected_stripe`).
-* ``create(..., **self.api_kwargs)`` where ``api_kwargs`` is a ``@property`` of ``C`` that no subclass rebinds and
-  whose every return is a dict literal (or a local bound only to them, never written into) holding only
-  request options (``api_key``, ``stripe_account``, ...): it sends no request field.
+  single in-file base) binds the attribute once to an SDK chain (:meth:`pyalias.Binders.class_attr`); no class
+  that can come before ``C`` in the MRO of ``C`` or of any subclass binds it (:meth:`pyrepo.Repo.ahead`); and
+  nothing outside tests writes ``.stripe_class``.
+* ``self.api.Customer.create(...)`` where ``C.__init__`` does ``self.api = api`` unconditionally: no class of
+  the MRO of ``C`` or any subclass binds ``api``, ``__setattr__``, ``__getattribute__`` or ``__delattr__``; none
+  ahead of ``C`` binds ``__init__`` / ``__new__``; that is the only write of ``.api`` outside tests; and every
+  construction of ``C`` or a subclass outside tests passes the stripe module as that argument
+  (:meth:`pyrepo.Repo.injected_stripe`).
+* ``create(..., **self.api_kwargs)`` where ``api_kwargs`` is a ``@property`` of ``C`` that no class ahead of it
+  rebinds, whose every return is a dict literal (or a local bound only to them, never written into) holding
+  only request options (``api_key``, ``stripe_account``, ...), and that nothing writes: it sends no field.
 
 ``self`` must be the first parameter of a plain method defined in ``C``'s body (``cls`` of a ``@classmethod``).
 Without a :class:`pyrepo.Repo` (one file read alone) none of this is followed.
@@ -20,6 +23,10 @@ from __future__ import annotations
 import ast
 
 from .pyalias import Binders
+from .pyrepo import Unknown
+
+KEEP = {"implementer", "zope.interface.implementer", "final", "typing.final", "total_ordering", "functools.total_ordering"}
+GUARDS = {"__setattr__", "__getattribute__", "__delattr__"}
 
 
 def _method(root: ast.Name, binders: Binders, parents) -> tuple[ast.FunctionDef, ast.ClassDef] | None:
@@ -53,24 +60,24 @@ def expand(func: ast.expr, chain: list[str], binders: Binders, parents, imports:
         return None
     _, klass = found
     attr = chain[1]
-    value = binders.class_attr(klass, attr, 0)
-    if value is not None:
-        sdk = binders.sdk_chain(value, imports, 1)
-        if sdk is None or not known(sdk + chain[2:]) or repo.stores(attr) != 0:
+    try:
+        value = binders.class_attr(klass, attr, 0)
+        if value is not None:
+            sdk = binders.sdk_chain(value, imports, 1)
+            if sdk is None or not known(sdk + chain[2:]) or repo.writes(attr) != 0:
+                return None
+            repo.ahead(klass.name, {attr} | GUARDS)
+            return sdk + chain[2:]
+        if node.id != "self" or attr in binders.by_scope.get(klass, {}) or not known(["stripe"] + chain[2:]):
             return None
-        family = repo.family(klass.name)
-        return sdk + chain[2:] if family is not None and not repo.binds(family - {klass.name}, attr) else None
-    if node.id != "self" or attr in binders.by_scope.get(klass, {}) or not known(["stripe"] + chain[2:]):
+        slot = _injected(klass, attr, binders)
+        if slot is None or repo.writes(attr) != 1:
+            return None
+        repo.ahead(klass.name, {"__init__", "__new__"})
+        repo.ahead(klass.name, {attr} | GUARDS, all_of_mro=True)
+        return ["stripe"] + chain[2:] if repo.injected_stripe(klass.name, *slot) > 0 else None
+    except Unknown:
         return None
-    slot = _injected(klass, attr, binders)
-    if slot is None or repo.stores(attr) > 1:
-        return None
-    family = repo.family(klass.name)
-    if family is None or repo.binds(family - {klass.name}, attr) or repo.binds(family - {klass.name}, "__init__"):
-        return None
-    if repo.binds(family, "__new__") or not repo.injected_stripe(family, *slot):
-        return None
-    return ["stripe"] + chain[2:]
 
 
 def _injected(klass: ast.ClassDef, attr: str, binders: Binders) -> tuple[int, str] | None:
@@ -121,8 +128,13 @@ def options_only(value: ast.expr, binders: Binders, parents, repo, options: set[
         literals = [r.value] if not isinstance(r.value, ast.Name) else _locals(prop, r.value.id, binders)
         if not literals or not all(_keys(lit) is not None and _keys(lit) <= options for lit in literals):
             return False
-    family = repo.family(klass.name)
-    return family is not None and not repo.binds(family - {klass.name}, attr) and not repo.stores(attr)
+    try:
+        if repo.writes(attr) != 0:
+            return False
+        repo.ahead(klass.name, {attr} | GUARDS)
+    except Unknown:
+        return False
+    return True
 
 
 def _returns(fn: ast.AST):
