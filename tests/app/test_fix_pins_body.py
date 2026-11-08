@@ -31,9 +31,17 @@ def first_line(text: str) -> str:
     return text.split("\n", 1)[0]
 
 
-def test_a_wrap_only_pull_says_the_old_version_rejects_it():
-    assert first_line(body([ANCHOR])) == (f"Ready for Stripe {ENDIVE}. Merge this together with your API-version and "
-                                          f"SDK upgrade; {REJECTS}")
+def test_a_wrap_only_pull_says_the_pinned_version_rejects_it_only_with_an_older_server_pin():
+    pinned = first_line(body([ANCHOR], pins=[pin("2024-09-30.acacia")]))
+    assert pinned == f"Ready for Stripe {ENDIVE}. Merge this together with your API-version and SDK upgrade; {REJECTS}"
+    conditional = (f"Ready for Stripe {ENDIVE}. Merge this together with your API-version and SDK upgrade: if your "
+                   f"requests use an API version before {ENDIVE}, Stripe rejects the new shape.")
+    assert first_line(body([ANCHOR])) == conditional
+    # review body_probe: an endive pin and a current SDK, or only a test pin: no claim about the pinned version
+    current = body([ANCHOR], pins=[pin("2026-10-28.endive")],
+                   sdks=[{"sdk": "stripe-node", "version": "23.1.0", "file": "package-lock.json", "line": 10}])
+    assert first_line(current) == conditional and REJECTS not in current
+    assert first_line(body([ANCHOR], pins=[pin("2020-08-27", "spec/a_spec.rb")])) == conditional
 
 
 @pytest.mark.parametrize("sites", [[PMT], [COUNTRIES], [PMT, PAYTO]])
@@ -43,8 +51,10 @@ def test_a_rename_never_claims_a_rejection(sites):
 
 
 def test_a_mixed_pull_names_the_rejection_only_for_the_wrapped_fields():
-    line = first_line(body([PMT, ANCHOR]))
+    line = first_line(body([PMT, ANCHOR], pins=[pin("2024-09-30.acacia")]))
     assert RENAMED in line and line.endswith("The fields that become an object are rejected on your current pinned version.")
+    line = first_line(body([PMT, ANCHOR]))
+    assert line.endswith(f"If your requests use an API version before {ENDIVE}, Stripe rejects the fields that become an object.")
 
 
 def test_deletes_only_is_unchanged():
@@ -105,7 +115,7 @@ def test_only_pins_older_than_the_release_are_listed_as_predating_it():
 
 def test_a_wrap_pin_says_it_rejects_and_no_older_pin_says_so():
     text = section(body([ANCHOR], pins=[pin("2024-09-30.acacia")]))
-    assert f"older than {ENDIVE}, which rejects the new shape; bump them" in text
+    assert f"older than {ENDIVE}; those older versions reject the new shape. Bump them" in text
     text = section(body([ANCHOR], pins=[pin("2026-10-28.endive")]))
     assert f"No server-side API-version pin older than {ENDIVE} was found in the scanned files." in text and "rejects" not in text
 

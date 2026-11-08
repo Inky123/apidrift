@@ -185,7 +185,8 @@ def render_pr(
     possibly = _possibly_remaining(payload, placed)
     deletes_only = bool(groups) and all(action == "delete" for _, _, action, _ in groups)
     introduced = _introduced(groups, version)
-    lede = prpins.lede({action for _, _, action, _ in groups}, safe_version(introduced))
+    pinned_older = prpins.older_server(fixcheck.pin_list(payload.get("pins")), introduced)
+    lede = prpins.lede({action for _, _, action, _ in groups}, safe_version(introduced), pinned_older)
     lines = [f"Ready for Stripe {safe_version(version)}. {lede}"]
     if not deletes_only and any(str(fix.get("file")).endswith(".go") for fix in fixes):
         lines += ["", GO_NOTE]

@@ -18,19 +18,37 @@ DELETES_ONLY = "Removing these fields is safe on your current API version too, s
 RENAMES = ("rename", "rename_first")
 
 
-def lede(actions: set[str], introduced: str) -> str:
-    """The sentence after "Ready for Stripe X." for a pull request whose sites have ``actions``."""
+def lede(actions: set[str], introduced: str, pinned_older: bool) -> str:
+    """The sentence after "Ready for Stripe X." for a pull request whose sites have ``actions``. A rejection is
+    claimed for "your current pinned version" only when a server pin older than ``introduced`` was found
+    (``pinned_older``, :func:`older_server`); otherwise it is said conditionally."""
     if actions and all(a == "delete" for a in actions):
         return DELETES_ONLY
     wraps, renames = "wrap_type" in actions, any(a in RENAMES for a in actions)
     if wraps and not renames:
-        return ("Merge this together with your API-version and SDK upgrade; on your current pinned version Stripe "
-                "rejects the new shape.")
+        if pinned_older:
+            return ("Merge this together with your API-version and SDK upgrade; on your current pinned version "
+                    "Stripe rejects the new shape.")
+        return (f"Merge this together with your API-version and SDK upgrade: if your requests use an API version "
+                f"before {introduced}, Stripe rejects the new shape.")
     text = (f"Merge this together with your API-version and SDK upgrade: Stripe changed these fields in {introduced}, "
             "so an older pinned version may not accept the new names; check it, or upgrade.")
-    if wraps:
+    if wraps and pinned_older:
         text += " The fields that become an object are rejected on your current pinned version."
+    elif wraps:
+        text += f" If your requests use an API version before {introduced}, Stripe rejects the fields that become an object."
     return text
+
+
+def older_server(pins: list[dict], introduced: str) -> bool:
+    """A server pin (not a test or browser one) older than ``introduced`` was found."""
+    server, _ = _split(_older(pins, introduced))
+    return bool(server)
+
+
+def _older(pins: list[dict], introduced: str) -> list[dict]:
+    dated = DATE_RE.match(introduced) is not None  # else nothing to compare with: every pin needs a look
+    return [p for p in pins if not dated or p["version"][:10] < introduced[:10]]
 
 
 Where = Callable[[str, int], str]  # (file, line) -> a permalink or a code span
@@ -48,8 +66,7 @@ def section(pins: list[dict], actions: set[str], introduced: str, shown: str, wh
         elif not other:
             lines.append("No API-version pin was found in the scanned files.")
         return lines + _others(other, where)
-    dated = DATE_RE.match(introduced) is not None  # else nothing to compare with: every pin needs a look
-    older = [p for p in pins if not dated or p["version"][:10] < introduced[:10]]
+    older = _older(pins, introduced)
     current = [p for p in pins if p not in older]
     server, other = _split(older)
     lines = ["", "**Merge together with your upgrade**"]
@@ -59,8 +76,8 @@ def section(pins: list[dict], actions: set[str], introduced: str, shown: str, wh
                          "check that the pinned version accepts the new field, or bump them and the Stripe SDK when "
                          "you merge it:")
         else:
-            lines.append(f"These files pin an API version older than {shown}, which rejects the new shape; bump them "
-                         "and the Stripe SDK when you merge it:")
+            lines.append(f"These files pin an API version older than {shown}; those older versions reject the new "
+                         "shape. Bump them and the Stripe SDK when you merge it:")
         lines += _items(server, where)
     else:
         lines.append(f"No server-side API-version pin older than {shown} was found in the scanned files.")
