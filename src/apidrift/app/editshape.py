@@ -309,13 +309,11 @@ def _go_wrapped(text: str, start: int, end: int, value: str, new: str, name: str
         return bool(typed)
     before = text[max(0, start - 200) : start]
     entry = re.search(rf"(?<![\w.]){re.escape(name)}:[ \t]*$", before) and _ends_entry(text, end, "go", start)
-    statement = re.search(rf"(?m)^[ \t]*(?:[A-Za-z_]\w*\.)+{re.escape(name)}[ \t]*=[ \t]*$", before) and \
-        re.match(r"[ \t]*(?://[^\n]*)?\r?\n", text[end:])
-    if not (entry or statement):
+    if not (entry or _go_statement(text, start, end, name)):
         return False  # the value of the ``Old:`` entry or of the ``p.Old = value`` statement, whole
     helper = re.fullmatch(r"(\w+)\.(String|Int64|Bool)\((.*)\)", value, re.S)
-    if helper is None:
-        return False
+    if helper is None or not _balanced(text, start + helper.start(3), start + helper.end(3), "go"):
+        return False  # the helper's argument is one balanced expression: no ``); other()`` smuggled in
     root, kind, arg = helper.groups()
     wrapped = f"&{root}.{rule.wrapper}"
     if kind == "String" and not m.timestamps and new == f"{wrapped}{{Type: {value}}}":
@@ -323,6 +321,16 @@ def _go_wrapped(text: str, start: int, end: int, value: str, new: str, name: str
     if kind == "Int64" and m.timestamps:
         return new == f'{wrapped}{{Type: {root}.String("timestamp"), Timestamp: {value}}}'
     return False
+
+
+def _go_statement(text: str, start: int, end: int, name: str) -> bool:
+    """``[start, end)`` is the whole right side of a ``p.Old = value`` statement, as gofix writes the wrap: the
+    statement starts its line or follows a ``{`` or ``;`` on it (``if reset { p.Old = v }``), and the value is
+    followed by the line's end (a comment allowed), a ``;`` or the ``}`` closing a one-line block."""
+    line_start = text.rfind("\n", 0, start) + 1
+    head = re.fullmatch(rf"(?:[^\n]*[{{;])?[ \t]*(?:[A-Za-z_]\w*\.)+{re.escape(name)}[ \t]*=[ \t]*", text[line_start:start])
+    tail = re.match(r"[ \t]*(?:[;}]|(?://[^\n]*)?(?:\r?\n|\Z))", text[end:])
+    return bool(head and tail)
 
 
 def _wrap_forms(language: str, v: str) -> dict[str, set[str]]:

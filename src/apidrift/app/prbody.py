@@ -3,6 +3,11 @@
 Same rules as the issue: everything that comes from the scanned repository (paths, call text) goes through
 :func:`issue.permalink` and :func:`issue.code`, and the tokens the child names (fields, paths, versions) are
 rendered inside code spans even though :mod:`fixcheck` has already restricted them to Stripe names.
+
+The body is bounded: every list shows at most MAX_PR_LINKS places ("and N more"), at most MAX_PR_GROUPS
+migrations are described, and when the body still exceeds :data:`issue.MAX_BODY_CHARS` (GitHub rejects
+65,536) it is rendered again with shorter lists and, as a last resort, cut before the footer. A child cannot
+make the pull request fail to open by sending long paths or long lists.
 """
 
 from __future__ import annotations
@@ -11,11 +16,14 @@ import re
 
 from .. import fixsdk, migrations
 from . import fixcheck, prpins
-from .issue import FIELD_PATH_RE, METHOD_RE, VERSION_RE, code, escape, permalink, unread_note
+from .issue import FIELD_PATH_RE, MAX_BODY_CHARS, METHOD_RE, VERSION_RE, code, escape, permalink, unread_note
 
 PR_MARKER_RE = re.compile(r"<!-- apidrift:pr=([0-9a-f]{64}) -->")
 STRIPE_DOCS = "https://docs.stripe.com/"
 MAX_PR_LINKS = 50  # per list; a repository with more than this gets "and N more."
+MAX_PR_GROUPS = 40  # migrations described; the rest are counted
+LINK_CAPS = (MAX_PR_LINKS, 10, 3, 1)  # the lists shrink until the body fits
+TRUNCATED = "The rest of this description was cut to fit GitHub's size limit; the commit itself is complete."
 # One fixed sentence per reason the fixer gives for leaving a site alone; nothing from the repo goes in them.
 UNFIXABLE_WHY = {
     "nested": "the field sits inside a nested structure apidrift does not rewrite yet",
@@ -74,8 +82,8 @@ def _where(full_name: str, sha: str, file: str, line: object) -> str:
     return permalink(full_name, sha, file, number) or f"{code(file)}:{number}"
 
 
-def _links(full_name: str, sha: str, places: list[tuple[str, object]]) -> str:
-    shown = [_where(full_name, sha, file, line) for file, line in places[:MAX_PR_LINKS]]
+def _links(full_name: str, sha: str, places: list[tuple[str, object]], cap: int = MAX_PR_LINKS) -> str:
+    shown = [_where(full_name, sha, file, line) for file, line in places[:cap]]
     more = len(places) - len(shown)
     return ", ".join(shown) + (f" and {more} more" if more > 0 else "")
 
@@ -177,7 +185,28 @@ def render_pr(
     Repo text (paths, call text) is rendered through :func:`permalink` and :func:`code` only. Each group's
     method, note and changelog link come from the parent's migration table by (path, target); the child's own
     ``migrations`` list is ignored. Value text is never shown: each action is described in a fixed sentence.
+    The body never exceeds :data:`issue.MAX_BODY_CHARS` (see the module note).
     """
+    for cap in LINK_CAPS:
+        title, lines, footer = _render(payload, fixes, full_name, sha, version, issue_number, fingerprint, tests, cap)
+        body = "\n".join(lines + footer) + "\n"
+        if len(body) <= MAX_BODY_CHARS:
+            return title, body
+    budget = MAX_BODY_CHARS - sum(len(ln) + 1 for ln in footer) - len(TRUNCATED) - 2
+    kept, used = [], 0
+    for line in lines:
+        if used + len(line) + 1 > budget:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return title, "\n".join(kept + ["", TRUNCATED] + footer) + "\n"
+
+
+def _render(
+    payload: dict, fixes: list[dict], full_name: str, sha: str, version: str, issue_number: int, fingerprint: str,
+    tests: list[dict] | None, cap: int,
+) -> tuple[str, list[str], list[str]]:
+    """(title, body lines, footer lines) with every list cut to ``cap`` places."""
     calls = _calls(payload)
     groups: dict[tuple[str, str, str, str], list[tuple[str, int]]] = {}
     for fix in fixes:
@@ -195,7 +224,9 @@ def render_pr(
     if not deletes_only and any(str(fix.get("file")).endswith(".go") for fix in fixes):
         lines += ["", GO_NOTE]
     explained_once: set[str] = set()
-    for key in sorted(groups, key=_order):
+    ordered = sorted(groups, key=_order)
+    shown_groups = min(MAX_PR_GROUPS, cap * 4)
+    for key in ordered[:shown_groups]:
         path, old, action, new = key
         migration = _migration(path, old, action, new)
         method = migration.method if migration is not None else "post"
@@ -206,13 +237,15 @@ def render_pr(
             explained_once.add(explained)
             lines.append(explained)
         places = groups[key]
-        for file, line in sorted(places)[:MAX_PR_LINKS]:
+        for file, line in sorted(places)[:cap]:
             call = calls.get((file, line, path))
             lines.append(f"- {_where(full_name, sha, file, line)}" + (f" via {code(call)}" if call else ""))
-        if len(places) > MAX_PR_LINKS:
-            lines.append(f"- and {len(places) - MAX_PR_LINKS} more.")
-    lines += _pins(payload, {action for _, _, action, _ in groups}, introduced, full_name, sha)
-    lines += _sdks(payload, fixes, full_name, sha)
+        if len(places) > cap:
+            lines.append(f"- and {len(places) - cap} more.")
+    if len(ordered) > shown_groups:
+        lines += ["", f"And {len(ordered) - shown_groups} more migrations, at the call sites the diff shows."]
+    lines += _pins(payload, {action for _, _, action, _ in groups}, introduced, full_name, sha, cap)
+    lines += _sdks(payload, fixes, full_name, sha, cap)
     uncertain = len({place for _, places in possibly for place in places})
     verified = len(placed) - uncertain
     count = f"{verified} call site now sends" if verified == 1 else f"{verified} call sites now send"
@@ -225,12 +258,11 @@ def render_pr(
     updated = sorted({(str(t["file"]), int(e["line"])) for t in tests or [] for e in t["edits"]})
     if updated:
         lines += ["", "**Tests updated**", "These tests expected the old request and now expect the new one, changed the "
-                  f"same way as the code: {_links(full_name, sha, list(updated))}."]
-    lines += _left_for_you(payload, full_name, sha, possibly, set(updated))
-    lines += _kept(payload, full_name, sha)
-    lines += ["", f"Addresses #{issue_number}", pr_marker(fingerprint)]
+                  f"same way as the code: {_links(full_name, sha, list(updated), cap)}."]
+    lines += _left_for_you(payload, full_name, sha, possibly, set(updated), cap)
+    lines += _kept(payload, full_name, sha, cap)
     keys = {(action, old) for _, old, action, _ in groups}
-    return pr_title(version, keys, len(placed)), "\n".join(lines) + "\n"
+    return pr_title(version, keys, len(placed)), lines, ["", f"Addresses #{issue_number}", pr_marker(fingerprint)]
 
 
 def _introduced(groups: dict[tuple[str, str, str, str], list[tuple[str, int]]], version: str) -> str:
@@ -240,19 +272,22 @@ def _introduced(groups: dict[tuple[str, str, str, str], list[tuple[str, int]]], 
     return min(found) if found else version
 
 
-def _pins(payload: dict, actions: set[str], introduced: str, full_name: str, sha: str) -> list[str]:
-    """Pins checked by :func:`fixcheck.pin_list`, compared with ``introduced`` (:mod:`prpins`)."""
+def _pins(payload: dict, actions: set[str], introduced: str, full_name: str, sha: str, cap: int = MAX_PR_LINKS) -> list[str]:
+    """Pins checked by :func:`fixcheck.pin_list`, compared with ``introduced`` (:mod:`prpins`, which caps its
+    own lists at MAX_PR_LINKS; a tighter ``cap`` cuts the pins it sees)."""
     where = lambda file, line: _where(full_name, sha, file, line)  # noqa: E731
-    return prpins.section(fixcheck.pin_list(payload.get("pins")), actions, introduced, safe_version(introduced), where)
+    pins = fixcheck.pin_list(payload.get("pins"))
+    pins = pins if cap >= MAX_PR_LINKS else pins[:cap]
+    return prpins.section(pins, actions, introduced, safe_version(introduced), where)
 
 
 TYPED_NODE = (".ts", ".tsx", ".mts", ".cts")
 
 
-def _sdks(payload: dict, fixes: list[dict], full_name: str, sha: str) -> list[str]:
+def _sdks(payload: dict, fixes: list[dict], full_name: str, sha: str, cap: int = MAX_PR_LINKS) -> list[str]:
     """One sentence per locked SDK version (validated by :func:`fixcheck.sdk_locks`), measured against the
     parent's own table of first releases for the API version the fixed sites need. Nothing for deletions."""
-    locks = fixcheck.sdk_locks(payload.get("sdks"), fixes)
+    locks = fixcheck.sdk_locks(payload.get("sdks"), fixes)[:cap]
     needed = {
         m.introduced for fix in fixes for s in fix.get("sites") or []
         if s.get("action") != "delete" and (m := migrations.for_site(str(s.get("path")), str(s.get("target")))) is not None
@@ -309,6 +344,7 @@ def _possibly_remaining(payload: dict, placed: set[tuple[str, int, str]]) -> Pos
 
 def _left_for_you(
     payload: dict, full_name: str, sha: str, possibly: Possibly | None = None, updated: set | frozenset = frozenset(),
+    cap: int = MAX_PR_LINKS,
 ) -> list[str]:
     """Fixed sentences only: a reason the child gives that is not in our tables becomes one constant sentence,
     never the child's text, so there is at most one line per known reason plus one, each capped in length."""
@@ -329,29 +365,30 @@ def _left_for_you(
     if not (by_why or not_attempted or possibly or leftovers or tests or cassettes or unread):
         return []
     lines = ["", "**Left for you**"]
+    links = lambda places: _links(full_name, sha, places, cap)  # noqa: E731
     for sentence, places in sorted(by_why.items()):
-        lines.append(f"- Not changed, {sentence}: {_links(full_name, sha, places)}")
+        lines.append(f"- Not changed, {sentence}: {links(places)}")
     for reason, places in sorted(not_attempted.items()):
-        lines.append(f"- Not attempted ({reason}): {_links(full_name, sha, places)}")
+        lines.append(f"- Not attempted ({reason}): {links(places)}")
     for field, spots in possibly or []:
         places: list[tuple[str, object]] = [(file, line) for file, line, _ in spots]
-        lines.append(f"- {code(field)} {POSSIBLY_REMAINING}: {_links(full_name, sha, places)}")
+        lines.append(f"- {code(field)} {POSSIBLY_REMAINING}: {links(places)}")
     if tests:
         label = "Other tests that name the old field" if updated else "Tests that name the old field"
-        lines.append(f"- {label}: {_links(full_name, sha, tests)}. A test that expects the request "
+        lines.append(f"- {label}: {links(tests)}. A test that expects the request "
                      "this pull request changes fails until it is updated here; one that reads the field from a "
                      "Stripe response can stay.")
     if cassettes:
-        lines.append(f"- Recorded responses to re-record: {_links(full_name, sha, cassettes)}. Their recorded requests send "
+        lines.append(f"- Recorded responses to re-record: {links(cassettes)}. Their recorded requests send "
                      "the old field; a cassette matched on the request body stops replaying until it is re-recorded.")
     if leftovers:
-        lines.append(f"- Still mentions the old name at {_links(full_name, sha, leftovers)}; check whether those are this field.")
+        lines.append(f"- Still mentions the old name at {links(leftovers)}; check whether those are this field.")
     if unread:
         lines.append(f"- {unread}")
     return lines
 
 
-def _kept(payload: dict, full_name: str, sha: str) -> list[str]:
+def _kept(payload: dict, full_name: str, sha: str, cap: int = MAX_PR_LINKS) -> list[str]:
     """Old-key reads the fix left alone on purpose (``fixreads``): a webhook or response payload is tested there."""
     kept = _places(payload.get("kept"))
-    return ["", f"Kept on purpose (reads of a webhook or response payload, unchanged): {_links(full_name, sha, kept)}"] if kept else []
+    return ["", f"Kept on purpose (reads of a webhook or response payload, unchanged): {_links(full_name, sha, kept, cap)}"] if kept else []

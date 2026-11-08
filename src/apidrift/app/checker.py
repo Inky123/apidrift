@@ -427,7 +427,7 @@ def _unread_notice(
     """A clean verdict is only honest if every file was read. When files in a language apidrift cannot parse yet
     mention Stripe, open one notice issue (once per repository); close it when that is no longer the case.
     A findings issue carries the same sentence in its footer, so no notice is opened while one is open."""
-    unread = payload.get("unread") or {}
+    unread = issue.unread_counts(payload)  # validated names only, in the issue and in the log line
     existing = repo["unread_issue"]
     if unread and existing is None:
         title, body = issue.render_unread_issue(full_name, sha, payload)

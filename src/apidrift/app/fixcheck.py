@@ -29,15 +29,16 @@ _SHA_RE = re.compile(r"[0-9a-f]{40}")
 logger = logging.getLogger("apidrift.fixpr")
 
 
-def validate(gh: GitHubClient, token: str, full_name: str, base_sha: str, fixes: object) -> list[dict]:
+def validate(gh: GitHubClient, token: str, full_name: str, base_sha: str, fixes: object, repo_id: object = None) -> list[dict]:
     """The fixes the parent is willing to push, each ``{file, blob_sha, content, sites, original}``, the content
     rebuilt here from the base blob and the child's edits (:func:`rebuild`); the child's own content is never
-    pushed. A GitHub error raises: a check that cannot read every blob pushes nothing (no reduced PR)."""
+    pushed. A GitHub error raises: a check that cannot read every blob pushes nothing (no reduced PR). Logs
+    name the repository by ``repo_id`` only, never by ``full_name``."""
     accepted: list[dict] = []
     total = 0
     for fix in claimed(fixes):
         if len(accepted) >= MAX_FILES:
-            logger.info("repo %s: not pushing one file (over the size caps)", full_name)
+            logger.info("repo %s: not pushing one file (over the size caps)", repo_id)
             continue
         text, why = base_text(gh, token, full_name, base_sha, fix["file"], fix["blob_sha"])
         content = None
@@ -47,7 +48,7 @@ def validate(gh: GitHubClient, token: str, full_name: str, base_sha: str, fixes:
         if why is None and (size > MAX_FILE_BYTES or total + size > MAX_TOTAL_BYTES):
             why = "over the size caps"
         if why is not None:
-            logger.info("repo %s: not pushing one file (%s)", full_name, why)
+            logger.info("repo %s: not pushing one file (%s)", repo_id, why)
             continue
         total += size
         kept = {k: v for k, v in fix.items() if k != "content_claim"}

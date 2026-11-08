@@ -169,3 +169,36 @@ def test_wrap_over_a_multi_line_ternary_is_copied_whole(tmp_path):
     assert shape(text, "javascript", ok, m) is None  # a test edit wraps only a plain value
     half = {"start": start, "end": start + 3, "text": "{ type: now }"}  # not the whole value
     assert shape(text, "javascript", half, m, code=True) is None
+
+
+WRAP = "&stripe.SubscriptionResumeBillingCycleAnchorParams{Type: stripe.String(\"now\")}"
+
+
+@pytest.mark.parametrize("text, old, new, ok", [
+    # the statement form gofix writes, inside a one-line block, on a line of its own, and before a ``;``
+    ("func f(p *stripe.SubscriptionResumeParams, reset bool) {\n\tif reset { p.BillingCycleAnchor = stripe.String(\"now\") }\n}\n",
+     'stripe.String("now")', WRAP, True),
+    ("\tp.BillingCycleAnchor = stripe.String(\"now\")\n", 'stripe.String("now")', WRAP, True),
+    ("\tp.BillingCycleAnchor = stripe.String(\"now\") // anchor now\n", 'stripe.String("now")', WRAP, True),
+    ("\tif reset { p.BillingCycleAnchor = stripe.String(\"now\"); p.Proration = x }\n", 'stripe.String("now")', WRAP, True),
+    ("\tif reset { a(); p.BillingCycleAnchor = stripe.String(\"now\") }\n", 'stripe.String("now")', WRAP, True),
+    ("\tp.BillingCycleAnchor = stripe.String(\"now\")", 'stripe.String("now")', WRAP, True),  # end of file
+    # hostile near-misses: more than the value in the span, or not a statement of its own
+    ("\tif reset { p.BillingCycleAnchor = stripe.String(\"now\"); foo() }\n", 'stripe.String("now"); foo()',
+     "&stripe.SubscriptionResumeBillingCycleAnchorParams{Type: stripe.String(\"now\"); foo()}", False),
+    ("\tif reset { p.BillingCycleAnchor = stripe.String(\"now\") + x }\n", 'stripe.String("now")', WRAP, False),
+    ("\tif reset { p.BillingCycleAnchor = stripe.String(\"now\"), 1 }\n", 'stripe.String("now")', WRAP, False),
+    ("\tx, p.BillingCycleAnchor = 1, stripe.String(\"now\")\n", 'stripe.String("now")', WRAP, False),
+    ("\tf(p.BillingCycleAnchor = stripe.String(\"now\"))\n", 'stripe.String("now")', WRAP, False),
+    ("\tif p.BillingCycleAnchor = stripe.String(\"now\") {\n", 'stripe.String("now")', WRAP, False),
+    ("\tp.BillingCycleAnchor = stripe.String(\"now\")\n", 'stripe.String("now")',
+     "&stripe.SubscriptionResumeBillingCycleAnchorParams{Type: stripe.String(\"now\")}; evil()", False),
+])
+def test_go_wrap_statement_shapes(text, old, new, ok):
+    from apidrift import migrations
+    from apidrift.app.editshape import shape
+
+    m = migrations.for_site("/v1/subscriptions/{subscription}/resume", "billing_cycle_anchor")
+    start = text.index(old)
+    e = {"start": start, "end": start + len(old), "text": new}
+    assert (shape(text, "go", e, m, code=True) is not None) is ok

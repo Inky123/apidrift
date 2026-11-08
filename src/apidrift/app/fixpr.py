@@ -214,12 +214,12 @@ def _push(
     if number is not None and state == "open" and claims and \
             fingerprint(claims, version, issue_number, claimed_tests) == repo["pr_fingerprint"]:
         return f"#{number} unchanged"
-    accepted = fixcheck.validate(gh, token, full_name, base_sha, payload.get("fixes"))
+    accepted = fixcheck.validate(gh, token, full_name, base_sha, payload.get("fixes"), repo_id=repo["id"])
     if not accepted:
         if number is not None and state in CLOSABLE:
             return _close(conn, gh, token, repo, full_name, gone_comment(base_sha))
         return "nothing to push"
-    tests = fixtestcheck.validate(gh, token, full_name, base_sha, payload, accepted)  # rebuilt from the base blobs
+    tests = fixtestcheck.validate(gh, token, full_name, base_sha, payload, accepted, repo_id=repo["id"])  # from the base blobs
     fp, keys = fingerprint(accepted, version, issue_number, tests), site_keys(accepted)
     if number is not None and state == "open" and fp == repo["pr_fingerprint"]:
         return f"#{number} unchanged"

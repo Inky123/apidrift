@@ -18,16 +18,23 @@ lands on the same bytes of the test). Only these forms are recognised; anything 
 A negative expectation (``not_to``, ``.not.``, ``never()``) is never one: after a rename it would assert the
 absence of the new key. Matchers that wrap the parameters (``hash_including``, ``expect.objectContaining``,
 ``equalTo``, ``Mockery::subset``) are blanked to spaces and braces of the same length.
+
+Every reader is linear in the file: what an expectation needs about the rest of the file (the mock factories
+a Jest receiver is wired in, the ``function`` and ``$var =`` positions a PHP mock is assigned at) is indexed
+once per file and looked up. A file with more than :data:`MAX_EXPECTATIONS` candidates raises
+:class:`Overloaded`, and its tests are listed rather than updated, by the child and by the parent alike.
 """
 
 from __future__ import annotations
 
 import ast
+import bisect
 import re
 from dataclasses import dataclass
 
 from .fixtokens import _Offsets
-from .jsparse import CLOSERS, OPENERS, QUOTES, RUBY_KEYWORD, Mask, Source
+from .fixtestjs import wiring as _js_wiring
+from .jsparse import OPENERS, RUBY_KEYWORD, Mask, Source
 from .phplex import Lex
 
 STRIPEY_ROOT = re.compile(r"(?i)(?:mock_?)?stripe(?:_?(?:mock|client|instance|api))?")
@@ -42,10 +49,21 @@ JEST = re.compile(
     r"\bexpect\(\s*(?P<recv>[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\)\s*\.\s*"
     r"(?:toHaveBeenCalledWith|toHaveBeenLastCalledWith|toBeCalledWith|lastCalledWith)\s*\("
 )
-JS_FACTORY = re.compile(r"\b(?:vi|jest)\s*\.\s*(?:mock|doMock)\(\s*(['\"])stripe\1\s*,")
-JS_KEYED = re.compile(r"(?:([A-Za-z_$][\w$]*)|'([\w$]+)'|\"([\w$]+)\")\s*[:=]\s*$")
-JS_CLASS = re.compile(r"\bclass(?:\s+[A-Za-z_$][\w$]*)?(?:\s+extends\s+[\w$.]+)?\s*$")
-JS_RETURNED = re.compile(r"(?:=>\s*\(|\breturn)\s*$")
+PY_ASSERT = re.compile(r"\.assert_(?:called_once_with|called_with|any_call)\s*\(")
+PHP_FUNCTION = re.compile(r"\bfunction\b")
+PHP_ASSIGN = re.compile(r"(\$[A-Za-z_]\w*)\s*=(?![=>])")
+MAX_EXPECTATIONS = 500  # candidate expectations per test file; past this the file is listed, never edited
+
+
+class Overloaded(ValueError):
+    """More candidate expectations (or, in :mod:`fixtestbuild`, defs) than the caps allow for one file."""
+
+
+def _candidates(pattern: re.Pattern[str], text: str, found: int = 0) -> list[re.Match[str]]:
+    out = list(pattern.finditer(text))
+    if len(out) + found > MAX_EXPECTATIONS:
+        raise Overloaded(f"{len(out) + found} candidate expectations in one file")
+    return out
 PY_ASSERTS = {"assert_called_once_with", "assert_called_with", "assert_any_call"}
 COUNT = r"(?:once\(\s*\)|twice\(\s*\)|times\(\s*[1-9]\d*\s*\))"
 MOCKERY = re.compile(
@@ -90,6 +108,7 @@ class Expect:
 
 
 def find(text: str, language: str | None) -> list[Expect]:
+    """The expectations of ``text``; raises :class:`Overloaded` past :data:`MAX_EXPECTATIONS` candidates."""
     if language == "ruby":
         return _rspec(text)
     if language in ("javascript", "typescript"):
@@ -153,7 +172,7 @@ def _ident(c: str) -> bool:
 
 def _rspec(text: str) -> list[Expect]:
     src, mask, out = Source(text, ruby=True), Mask(text, ruby=True), []
-    for m in RSPEC.finditer(text):
+    for m in _candidates(RSPEC, text):
         if mask.covers(m.start()):
             continue
         open_idx = m.end() - 1
@@ -169,10 +188,15 @@ def _rspec(text: str) -> list[Expect]:
 
 def _jest(text: str) -> list[Expect]:
     src, mask, out = Source(text), Mask(text, ruby=False), []
-    for m in JEST.finditer(text):
+    wired: dict[str, list[tuple[str, ...] | None]] | None = None  # the factories, indexed once when first needed
+    for m in _candidates(JEST, text):
         if mask.covers(m.start()):
             continue
-        head = _js_head(text, src, mask, re.sub(r"\s+", "", m.group("recv")))
+        recv = re.sub(r"\s+", "", m.group("recv"))
+        head = _js_client(recv)
+        if head is None:
+            wired = _js_wiring(text, src, mask) if wired is None else wired
+            head = _js_mocked(wired, recv)
         open_idx = m.end() - 1
         found = _params(src, text, open_idx, JS_WRAPPERS, _brace) if head else None
         if head and found is not None and _close(src, open_idx) is not None:
@@ -180,72 +204,27 @@ def _jest(text: str) -> list[Expect]:
     return out
 
 
-def _js_head(text: str, src: Source, mask: Mask, recv: str) -> str | None:
+def _js_client(recv: str) -> str | None:
+    """``stripe.checkout.sessions.create``, ``mockStripe.paymentIntents.create``: a Stripe client chain."""
     chain = recv.split(".")
     roots = [n for n, seg in enumerate(chain[:-2]) if STRIPEY_ROOT.fullmatch(seg)]
-    if roots:  # ``stripe.checkout.sessions.create``, ``mockStripe.paymentIntents.create``
-        return "stripe." + ".".join(chain[roots[-1] + 1 :])
-    paths: set[tuple[str, ...]] = set()
-    value = re.compile(r"(?:([A-Za-z_$][\w$]*)|'([\w$]+)'|\"([\w$]+)\")\s*[:=]\s*" + re.escape(recv) + r"(?![\w$.(\[])")
-    for f in JS_FACTORY.finditer(text):
-        if mask.covers(f.start()):
-            continue
-        open_idx = text.index("(", f.start())
-        end = src.skip_balanced(open_idx)
-        for v in value.finditer(text, open_idx, end):
-            if mask.covers(v.start()):
-                continue
-            keys = _key_path(text, src, open_idx, v.start())
-            if keys is None:
-                return None  # wired somewhere this reader cannot follow: not a tie
-            paths.add((*keys, next(g for g in v.groups() if g)))
-    if len(paths) != 1:
-        return None
-    path = next(iter(paths))
-    return "stripe." + ".".join(path) if len(path) >= 2 else None
+    return "stripe." + ".".join(chain[roots[-1] + 1 :]) if roots else None
 
 
-def _key_path(text: str, src: Source, lo: int, pos: int) -> list[str] | None:
-    """Keys of the object literals enclosing ``pos`` inside the mock factory at ``lo``, outermost first; None
-    when one of them is a function body, an array or a call (the shape is not a plain client mock)."""
-    stack, i = [], lo + 1
-    while i < pos:
-        j = src.skip_space(i)
-        if j != i:
-            i = j
-            continue
-        c = text[i]
-        if c in QUOTES:
-            i = src.skip_string(i)
-            continue
-        if c in OPENERS:
-            stack.append(i)
-        elif c in CLOSERS:
-            if not stack:
-                return None
-            stack.pop()
-        i += 1
-    keys: list[str] = []
-    for o in stack:
-        tail = text[max(lo, o - 120) : o]
-        if text[o] == "(":
-            if tail.rstrip().endswith("=>") and text[src.skip_space(o + 1)] == "{":
-                continue
-            return None
-        if text[o] != "{":
-            return None
-        keyed = JS_KEYED.search(tail)
-        if keyed:
-            keys.append(next(g for g in keyed.groups() if g))
-        elif not (JS_CLASS.search(tail) or JS_RETURNED.search(tail)):
-            return None
-    return keys
+def _js_mocked(wired: dict[str, list[tuple[str, ...] | None]], recv: str) -> str | None:
+    """The one key path a receiver is wired in under ``vi.mock('stripe', ...)``, as a client chain."""
+    paths = wired.get(recv, [])
+    if not paths or None in paths or len(set(paths)) != 1:
+        return None  # not wired, wired somewhere this reader cannot follow, or wired twice: not a tie
+    path = paths[0]
+    return "stripe." + ".".join(path) if path is not None and len(path) >= 2 else None
 
 
 # --- Python ----------------------------------------------------------------------------
 
 
 def _python(text: str) -> list[Expect]:
+    _candidates(PY_ASSERT, text)
     try:
         tree = ast.parse(text)
     except (SyntaxError, ValueError):
@@ -401,16 +380,22 @@ def _php(text: str) -> list[Expect]:
     if not lex.balanced or lex.uncertain:
         return []
     uses = {(alias or full.rsplit("\\", 1)[-1]): full for full, alias in PHP_USE.findall(text)}
+    matches = _candidates(MOCKERY, text)
+    matches += _candidates(PHPUNIT, text, len(matches))
+    functions = [m.start() for m in PHP_FUNCTION.finditer(text) if not lex.masked(m.start())]
+    assigned: dict[str, list[int]] = {}  # ``$var`` -> where it is assigned, ascending
+    for m in PHP_ASSIGN.finditer(text):
+        if not lex.masked(m.start()):
+            assigned.setdefault(m.group(1), []).append(m.start())
     out = []
-    for pattern in (MOCKERY, PHPUNIT):
-        for m in pattern.finditer(text):
-            if lex.masked(m.start()):
-                continue
-            head = _php_head(text, lex, m.start(), m.group("recv"), m.group("method"), uses)
-            open_idx = m.end() - 1
-            found = _params(lex, text, open_idx, PHP_WRAPPERS, _php_array) if head else None
-            if head and found is not None:
-                out.append(Expect("mockery", head, open_idx, found[0], "<?php " + head, ");", found[1]))
+    for m in matches:
+        if lex.masked(m.start()):
+            continue
+        head = _php_head(text, lex, m.start(), m.group("recv"), m.group("method"), uses, functions, assigned)
+        open_idx = m.end() - 1
+        found = _params(lex, text, open_idx, PHP_WRAPPERS, _php_array) if head else None
+        if head and found is not None:
+            out.append(Expect("mockery", head, open_idx, found[0], "<?php " + head, ");", found[1]))
     return sorted(out, key=lambda e: e.lo)
 
 
@@ -419,14 +404,19 @@ def _php_array(lex: Lex, i: int) -> int | None:
     return lex.pairs[opener] + 1 if opener is not None else None
 
 
-def _php_head(text: str, lex: Lex, at: int, var: str, method: str, uses: dict[str, str]) -> str | None:
-    """The SDK call a mock in ``var`` stands for: from its one assignment in the enclosing function."""
-    fn = max((m.start() for m in re.finditer(r"\bfunction\b", text[:at]) if not lex.masked(m.start())), default=0)
-    region = text[fn:at]
-    assigned = [m for m in re.finditer(re.escape(var) + r"\s*=(?![=>])", region) if not lex.masked(fn + m.start())]
-    if len(assigned) != 1:
+def _php_head(
+    text: str, lex: Lex, at: int, var: str, method: str, uses: dict[str, str], functions: list[int],
+    assigned: dict[str, list[int]],
+) -> str | None:
+    """The SDK call a mock in ``var`` stands for: from its one assignment in the enclosing function (the last
+    ``function`` before ``at``; ``functions`` and ``assigned`` are the file's indexes, looked up by bisection)."""
+    k = bisect.bisect_left(functions, at)
+    fn = functions[k - 1] if k else 0
+    starts = assigned.get(var, [])
+    first, stop = bisect.bisect_left(starts, fn), bisect.bisect_left(starts, at)
+    if stop - first != 1:
         return None
-    mock = re.compile(re.escape(var) + r"\s*=\s*" + PHP_MOCK).match(region, assigned[0].start())
+    mock = re.compile(re.escape(var) + r"\s*=\s*" + PHP_MOCK).match(text, starts[first], at)
     if not mock:
         return None
     cls, alias = mock.group("cls"), False
