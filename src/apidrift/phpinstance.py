@@ -129,6 +129,27 @@ def instance(owner: Owner, props: list[str], verb: str, resolve):
     return r, (1 if verb == "retrieve" else 0)
 
 
+def account(resolved, src, spans: list[tuple[int, int]], verb: str, resolve):
+    """stripe-php's static ``Account::retrieve($id)`` is ``GET /v1/accounts/{account}``; only without an id
+    (nothing, ``null``, a secret key in its place, or an array with no ``'id'``) is it ``GET /v1/account``."""
+    if resolved is None or verb != "retrieve" or (resolved.method, resolved.path) != ("get", "/v1/account") or not spans:
+        return resolved
+    text = src.text
+    a, b = spans[0]
+    i = src.skip_space(a)
+    first = text[i : src.back_space(b)]
+    if not first or first.lower() == "null" or re.fullmatch(r"(['\"])[rs]k_\w*\1", first):
+        return resolved
+    opener = src.array_open(i)
+    if opener is not None:
+        from .phpparse import elements, literal_key  # phpparse builds on this module
+
+        if not any((literal_key(src, el) or ("",))[0] == "id" for el in elements(src, opener)):
+            return resolved
+    other = resolve(["accounts", "retrieve"])
+    return other if other is not None and (other.method, other.path) == ("get", "/v1/accounts/{account}") else resolved
+
+
 def since(parsed, name: str, at: int) -> int:
     """Where the object ``$name`` holds at ``at`` came to be: its one assignment, else its function's start."""
     bindings, body = parsed.bindings, parsed.scopes.innermost(at)

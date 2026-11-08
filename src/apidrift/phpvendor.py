@@ -33,11 +33,22 @@ class _Repo:
     def __init__(self, root: Path | None) -> None:
         self.root = root
         self._prefixes: frozenset[tuple[str, ...]] | None = None
+        self.cache: dict[str, object] = {}
 
     def prefixes(self) -> frozenset[tuple[str, ...]]:
         if self._prefixes is None:
             self._prefixes = _find(self.root) if self.root is not None else frozenset()
         return self._prefixes
+
+
+def per_repo(key: str, compute):
+    """``compute(root)`` once per checkout scan (None outside one): facts about the checkout as a whole."""
+    repo = _REPO.get()
+    if repo is None or repo.root is None:
+        return None
+    if key not in repo.cache:
+        repo.cache[key] = compute(repo.root)
+    return repo.cache[key]
 
 
 _REPO: ContextVar[_Repo | None] = ContextVar("apidrift_php_repo", default=None)

@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from . import phpflow, phpinstance, phpvendor
+from . import phpdispatch, phpflow, phpinstance, phpvendor
 from .jsparse import Fields, Found, Span
 from .phplex import OPENERS, STRING, Lex
 from .phpscope import Bindings, Scopes
@@ -73,6 +73,7 @@ class Call:
     params: int | None  # which argument holds the request parameters
     start: int = -1  # where the call's chain starts
     saved: tuple[str, int] | None = None  # ``$sub->save()``: (variable, where its tracking starts), see phpinstance
+    hidden_by: str = ""  # what may change the parameters after the call site (a dispatch wrapper): never edited
 
 
 @dataclass
@@ -96,7 +97,10 @@ def extract(text: str, resolve) -> tuple[list[Found], list[tuple[int, str]]]:
         if c.saved is not None and fields.complete and not fields.paths:
             continue  # ``save()`` with nothing assigned sends no request
         found.append(Found(c.line, c.call + via.suffix, c.resolved, fields))
-        found += helpers.callers_of(c)  # calls of a same-file wrapper that forwards its parameter here
+        callers = helpers.callers_of(c)  # calls of a same-file wrapper that forwards its parameter here
+        for f in callers if c.hidden_by else ():
+            f.fields.hide("")  # what the dispatch wrapper writes reaches them too
+        found += callers
     return found, parsed.unresolved
 
 
@@ -108,7 +112,10 @@ def parse(text: str, resolve) -> Parsed:
     clients = _clients(src, uses)
     other: dict[int, tuple[int, str]] = {}  # chain start -> a Stripe-looking call that matched no endpoint
     resolved_at: dict[int, Call] = {}
+    pending = phpdispatch.calls(src)  # ``wrapper('PaymentIntent', 'create', $p)``, read in text order with the rest
     for m in VERB.finditer(src.code):
+        while pending and pending[0][0] < m.start():
+            phpdispatch.add(parsed, pending.pop(0), resolve, resolved_at, other)
         walked = walk_back(src, m.start())
         if walked is None:
             continue
@@ -121,7 +128,7 @@ def parse(text: str, resolve) -> Parsed:
                 parsed, segs[0].name, start, resolved_at, uses, lambda n, v: _static(n, v, resolve),
             )
         if static:
-            resolved = _static(chain[0], verb, resolve)
+            resolved = phpinstance.account(_static(chain[0], verb, resolve), src, src.args(m.end() - 1), verb, resolve)
         elif owner is not None:  # a Stripe object: only its own methods and collections (phpinstance)
             on_object = phpinstance.instance(owner, [s.name for s in segs[1:]], verb, resolve)
             resolved = on_object[0] if on_object else None
@@ -146,6 +153,8 @@ def parse(text: str, resolve) -> Parsed:
             params, saved = _params(src, spans, ids, id_only=static and verb == "retrieve" and ids == 1), None
         resolved_at[start] = Call(src.line(start), call, resolved, m.end() - 1, spans, params, start, saved)
         parsed.calls.append(resolved_at[start])
+    for item in pending:
+        phpdispatch.add(parsed, item, resolve, resolved_at, other)
     # ``$owner->stripe()`` on the way to ``->subscriptions->update(`` is that call's receiver, not another call
     parsed.unresolved = [entry for start, entry in sorted(other.items()) if start not in resolved_at]
     return parsed
@@ -440,6 +449,8 @@ def collect(parsed: Parsed, call: Call, out: Fields, helper=None) -> None:
     src, text = parsed.src, parsed.src.text
     if call.saved is not None:  # ``$sub->save()``: the properties assigned to the object
         phpinstance.saved_fields(parsed, call.saved[0], call.saved[1], call.start, out)
+    if call.hidden_by:
+        out.hide("")
     if call.params is None:
         return
     if any(text.startswith("...", src.skip_space(a)) for a, _ in call.spans[: call.params + 1]):

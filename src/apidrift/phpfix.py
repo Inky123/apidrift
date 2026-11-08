@@ -63,7 +63,7 @@ class Locator:
         if not src.balanced or src.uncertain or self._unbounded_near(c.pos):
             out.why = UNBOUNDED
             return out
-        if c.params is None or any(src.text.startswith("...", src.skip_space(a)) for a, _ in c.spans[: c.params + 1]):
+        if c.hidden_by or c.params is None or any(src.text.startswith("...", src.skip_space(a)) for a, _ in c.spans[: c.params + 1]):
             out.incomplete = True
             return out
         a, b = c.spans[c.params]
