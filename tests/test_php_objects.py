@@ -285,6 +285,25 @@ def test_without_the_vendored_copy_a_prefixed_name_is_not_stripe(tmp_path, index
     assert scan(tmp_path, files, index) == []
 
 
+@pytest.mark.parametrize("resource,siblings", [
+    (API_RESOURCE.replace(" extends StripeObject", ""), None),  # not stripe-php's base class
+    (API_RESOURCE.replace("function classUrl", "function otherUrl"), None),
+    (None, {"StripeObject.php": SIBLINGS["StripeObject.php"]}),  # no ApiRequestor next to it
+    (None, {**SIBLINGS, "ApiRequestor.php": "<?php\nnamespace Other\\Stripe;\nclass ApiRequestor {}\n"}),
+])
+def test_only_stripe_phps_own_shape_counts_as_the_vendored_copy(tmp_path, index, resource, siblings):
+    files = {"src/pay.php": PREFIXED, **vendored("libraries/Stripe/lib", resource=resource, siblings=siblings)}
+    assert scan(tmp_path, files, index) == []
+
+
+def test_an_applications_own_stripe_namespace_is_not_stripe_php(tmp_path, index):
+    files = {
+        "app/Stripe/ApiResource.php": H + "namespace App\\Stripe;\nabstract class ApiResource { }\n",
+        "app/Pay.php": H + "// Stripe\nuse App\\Stripe\\PaymentIntent;\nPaymentIntent::create(['amount' => 1]);\n",
+    }
+    assert scan(tmp_path, files, index) == []
+
+
 def test_a_file_read_alone_knows_no_prefixes(index):
     assert read("\\EDD\\Vendor\\Stripe\\Charge::create(['amount' => 1]);\n", index) == []
 
@@ -402,6 +421,7 @@ def test_what_takes_the_arguments_by_value_changes_nothing(tmp_path, index, writ
     {"src/API.php": API.replace("@WRITE@", "$method = 'create';")},  # the method is changed in the wrapper
     {"src/API.php": API.replace("@WRITE@", "$classname = 'X';")},  # the class name is bound twice
     {"lib/Stripe/ApiResource.php": "<?php\nnamespace EDD\\Vendor\\Stripe;\nclass Other {}\n"},  # no vendored copy
+    {"lib/Stripe/ApiRequestor.php": "<?php\nnamespace App\\Stripe;\nclass ApiRequestor {}\n"},  # not stripe-php's shape
     {"inc/other.php": FORWARD},  # the forwarder is defined twice
     {"inc/functions.php": FORWARD.replace("...$args);", "$args);")},  # not a plain forward
     {"inc/functions.php": FORWARD.replace("return $api->request(", "log(); return $api->request(")},
