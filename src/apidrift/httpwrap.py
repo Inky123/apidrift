@@ -143,7 +143,8 @@ def build(text: str, rel: str, index, wrapper: Wrapper, line: int, call: str, pi
         if not visible:
             hidden.add("")
     fields |= set(wrapper.adds)
-    if wrapper.rewrites or not wrapper.body_seen:
+    glued = any(a is None and b is None for a, b in zip(pieces, pieces[1:]))  # ``"/{$id}{$query}"``: a query may hide
+    if wrapper.rewrites or not wrapper.body_seen or glued:
         hidden.add("")
     shown = f"{call}('{httpurl.template(pieces)}')"
     return Usage(rel, line, picked, path, shown, frozenset(fields), not hidden, language, reads, frozenset(hidden))

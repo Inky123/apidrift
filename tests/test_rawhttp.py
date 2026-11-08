@@ -216,6 +216,11 @@ def test_a_path_built_from_a_variable_or_helper_with_literal_values_is_one_site_
                    (32, "post", "/v1/payment_intents/{intent}")]  # /v1/setup_intents/{intent} is not in this spec
 
 
+def test_two_expressions_joined_in_a_row_may_carry_a_query(index):
+    u = one(API + 'My_Stripe_API::retrieve("payment_intents/{$id}{$query}");\n', "a.php", index)
+    assert (u.method, u.path, u.complete) == ("get", "/v1/payment_intents/{intent}", False)
+
+
 def test_a_class_constant_url_in_an_http_call_is_a_call_site(index):
     src = P + """class Files { const UPLOAD = 'https://files.stripe.com/v1/files';
   function up() { $h = curl_init(self::UPLOAD); curl_setopt_array($h, [CURLOPT_POST => true]); } }
