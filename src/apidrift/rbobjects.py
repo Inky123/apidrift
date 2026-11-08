@@ -8,29 +8,36 @@ operations on its own item, the class method of the same name minus the id (:fun
 ``account.persons`` and the response attribute ``account.capabilities`` look the same.
 
 Read only for a local whose bindings in the outermost ``def`` or ``do`` block around the use (found by
-indentation) all bind the same resource through a resolved retrieve, create or update (``x =
-Stripe::X.retrieve(id)``, or both arms of ``x = c ? Stripe::X.create(a) : Stripe::X.create(b)``), one of them
-before the use and in a block that holds it. A block, ``rescue`` or loop variable, a parameter, a multiple or
-compound assignment, or any other value bound to the name, and nothing is read.
+indentation, :mod:`rbscopes`) all bind the same resource through a resolved retrieve, create or update
+(``x = Stripe::X.retrieve(id)``, or both arms of ``x = c ? Stripe::X.create(a) : Stripe::X.create(b)``). The
+binding that reaches the use is the last one before it in a block that holds it. A block, ``rescue`` or
+loop variable, a parameter, a multiple or compound assignment, or any other value bound to the name, and
+nothing is read.
 
-``save`` sends what was written into the object before it (``sub.billing_cycle_anchor = "now"``,
-``sub[:metadata] = {...}``); any other use in between (passed on, a method with arguments, a mutation) may
+``save`` sends what was written into the object after the binding that reaches it, or after the previous
+``save``, in blocks that hold it (``sub.billing_cycle_anchor = "now"``, ``sub[:metadata] = {...}``). Any
+other use in between (passed on, a method with arguments, a mutation, a write in a nested block) may
 write more, and the call is hidden.
+
+Work is bounded per file (:data:`MAX_WORK` mentions of the bound names); past it no more instance calls
+are read in that file.
 """
 
 from __future__ import annotations
 
+import bisect
 import re
 from dataclasses import dataclass
 
 from . import jsparse
 from .jsbare import POSITIONAL, RUBY_WORDS
+from .rbscopes import Scopes
 from .sdkmap import Resolved, snake
 
 INSTANCE = {"save": ("update", "post"), "delete": ("delete", "delete"), "refresh": ("retrieve", "get")}
 MAKERS = {"retrieve", "create", "update"}  # class methods that return the resource itself
 CLASS_ONLY = {"create", "retrieve", "update", "modify", "list", "search", "del"}  # no instance method of that name
-SCOPE = re.compile(r"^([ \t]*)(?:(?:private|protected|public)[ \t]+)?(?:def\b|\S[^\n]*\bdo(?:[ \t]*\|[^|\n]*\|)?[ \t]*$)", re.M)
+MAX_WORK = 50_000
 CHAIN_TAIL = re.compile(r"(?:::)?(?:[A-Za-z_]\w*(?:\s*\.|[ \t]*::)\s*)*[A-Za-z_]\w*\s*\Z")
 LEAD = re.compile(r"(?:::)?[A-Za-z_]\w*(?:\s*\.|[ \t]*::)\s*")
 ITEM = re.compile(r"/\{[^}/]*\}$")
@@ -43,6 +50,8 @@ MULTIPLE = re.compile(r"^[ \t]*\*?[a-z_]\w*(?:[ \t]*,[ \t]*\*?[a-z_]\w*)+[ \t]*=
 NOT_BOUND_HERE = re.compile(r"(?:(?:\bdo|\{)[ \t]*\|[^|\n]*|\bdef\b[^\n]*|\brescue\b[^\n]*=>[ \t]*|\bfor\b[^\n]*)\Z")
 BOUND = re.compile(r"[ \t]*([a-z_]\w*)[ \t]*=(?![=~>])")
 LITERAL = re.compile(r"[\"'0-9:-]|(?:nil|true|false)\b")
+PAREN = re.compile(r"[ \t]*\(")
+BIND, BAD, USE, OTHER = "bind", "bad", "use", "other"
 
 
 @dataclass(frozen=True)
@@ -55,34 +64,49 @@ class Maker:
     key: tuple[str, ...]  # the alias the call resolved through, minus its verb (``("PaymentIntent",)``)
 
 
+@dataclass(frozen=True)
+class Mention:
+    pos: int
+    end: int
+    kind: str  # BIND, BAD (a binding not read), USE (``name.verb``), OTHER
+    maker: Maker | None = None
+    verb: str = ""
+    after: int = 0  # index just past the selected name of a USE
+
+
 def extract(text: str, calls: list, resolve) -> list[jsparse.Found]:
     """Instance calls on locals bound to the resolved ``calls`` of one Ruby source (``jsparse.calls``)."""
-    makers = [m for c in calls if (m := _maker(text, c)) is not None]
-    if not makers:
+    makers = sorted((m for c in calls if (m := _maker(text, c)) is not None), key=lambda m: m.start)
+    names = sorted({n for m in makers if (n := _bound_name(text, m)) is not None})
+    if not names:
         return []
-    src, bindings = jsparse.Source(text, ruby=True), calls[0].bindings
-    reader = _Reader(text, src, bindings.mask, _scopes(text), makers)
+    file = _File(text, calls[0].bindings, makers)
     asked: dict[tuple, Resolved | None] = {}
     out: list[jsparse.Found] = []
-    for name in sorted({n for m in makers if (n := _bound_name(text, m)) is not None}):
-        for use in _word(name).finditer(text):
-            sel = SELECT.match(text, use.end())
-            if sel is None or reader.mask.covers(use.start()) or ASSIGN.match(text, sel.end()):
+    work = 0
+    for name in names:
+        mentions = file.mentions(name)
+        work += len(mentions)
+        if work > MAX_WORK:
+            break
+        for root, group in file.by_root(mentions).items():
+            binds = [m for m in group if m.kind == BIND]
+            if not binds or any(m.kind == BAD for m in group) or len({(b.maker.item, b.maker.key) for b in binds}) != 1:
                 continue
-            held = reader.held(name, use.start())
-            if held is None:
+            if file.multiple(name, root):
                 continue
-            maker, first = held
-            verb = sel.group(1)
-            key = (maker.key, maker.item, verb)
-            if key not in asked:
-                asked[key] = instance_op(resolve, maker.key, maker.item, verb)
-            if asked[key] is None:
-                continue
-            fields = _args(src, text, sel.end(), bindings)
-            if verb == "save":
-                reader.written(name, first, use.start(), fields)
-            out.append(jsparse.Found(text.count("\n", 0, use.start()) + 1, f"{name}.{verb}", asked[key], fields))
+            for k, use in enumerate(group):
+                if use.kind != USE or (reach := file.reaching(group, k)) is None:
+                    continue
+                maker = group[reach].maker
+                key = (maker.key, maker.item, use.verb)
+                if key not in asked:
+                    asked[key] = instance_op(resolve, maker.key, maker.item, use.verb)
+                if asked[key] is None:
+                    continue
+                fields = file.written(group, reach, k) if use.verb == "save" else jsparse.Fields()
+                jsparse.merge(fields, _args(file.src, text, use.after, file.bindings))
+                out.append(jsparse.Found(file.line(use.pos), f"{name}.{use.verb}", asked[key], fields))
     return out
 
 
@@ -101,10 +125,6 @@ def instance_op(resolve, key: tuple[str, ...], item: str, verb: str) -> Resolved
         return resolved
     head, _, action = resolved.path.rpartition("/")
     return resolved if ITEM.sub("/{}", head) == item and re.fullmatch(r"[a-z_]+", action) else None
-
-
-def _word(name: str) -> re.Pattern[str]:
-    return re.compile(rf"(?<![\w@$.:]){re.escape(name)}(?![\w?!])")
 
 
 def _maker(text: str, c) -> Maker | None:
@@ -144,69 +164,76 @@ def _bound_name(text: str, m: Maker) -> str | None:
     return head.group(1) if head and head.end() <= m.start else None
 
 
-def _scopes(text: str) -> list[tuple[int, int]]:
-    """(start, end) of each ``def`` and line-ending ``do`` block: to the next line indented no deeper."""
-    lines = [(m.start(), m.group(0)) for m in re.finditer(r"[^\n]*\n?", text) if m.group(0)]
-    index = {s: k for k, (s, _) in enumerate(lines)}
-    out = []
-    for m in SCOPE.finditer(text):
-        k, indent = index.get(m.start()), len(m.group(1).expandtabs())
-        if k is None:
-            continue
-        end = len(text)
-        for s, body in lines[k + 1 :]:
-            stripped = body.strip()
-            if stripped and not stripped.startswith("#") and len(body.expandtabs()) - len(body.expandtabs().lstrip()) <= indent:
-                end = s + len(body) if re.match(r"end\b", stripped) else s
-                break
-        out.append((m.start(), end))
-    return out
+class _File:
+    """One Ruby source, indexed once: its blocks, newlines, makers and multiple assignments."""
 
+    def __init__(self, text: str, bindings, makers: list[Maker]) -> None:
+        self.text, self.bindings, self.mask = text, bindings, bindings.mask
+        self.src = jsparse.Source(text, ruby=True)
+        self.scopes = Scopes(text)
+        self.makers, self.maker_starts = makers, [m.start for m in makers]
+        self.newlines = [i for i, c in enumerate(text) if c == "\n"]
+        self.multiples = [(x.start(), set(re.findall(r"[a-z_]\w*", x.group(0)))) for x in MULTIPLE.finditer(text)]
 
-class _Reader:
-    def __init__(self, text: str, src: jsparse.Source, mask, scopes: list[tuple[int, int]], makers: list[Maker]):
-        self.text, self.src, self.mask, self.scopes, self.makers = text, src, mask, scopes, makers
+    def line(self, pos: int) -> int:
+        return bisect.bisect_left(self.newlines, pos) + 1
 
-    def _around(self, pos: int) -> list[tuple[int, int]]:
-        return [s for s in self.scopes if s[0] <= pos < s[1]]
-
-    def held(self, name: str, at: int) -> tuple[Maker, int] | None:
-        """(the resource ``name`` holds at ``at``, its first binding): every binding of the name in the outermost
-        scope around ``at`` binds that resource, and one before ``at`` sits in a scope that holds ``at``."""
-        text, around = self.text, self._around(at)
-        if not around:
-            return None
-        lo, hi = min(around)
-        if any(name in re.findall(r"[a-z_]\w*", x.group(0)) for x in MULTIPLE.finditer(text, lo, hi)):
-            return None  # a, b = ...
-        found: list[tuple[int, Maker]] = []
-        for m in _word(name).finditer(text, lo, hi):
-            p, line = m.start(), text.rfind("\n", 0, m.start()) + 1
+    def mentions(self, name: str) -> list[Mention]:
+        text, out = self.text, []
+        for m in re.finditer(rf"(?<![\w@$.:]){re.escape(name)}(?![\w?!])", text):
+            p = m.start()
             if self.mask.covers(p):
                 continue
+            line = text.rfind("\n", 0, p) + 1
             if NOT_BOUND_HERE.search(text, line, p):
-                return None  # a block, rescue or loop variable, or a parameter
-            assign = ASSIGN.match(text, m.end())
-            if assign is None:
+                out.append(Mention(p, m.end(), BAD))  # a block, rescue or loop variable, or a parameter
                 continue
-            if assign.group(0).strip() != "=" or text[line:p].strip():
-                return None  # x ||= ..., x += ..., or an assignment inside an expression
-            maker = self._value(m.end() + len(assign.group(0)))
-            if maker is None:
-                return None
-            found.append((p, maker))
-        if not found or len({(mk.item, mk.key) for _, mk in found}) != 1:
-            return None
-        for p, maker in found:
-            inner = max(self._around(p))
-            if p < at and inner[0] <= at < inner[1]:
-                return maker, found[0][0]
+            assign = ASSIGN.match(text, m.end())
+            if assign is not None:
+                maker = None
+                if assign.group(0).strip() == "=" and not text[line:p].strip():
+                    maker = self._value(m.end() + len(assign.group(0)))
+                out.append(Mention(p, m.end(), BIND if maker else BAD, maker))
+                continue
+            sel = SELECT.match(text, m.end())
+            if sel is not None and not ASSIGN.match(text, sel.end()):
+                out.append(Mention(p, m.end(), USE, verb=sel.group(1), after=sel.end()))
+            else:
+                out.append(Mention(p, m.end(), OTHER))
+        return out
+
+    def by_root(self, mentions: list[Mention]) -> dict[int, list[Mention]]:
+        """Mentions grouped by the outermost block around them; mentions outside every block are left out."""
+        out: dict[int, list[Mention]] = {}
+        for m in mentions:
+            root = self.scopes.root(m.pos)
+            if root is not None:
+                out.setdefault(root, []).append(m)
+        return out
+
+    def multiple(self, name: str, root: int) -> bool:
+        """``a, name = ...`` somewhere in the block ``root``."""
+        lo, hi = self.scopes.span(root)
+        for pos, names in self.multiples[bisect.bisect_left(self.multiples, (lo,)):]:
+            if pos >= hi:
+                return False
+            if name in names:
+                return True
+        return False
+
+    def reaching(self, group: list[Mention], k: int) -> int | None:
+        """Index of the binding in force at mention ``k``: the last one before it in a block that holds it."""
+        at = group[k].pos
+        for j in range(k - 1, -1, -1):
+            if group[j].kind == BIND and self.scopes.holds(self.scopes.innermost(group[j].pos), at):
+                return j
         return None
 
     def _value(self, i: int) -> Maker | None:
         """The maker the value from ``i`` to the end of its statement is: one call, or both arms of a ternary."""
         end = self.src.line_end(i)
-        inside = sorted((m for m in self.makers if i <= m.start and m.end <= end), key=lambda m: m.start)
+        a, b = bisect.bisect_left(self.maker_starts, i), bisect.bisect_left(self.maker_starts, end)
+        inside = [m for m in self.makers[a:b] if m.end <= end]
         if not inside or len({(m.item, m.key) for m in inside}) != 1:
             return None
         shape, last = [], i
@@ -216,28 +243,43 @@ class _Reader:
         value = "".join(shape) + self.text[last:end].split(";", 1)[0]  # ``x = X.retrieve(id); x.save``
         return inside[0] if ONE_CALL.fullmatch(value) or TERNARY.fullmatch(value) else None
 
-    def written(self, name: str, first: int, at: int, out: jsparse.Fields) -> None:
-        """Attributes written into ``name`` between its first binding and ``save`` at ``at``; any use that is
-        neither such a write nor a plain read hides the call."""
-        text, src = self.text, self.src
-        for m in _word(name).finditer(text, first, at):
-            if self.mask.covers(m.start()) or ASSIGN.match(text, m.end()):
-                continue  # a binding (checked by held)
-            parts, j = [], m.end()
+    def written(self, group: list[Mention], reach: int, k: int) -> jsparse.Fields:
+        """What ``save`` at mention ``k`` sends: the writes after binding ``reach`` (or after the last ``save``
+        since) in blocks that hold the call. Any other use, or a use in a nested block, hides it."""
+        text, src, at = self.text, self.src, group[k].pos
+        out = jsparse.Fields()
+        for m in group[reach + 1 : k]:
+            inside = self.scopes.holds(self.scopes.innermost(m.pos), at)
+            if m.kind == USE and m.verb == "save" and inside:
+                out = jsparse.Fields()  # stripe-ruby sends only what changed since the last save
+                continue
+            parts, keyed, j = [], True, m.end
             while (f := FIELD.match(text, j)) is not None:
                 parts.append(next(g for g in f.groups() if g))
+                keyed = keyed and (len(parts) == 1 or f.group(1) is None)  # [:k] after the first name
                 j = f.end()
+            assign = ASSIGN.match(text, j) if parts else None
+            if assign is None:
+                if not (parts and _plain_read(text, j)):
+                    out.hide("")
+                continue
+            if not inside:
+                out.hide("")  # written in a nested block: whether and how often it ran is not visible
+                continue
+            if not keyed:  # sub.items.first.price = p: a name that may be a method, somewhere under items
+                out.add(parts[0])
+                out.hide(parts[0])
+                continue
             path = ".".join(parts)
-            assign = ASSIGN.match(text, j) if path else None
-            if assign is not None:
-                out.add(path)
-                value = src.skip_space(j + len(assign.group(0)))
-                if value < src.n and text[value] in "{[":
-                    src.value(value, path, out)
-                elif not LITERAL.match(text, value):
-                    out.hide(path)  # a value built elsewhere: a hash may hold any sub-field
-            elif not (path and _plain_read(text, j)):
-                out.hide("")
+            out.add(path)
+            value = src.skip_space(j + len(assign.group(0)))
+            if value < src.n and text[value] == "{":
+                src.object_fields(value + 1, path + ".", out)
+            elif value < src.n and text[value] == "[":
+                src.array_fields(value + 1, path, out)
+            elif not LITERAL.match(text, value):
+                out.hide(path)  # a value built elsewhere: a hash may hold any sub-field
+        return out
 
 
 def _plain_read(text: str, j: int) -> bool:
@@ -255,7 +297,7 @@ def _plain_read(text: str, j: int) -> bool:
 def _args(src: jsparse.Source, text: str, i: int, bindings) -> jsparse.Fields:
     """The request fields of an instance call's arguments: ``(...)``, or arguments after a blank."""
     fields = jsparse.Fields()
-    paren = re.compile(r"[ \t]*\(").match(text, i)
+    paren = PAREN.match(text, i)
     if paren is not None:
         jsparse.collect(src, src.args(paren.end() - 1), False, bindings, fields, ruby=True)
         return fields
