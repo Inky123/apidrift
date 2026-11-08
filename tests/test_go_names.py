@@ -113,3 +113,14 @@ def test_a_parent_set_for_certain_picks_the_nested_path():
         "}\n", "taxid",
     )
     assert [label for _, label, _, _ in found(text)] == ["POST /v1/customers/{customer}/tax_ids"] * 2
+
+
+def test_an_embedded_struct_built_elsewhere_hides_the_call():
+    text = go(
+        "func f(lp stripe.ListParams, p stripe.Params) {\n"
+        "\tcustomer.List(&stripe.CustomerListParams{ListParams: lp})\n"
+        "\tcustomer.New(&stripe.CustomerParams{Params: p, Email: stripe.String(\"a\")})\n"
+        "\tcustomer.List(&stripe.CustomerListParams{ListParams: *stripe.NewListParams()})\n"
+        "}\n", "customer",
+    )
+    assert [(fields, complete) for _, _, fields, complete in found(text)] == [([], False), (["email"], False), ([], False)]

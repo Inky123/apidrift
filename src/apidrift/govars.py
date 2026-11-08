@@ -223,9 +223,12 @@ class Reader:
             if b - a < 3 or src.kind[a] != ID or src.tok[a + 1] != ":":
                 out.hidden.add(prefix)  # an unkeyed element: which field it fills is not written here
                 continue
-            embedded = self.typed(a + 2, b) if src.tok[a] in EMBEDDED else None
-            if embedded and embedded[0] == src.tok[a]:  # ListParams: stripe.ListParams{Limit: ...} sends limit
-                self.literal(embedded[1], embedded[0], prefix, out)
+            if src.tok[a] in EMBEDDED:
+                embedded = self.typed(a + 2, b)
+                if embedded and embedded[0] == src.tok[a]:  # ListParams: stripe.ListParams{Limit: ...} sends limit
+                    self.literal(embedded[1], embedded[0], prefix, out)
+                else:
+                    out.hidden.add(prefix)  # ListParams: lp: whatever that struct holds
                 continue
             path, exact = self.name(prefix, src.tok[a])
             if path is None:
