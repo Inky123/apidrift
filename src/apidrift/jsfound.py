@@ -19,9 +19,12 @@ def found(text: str, index, resolved_calls, *, ruby: bool, resolve, table, rel: 
         helpers.src.spreads = jsspread.Reader(helpers)
     for c in resolved_calls:
         fields, via = Fields(), jshelpers.Via(helpers)
-        collect(c.args_src, c.spans, jsbare.id_slot(c), c.bindings, fields, ruby=ruby, helper=via)
-        jsswitch.settle(helpers, fields, lambda sink, c=c: collect(
-            c.args_src, c.spans, jsbare.id_slot(c), c.bindings, sink, ruby=ruby, helper=jshelpers.Via(helpers)))
+        try:
+            collect(c.args_src, c.spans, jsbare.id_slot(c), c.bindings, fields, ruby=ruby, helper=via)
+            jsswitch.settle(helpers, fields, lambda sink, c=c: collect(
+                c.args_src, c.spans, jsbare.id_slot(c), c.bindings, sink, ruby=ruby, helper=jshelpers.Via(helpers)))
+        except RecursionError:  # arguments nested too deeply to read: the call, with nothing visible
+            fields = Fields(complete=False, hidden={""})
         out.append(Found(c.line, c.call + via.suffix, c.resolved, fields))
     out += rbobjects.extract(text, resolved_calls, resolve or index.resolve) if ruby else []  # pi.confirm(...)
     if table is not None:  # wrappers defined in other files (jscross builds on jsparse)

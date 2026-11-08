@@ -235,7 +235,7 @@ def scan_text(
     elif language == "go":
         found, missing, unread_name = _scan_go(text, rel, index, table)
     elif language:
-        found, missing = _scan_dynamic(text, rel, index, reads, language, table)
+        found, missing, unread_name = _scan_dynamic(text, rel, index, reads, language, table)
     else:
         missing = []
         unread_name = UNREAD_LANGUAGES.get(suffix)
@@ -349,18 +349,27 @@ def _scan_go(text: str, rel: str, index: SdkIndex, table=None):
 # --- JavaScript / TypeScript / Ruby / PHP ---------------------------------------
 
 
+TOO_DEEP = {lang: f"{name} (nested too deeply)" for lang, name in
+            (("javascript", "JavaScript"), ("typescript", "TypeScript"), ("ruby", "Ruby"), ("php", "PHP"))}
+
+
 def _scan_dynamic(text: str, rel: str, index: SdkIndex, reads: frozenset[str], language: str, table=None):
+    """A call whose arguments nest too deeply is read as hidden (jsfound, phpparse); a file whose brackets or
+    blocks nest too deeply to walk at all is not read, and the report says so (``unread``)."""
     resolve = lambda chain: _resolve(index, chain)  # noqa: E731
-    if language == "php":
-        found, missing = phpparse.extract(text, resolve, table, rel)
-    else:
-        found, missing = jsparse.extract(text, index, ruby=language == "ruby", resolve=resolve, table=table, rel=rel)
+    try:
+        if language == "php":
+            found, missing = phpparse.extract(text, resolve, table, rel)
+        else:
+            found, missing = jsparse.extract(text, index, ruby=language == "ruby", resolve=resolve, table=table, rel=rel)
+    except RecursionError:
+        return [], [], TOO_DEEP[language]
     usages = [
         Usage(rel, f.line, f.resolved.method, f.resolved.path, f.call, frozenset(f.fields.paths), f.fields.complete,
               language, reads, frozenset(f.fields.hidden), switched=frozenset(getattr(f.fields, "switched", ())))
         for f in found
     ]
-    return usages, [(rel, line, call) for line, call in missing]
+    return usages, [(rel, line, call) for line, call in missing], None
 
 
 # --- Literal URLs -------------------------------------------------------------
