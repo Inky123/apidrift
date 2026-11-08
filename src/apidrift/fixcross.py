@@ -163,3 +163,29 @@ def py_sites(loc, usage, m):
             out.why = out.why or fixhelpers.SHARED  # the caller's dict is also used elsewhere
         loc._py_value(c, value, segs, m, out)
     return out
+
+
+def go_sites(loc, usage, m):
+    """The edit sites of a Go caller of a wrapper (:mod:`gocross`): its typed literal, or the binding and
+    field writes of the variable it passes, exactly as for a direct call's params; refused when that
+    variable also feeds another call."""
+    from . import gocross
+    from .fixedit import Sites
+
+    table, go = getattr(loc, "table", None), getattr(loc, "go", None)
+    got = THROUGH_FILE.search(usage.call)
+    if table is None or got is None or table.collecting or go is None or go.file is None:
+        return Sites(found_call=False)
+    rel = (getattr(loc, "context", None) or (None, ""))[1]
+    name, file, line = got.group(1), got.group(2), int(got.group(3))
+    found = [
+        params for w, at, _, params in gocross.sites(go.file, loc.text, table, rel)
+        if at == usage.line and (w.name, w.file, w.line) == (name, file, line) and w.resolved.path == usage.path
+        and w.resolved.method == usage.method
+    ]
+    if len(found) != 1:
+        return Sites(found_call=False)
+    out = go.params_sites(found[0], m)
+    if found[0].shared:
+        out.why = out.why or fixhelpers.SHARED
+    return out

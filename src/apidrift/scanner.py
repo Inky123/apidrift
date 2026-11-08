@@ -176,7 +176,7 @@ def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> Scan
         base = root
     # Stripe's own reader follows wrappers across files (crosstable): a first pass notes them, then the
     # files that call them, or define one whose callers are all visible, are read again with the table.
-    table = crosstable.Table() if reader.scan_text is None and root.is_dir() else None
+    table = crosstable.Table(index=index) if reader.scan_text is None and root.is_dir() else None
     if table is not None:
         read = lambda text, rel, index: scan_text(text, rel, index, table)  # noqa: E731
     per_file: dict[str, tuple[list[Usage], list[tuple[str, int, str]]]] = {}
@@ -223,7 +223,7 @@ def scan_text(
     if language == "python":
         found, missing = _scan_python(text, rel, index, reads, table)
     elif language == "go":
-        found, missing, unread_name = _scan_go(text, rel, index)
+        found, missing, unread_name = _scan_go(text, rel, index, table)
     elif language:
         found, missing = _scan_dynamic(text, rel, index, reads, language, table)
     else:
@@ -341,11 +341,12 @@ def _scan_python(text: str, rel: str, index: SdkIndex, reads: frozenset[str], ta
 # --- Go -----------------------------------------------------------------------
 
 
-def _scan_go(text: str, rel: str, index: SdkIndex):
+def _scan_go(text: str, rel: str, index: SdkIndex, table=None):
     if index.go is None:
         return [], [], None
     try:
-        found, missing, reads = goparse.extract(text, index.go)
+        extra = (table, rel) if table is not None else ()
+        found, missing, reads = goparse.extract(text, index.go, *extra)
     except (IndexError, RecursionError):  # source the tokeniser's assumptions do not hold for: say it was not read
         return [], [], "Go"
     usages = [

@@ -83,6 +83,8 @@ class Locator:
 
     def sites(self, usage: Usage, migration: Migration) -> Sites:
         if self.language == "go":
+            if fixcross.is_cross(usage.call):
+                return fixcross.go_sites(self, usage, migration)  # a caller of a wrapper (gocross)
             return self.go.sites(usage, migration)
         if self.language == "python":
             return self._py(usage, migration)

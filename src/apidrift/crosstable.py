@@ -84,6 +84,7 @@ class Table:
     rescan: set[str] = field(default_factory=set)
     notes: list[str] = field(default_factory=list)  # why a candidate was not followed
     base: Path | None = None  # the checkout (module paths of JS imports are resolved against it)
+    index: object = field(default=None, repr=False)  # the scan's SDK index (Go reads params types through it)
 
     def add(self, w: Wrapper) -> None:
         if self.collecting:
@@ -197,9 +198,10 @@ def settle(table: Table, language: str) -> None:
 def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
     """Pass 2: decide what is followed. ``sources`` are the files the scan reads (vendored and build
     directories already left out); ``resolve`` is the scan's chain resolver."""
-    from . import jscross, phpcross, pycross
+    from . import gocross, jscross, phpcross, pycross
 
     table.collecting, table.base = False, base
     phpcross.finish(table, base, sources, resolve)
     jscross.finish(table, base, sources, resolve)
     pycross.finish(table, base, sources, resolve)
+    gocross.finish(table, base, sources, resolve)

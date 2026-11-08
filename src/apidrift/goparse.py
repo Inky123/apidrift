@@ -109,12 +109,13 @@ class GoFile:
 
     # --- params -----------------------------------------------------------------------
 
-    def read(self, paren: int, resolved: Resolved) -> Params:
+    def read(self, paren: int, resolved: Resolved, index: int = -1) -> Params:
+        """What the call's argument at ``index`` (the params: the last one) sends to ``resolved``."""
         src, out = self.src, Params()
         args = src.split(paren + 1, src.match[paren])
-        if not args:
+        if not args or index >= len(args):
             return out
-        a, b = src.trim(*args[-1])
+        a, b = src.trim(*args[index])
         reader = Reader(src, self.go, (resolved.method, resolved.path), self.roots)
         if b - a == 1 and src.tok[a] == "nil":
             return out
@@ -309,13 +310,19 @@ def calls(text: str, go: GoIndex) -> tuple[list[GoCall], list[tuple[int, str]], 
     return found, unresolved, f
 
 
-def extract(text: str, go: GoIndex) -> tuple[list[GoFound], list[tuple[int, str]], frozenset[str]]:
-    """Stripe calls in a Go source, the calls that matched no endpoint, and the response members the file reads."""
+def extract(
+    text: str, go: GoIndex, table=None, rel: str = ""
+) -> tuple[list[GoFound], list[tuple[int, str]], frozenset[str]]:
+    """Stripe calls in a Go source, the calls that matched no endpoint, and the response members the file reads.
+    ``table`` (:mod:`crosstable`): wrappers followed across files, for the file at ``rel``."""
     found, unresolved, f = calls(text, go)
     out = [
         GoFound(c.line, c.call, c.resolved, set(c.params.fields), not c.params.hidden, frozenset(c.params.hidden))
         for c in found
     ]
+    if table is not None:  # wrappers defined in other files (gocross builds on this module)
+        from . import gocross
+        out = gocross.extend(text, table, rel, out, found, f)
     return out, unresolved, member_reads(f) if f is not None else frozenset()
 
 
