@@ -18,7 +18,7 @@ import re
 
 from .jsparse import Fields
 from .phplex import STRING
-from .phpscope import WRITE
+from .phpscope import BIND, WRITE
 
 FILTER = re.compile(r"apply_filters\s*\(")
 MERGE_ONLY = re.compile(r"(?:array_merge|array_replace|array_merge_recursive|array_replace_recursive)\s*\(")
@@ -50,13 +50,19 @@ def variable_fields(parsed, name: str, at: int, out: Fields, depth: int = 0) -> 
 
 def writes(parsed, name: str, after: int, at: int) -> list:
     """Writes into ``name`` that reach the call at ``at``: between its first reaching binding and the call, and
-    after the call in a loop around both (they reach it on the next pass)."""
+    after the call in a loop around it, when nothing binds ``name`` again between that loop's start and the
+    call (then the write reaches the call on the next pass)."""
     bindings = parsed.bindings
     out = bindings.mutations(name, after, at)
-    loops = [(o, c) for o, c in _loops(bindings) if o < at < c]
-    if loops:
-        lo, hi = min(o for o, _ in loops), max(c for _, c in loops)
-        out += [u for u in bindings._in_scope(name, at) if at < u.pos < hi and u.pos > lo and u.kind == WRITE]
+    mine = bindings._in_scope(name, at)
+    seen = {u.pos for u in out}
+    for o, c in _loops(bindings):
+        if not o < at < c or any(u.kind == BIND and o < u.pos < at for u in mine):
+            continue
+        for u in mine:
+            if at < u.pos < c and u.kind == WRITE and u.pos not in seen:
+                out.append(u)
+                seen.add(u.pos)
     return out
 
 

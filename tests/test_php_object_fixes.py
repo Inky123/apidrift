@@ -174,3 +174,17 @@ def test_a_wrapper_that_hands_its_arguments_to_a_by_reference_helper_is_not_edit
         "  }\n}\n", "  }\n  private function defaults(array &$args) { $args[0]['" + OLD + "'] = ['card']; }\n}\n"
     )
     assert outcome(tmp_path, files)[:2] == ("refused", ["incomplete_binding"])
+
+
+def test_a_write_after_the_call_that_only_reaches_later_code_is_neither_a_finding_nor_edited(tmp_path):
+    src = H + (
+        "function f($xs) {\n"
+        "  foreach ($xs as $x) {\n"
+        "    $d = ['amount' => 1];\n"
+        "    \\Stripe\\PaymentIntent::create($d);\n"
+        "    $d['" + OLD + "'] = ['card'];\n"
+        "    log_it($d);\n"
+        "  }\n"
+        "}\n"
+    )
+    assert outcome(tmp_path, {"app/Pay.php": src})[0] == "nothing"
