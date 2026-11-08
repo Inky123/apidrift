@@ -77,7 +77,12 @@ def test_find_pins_reports_the_gumroad_server_pin(tmp_path):
     ("client/card.js", "const stripe = Stripe(publishableKey, { apiVersion: '2020-08-27' });\n", "browser"),
     ("client/konbini.js", "const stripe = Stripe(pk, {\n  betas: ['b'],\n  apiVersion: '2020-08-27; konbini_beta=v1',\n});\n",
      "browser"),
+    # invoiceninja stripe-browserpay.js: the options object is built first, then passed to the global Stripe()
+    ("resources/js/pay.js", "let config = {};\nconfig.apiVersion = '2020-08-27';\nthis.stripe = Stripe(key, config);\n",
+     "browser"),
     # the server SDK
+    ("server/g.js", "let config = {};\nconfig.apiVersion = '2020-08-27';\nconst s = new Stripe(key, config);\n", "server"),
+    ("server/h.js", "const S = require('stripe');\nconfig.apiVersion = '2020-08-27';\nconst s = Stripe(key);\n", "server"),
     ("server/a.js", "const stripe = require('stripe')(key, { apiVersion: '2023-10-16' });\n", "server"),
     ("server/b.ts", "import Stripe from 'stripe';\nconst s = new Stripe(key, { apiVersion: '2023-10-16' });\n", "server"),
     ("server/c.ts", "import Stripe from 'stripe';\nconst s = Stripe(key, { apiVersion: '2023-10-16' });\n", "server"),

@@ -33,6 +33,7 @@ KINDS = ("server", "test", "browser")
 JS_SUFFIXES = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".vue", ".svelte"}
 # Stripe.js: ``loadStripe(pk, {apiVersion})`` (@stripe/stripe-js) or the global ``Stripe(pk, {apiVersion})``.
 BROWSER_CALL = re.compile(r"(?<![\w$.])(loadStripe|Stripe)\s*\(")
+NEW_STRIPE = re.compile(r"\bnew\s+Stripe\s*\(")
 SERVER_IMPORT = re.compile(r"""\brequire\(\s*['"]stripe['"]\s*\)|\bfrom\s+['"]stripe['"]|\bimport\s+['"]stripe['"]""")
 
 
@@ -61,16 +62,24 @@ def pin_kind(rel: str, text: str, pos: int) -> str:
 
 def _in_browser_call(text: str, pos: int) -> bool:
     """The pin sits in the arguments of ``loadStripe(...)``, or of a bare ``Stripe(...)`` (not ``new Stripe``) in
-    a file that never imports the server SDK (``require('stripe')``, ``from 'stripe'``)."""
+    a file that never imports the server SDK (``require('stripe')``, ``from 'stripe'``); or the file is Stripe.js
+    code throughout: it calls one of those, never imports the server SDK and never writes ``new Stripe(``."""
     server = SERVER_IMPORT.search(text) is not None
+    if not server and not NEW_STRIPE.search(text) and any(_browser_call(text, m) for m in BROWSER_CALL.finditer(text)):
+        return True  # a Stripe.js file (``config.apiVersion = '...'; Stripe(pk, config)``): no server SDK in it at all
     src = None
     for m in reversed(list(BROWSER_CALL.finditer(text, max(0, pos - 2000), pos))):
-        if m.group(1) == "Stripe" and (server or re.search(r"\bnew\s*$", text[max(0, m.start() - 8) : m.start()])):
+        if m.group(1) == "Stripe" and (server or not _browser_call(text, m)):
             continue
         src = src or Source(text)
         if src.skip_balanced(m.end() - 1) > pos:
             return True
     return False
+
+
+def _browser_call(text: str, m: re.Match[str]) -> bool:
+    """``loadStripe(``, or ``Stripe(`` that is not ``new Stripe(``."""
+    return m.group(1) == "loadStripe" or not re.search(r"\bnew\s*$", text[max(0, m.start() - 8) : m.start()])
 
 
 def pin_versions(text: str) -> list[tuple[int, str]]:
