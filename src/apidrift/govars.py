@@ -16,7 +16,12 @@ from dataclasses import dataclass, field
 from .golex import ASSIGN_OPS, BLOCK, ID, GoSource
 from .gomap import GoIndex, Op, snake_guess
 
-SDK_ONLY = {"Params", "ListParams", "Context", "UnsetFields", "StripeAccount", "IdempotencyKey", "Headers", "Extra"}
+SDK_ONLY = {
+    "Params", "ListParams", "SearchParams", "Context", "UnsetFields", "StripeAccount", "IdempotencyKey", "Headers", "Extra",
+    "Single",  # ListParams.Single / SearchParams.Single: ``form:"-"``, never sent
+}
+# structs every params struct embeds; their own fields are sent at the top level (``form:"*"``)
+EMBEDDED = {"Params", "ListParams", "SearchParams"}
 # params methods that set no request field of their own; the two ``Add`` helpers fill the field named here
 PARAM_METHODS = {
     "AddExpand": "Expand", "AddMetadata": "Metadata", "SetIdempotencyKey": "", "SetStripeAccount": "",
@@ -217,6 +222,10 @@ class Reader:
             a, b = src.trim(a, b)
             if b - a < 3 or src.kind[a] != ID or src.tok[a + 1] != ":":
                 out.hidden.add(prefix)  # an unkeyed element: which field it fills is not written here
+                continue
+            embedded = self.typed(a + 2, b) if src.tok[a] in EMBEDDED else None
+            if embedded and embedded[0] == src.tok[a]:  # ListParams: stripe.ListParams{Limit: ...} sends limit
+                self.literal(embedded[1], embedded[0], prefix, out)
                 continue
             path, exact = self.name(prefix, src.tok[a])
             if path is None:

@@ -23,13 +23,23 @@ import re
 from typing import Iterable
 
 from .openapi import SdkOp, Spec
-from .sdkmap import Resolved, plural
+from .sdkmap import Resolved, plural, singular
 
 PACKAGE, API, SERVICE = "package", "api", "service"
+VIA = "@"  # ``new@customer``: the verb of a call whose params name the parent (:meth:`GoIndex._split_parents`)
 LEGACY_VERBS = {"create": "new", "retrieve": "get", "update": "update", "delete": "del", "list": "list"}
 LEGACY_PACKAGES = {"sub": "subscription", "subitem": "subscriptionitem", "subschedule": "subscriptionschedule"}
 ACRONYMS = ("ID", "URL", "IP", "API", "SEPA", "BACS", "ACH", "SKU", "IBAN", "BIC", "VAT", "PDF", "UI", "US", "TOS")
 Op = tuple[str, str]
+
+
+def _parent(top: Op, nested: Op) -> str | None:
+    """``customer`` when ``nested`` is ``top`` under one parent's item (``/v1/customers/{customer}/tax_ids``
+    and ``/v1/tax_ids``), with the same HTTP method."""
+    a, b = top[1].strip("/").split("/"), nested[1].strip("/").split("/")
+    if top[0] != nested[0] or len(b) != len(a) + 2 or b[:1] != a[:1] or b[3:] != a[1:] or not b[2].startswith("{"):
+        return None
+    return flat(singular(b[1]))
 
 
 def flat(name: str) -> str:
@@ -82,7 +92,21 @@ class GoIndex:
                 owner = owners.get(parent.rpartition("/")[0]) if parent.endswith("}") else None
                 if op.method_type == "list" and owner and owner != key:  # invoice.ListLines
                     index._add(op, owner, False, False, verb="list" + flat(sub))
+        index._split_parents()
         return index
+
+    def _split_parents(self) -> None:
+        """``taxid.New`` posts to ``/v1/customers/{customer}/tax_ids`` when its params set ``Customer`` and to
+        ``/v1/tax_ids`` otherwise (stripe-go tests ``params.Customer != nil``). For an alias that reaches such a
+        pair, ``verb@customer`` names the nested operation and ``verb@`` the other (:data:`VIA`)."""
+        for (style, owner, verb), ops in list(self._aliases.items()):
+            if len(ops) != 2 or VIA in verb:
+                continue
+            top, nested = sorted(ops, key=lambda op: op[1].count("/"))
+            parent = _parent(top, nested)
+            if parent:
+                self._aliases[(style, owner, f"{verb}{VIA}{parent}")] = {nested}
+                self._aliases[(style, owner, f"{verb}{VIA}")] = {top}
 
     def _add(self, op: SdkOp, key: tuple[str, str], singleton: bool, bare_get: bool, verb: str | None = None) -> None:
         package, class_name = key

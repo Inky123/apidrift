@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from .jsparse import Fields, Found, Span
 from .phplex import OPENERS, STRING, Lex
 from .phpscope import WRITE, Bindings, Scopes
-from .sdkmap import Resolved
+from .sdkmap import Resolved, without_id
 
 VERB = re.compile(r"(\?->|->|::)\s*([A-Za-z_]\w*)\s*\(")
 NEW = re.compile(r"new\s+(\\?[A-Za-z_][\w\\]*)")
@@ -124,6 +124,8 @@ def parse(text: str, resolve) -> Parsed:
         spans = src.args(m.end() - 1)
         resolved_at.add(start)
         ids = resolved.path.count("{")
+        if not spans or src.text[spans[0][0] : spans[0][1]].strip().lower() == "null":  # Account::retrieve(): /v1/account
+            resolved = without_id(resolve, resolved)
         params = _params(src, spans, ids, id_only=static and verb == "retrieve" and ids == 1)
         parsed.calls.append(Call(src.line(start), call, resolved, m.end() - 1, spans, params))
     # ``$owner->stripe()`` on the way to ``->subscriptions->update(`` is that call's receiver, not another call
