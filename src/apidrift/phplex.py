@@ -265,11 +265,11 @@ class Lex:
         return m.end() - 1 if m and (m.end() - 1) in self.pairs else None
 
 
-@functools.lru_cache(maxsize=16)
+@functools.lru_cache(maxsize=32)
 def lex(text: str, fragment: bool = False) -> Lex:
     """:class:`Lex` of ``text``, the last few kept: the readers, the wrapper surveys, the cross-file passes
     and the fixer's oracle each read the same file, and a Lex is a pure function of its text that nothing
-    writes to after construction."""
+    writes to after construction. (The largest Lex seen, an 850 KB file of string literals, is 10 MB.)"""
     return Lex(text, fragment=fragment)
 
 

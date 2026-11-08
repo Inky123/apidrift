@@ -72,6 +72,7 @@ class Registry:
     hooks: set[str] = field(default_factory=set)  # WordPress filter hooks the checkout registers (phpfilters)
     rescan: set[str] = field(default_factory=set)
     skipped: int = 0  # caller files past MAX_FILES, not read for wrapper calls
+    files: dict[str, object] = field(default_factory=dict, repr=False)  # text -> its parsed PHP File, survey to sites
 
     def collect(self, text: str, rel: str) -> None:
         """Note the wrappers one file defines, the function names it defines and the names it calls."""
@@ -84,7 +85,7 @@ class Registry:
         elif lang in ("php", "python"):
             if lang == "php" and "add_filter" in text:
                 self.hooks |= production_hooks(rel, text)
-            found, defined, called = (httpphp if lang == "php" else httppy).survey(text, rel)
+            found, defined, called = httpphp.survey(text, rel, self.files) if lang == "php" else httppy.survey(text, rel)
         else:
             return
         names = self.names.setdefault(lang, {})
