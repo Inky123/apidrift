@@ -189,7 +189,8 @@ def plan_fixes(result: ScanResult, impacts: list[Impact], index: SdkIndex, root:
             total += len(raw)
     plan.pins = find_pins(root, [f.file for f in plan.fixes])
     sites = [(s.action, s.target) for f in plan.fixes for s in f.sites]
-    plan.tests = fixtests.stale_tests(base, sites, {f.file for f in plan.fixes}) if sites else []
+    senders = {u.file for u in result.usages if u.language != "doc"}
+    plan.tests = fixtests.stale_tests(base, sites, {f.file for f in plan.fixes}, senders) if sites else []
     plan.test_fixes, plan.tests, plan.cassettes = fixtestedit.plan_tests(plan, impacts, index, base)
     return plan
 

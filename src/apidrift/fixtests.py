@@ -13,7 +13,8 @@ is listed only when it can be about the request the fix changed:
   ``PaymentMethodTypes`` in Go only (a camelCase ``paymentMethodTypes`` in JS is Stripe.js or the app's own
   model, never a server request key);
 - the test is in the language of a file the fix changed (JS and TS count as one): a browser test cannot run
-  the server's Ruby;
+  the server's Ruby; unless the test sends to Stripe itself (a Stripe call in it, or an ``api.stripe.com``
+  URL), when it is listed whatever its language;
 - it is not inside a literal Stripe object (a hash with an ``id`` and an ``object`` string at its own level),
   which is a recorded response, not a request, nor an RSpec stub of a method of that name
   (``receive(:payment_method_types)``), which reads a response.
@@ -49,11 +50,15 @@ def _is_test(rel: str) -> bool:
     return any(d in TEST_DIRS for d in dirs) or bool(TEST_FILE.match(name))
 
 
-def stale_tests(root: Path, sites: list[tuple[str, str]], edited: set[str]) -> list[tuple[str, int]]:
+def stale_tests(
+    root: Path, sites: list[tuple[str, str]], edited: set[str], senders: set[str] = frozenset(),
+) -> list[tuple[str, int]]:
     """``(file, line)`` in test files outside ``edited`` that name a field one of ``sites`` renames or removes.
 
     ``sites`` holds ``(action, target)`` for every planned edit; ``edited`` are the files the fix changes, whose
-    languages are the only ones whose tests are read (all when empty). Lines are 1-based; at most MAX_MENTIONS.
+    languages are the only ones whose tests are read (all when empty), except a test that sends to Stripe
+    itself: one of ``senders`` (files with a Stripe call) or one naming ``api.stripe.com``. Lines are 1-based;
+    at most MAX_MENTIONS.
     """
     fields = {leaf(target) for action, target in sites if action in GONE_ACTIONS}
     if not fields:
@@ -66,11 +71,12 @@ def stale_tests(root: Path, sites: list[tuple[str, str]], edited: set[str]) -> l
     for path in files:
         rel = path.relative_to(root).as_posix()
         language = LANGUAGES.get(path.suffix.lower())
-        if rel in edited or language is None or not _is_test(rel) or (families and FAMILY.get(language, language) not in families):
+        if rel in edited or language is None or not _is_test(rel):
             continue
+        other = bool(families) and FAMILY.get(language, language) not in families and rel not in senders
         text = _read(path)
-        if text is None or not loose.search(text.replace("_", "")):
-            continue
+        if text is None or not loose.search(text.replace("_", "")) or (other and "api.stripe.com" not in text):
+            continue  # a test in another language can only matter when it sends to Stripe itself
         found = [t for name in fields for spelling in _spellings(name, language) for t in tokens(text, language, spelling)]
         found += _form_encoded(text, language, fields)
         objects = _stripe_objects(text, language, {t.pos for t in found})

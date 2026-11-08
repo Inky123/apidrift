@@ -54,6 +54,26 @@ def test_r4_a_derivation_that_names_the_old_key_keeps_the_literal_listed(tmp_pat
         assert plan.test_fixes == [] and ("spec/pay_service_spec.rb", 7) in plan.tests, change
 
 
+def test_item5_a_test_that_sends_to_stripe_is_listed_whatever_its_language(tmp_path):
+    from apidrift.fixtests import stale_tests
+
+    files = {
+        "tests/e2e/helpers.ts": "await fetch(`https://api.stripe.com${path}`, { body: { payment_method_types: ['x'] } })\n",
+        "tests/e2e/sdk.test.ts": "await stripe.setupIntents.create({ payment_method_types: ['x'] })\n",
+        "tests/e2e/browser.test.ts": "render(<Elements options={{ payment_method_types: ['x'] }} />)\n",
+    }
+    for name, text in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text)
+    sites = [("rename", "payment_method_types")]
+    assert stale_tests(tmp_path, sites, {"app/Pay.php"}, {"tests/e2e/sdk.test.ts"}) == [
+        ("tests/e2e/helpers.ts", 1), ("tests/e2e/sdk.test.ts", 1)]
+    app = "Stripe::PaymentIntent.create({ payment_method_types: ['card'], amount: 1 })\n"
+    sdk = "const stripe = require('stripe')('k');\nstripe.charges.create({ payment_method_types: ['x'] })\n"
+    plan = plan_for(tmp_path / "plan", {"app/pay.rb": app, "tests/sdk.test.js": sdk})
+    assert ("tests/sdk.test.js", 2) in plan.tests  # the fixer passes the files with Stripe calls
+
+
 def test_r1_form_encoded_bodies_in_http_stubs_are_listed(tmp_path):
     from apidrift.fixtests import stale_tests
 
