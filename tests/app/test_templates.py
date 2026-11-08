@@ -194,8 +194,10 @@ def test_landing_describes_the_pull_request_step_honestly(pages):
     assert "pushes a branch named <code>apidrift/stripe-&lt;version&gt;</code>, and opens one pull request per repository" in html
     assert "documents what to send instead (a field renamed, a field removed, or a value that changed shape)" in html
     assert "re-scans the changed files to confirm they now send what the new release expects" in html
-    assert "because Stripe rejects renamed and reshaped fields on older versions (a removed field can go on any version)." in html
-    assert "lists the API-version pins it found and asks you to merge it together with your API-version and SDK upgrade" in html
+    assert "because older API versions may not accept the new names and reject the new shapes (a removed field can go on any version)." in html
+    assert "Stripe rejects renamed" not in html  # the rename claim was never confirmed for every API version
+    assert "lists the API-version pins and the locked Stripe SDK version it found and asks you to merge it together with your API-version and SDK upgrade" in html
+    assert "Tests that expected the exact old request are updated in the same pull request; other tests that name the old field are listed." in html
     assert "Merging stays a human click." in html
     limitation = (
         "Pull requests only for changes Stripe's changelog documents a replacement for: renamed fields, removed "
@@ -204,7 +206,8 @@ def test_landing_describes_the_pull_request_step_honestly(pages):
     )
     assert f"<li>{limitation}</li>" in html
     assert html.index("<h2>What it does not do yet</h2>") < html.index(limitation)
-    assert html.count("<li>") == 9  # four "How it works" steps and five limitations
+    assert html.count("<li>") == 10  # four "How it works" steps and six limitations
+    assert "Calls through your own HTTP helper" not in html and "found and reported, never edited" in html
     assert "merges" not in html  # it never claims to merge anything itself
 
 
@@ -312,8 +315,13 @@ def test_privacy_page_covers_the_required_points(pages):
     assert "Never file paths" not in html and "never source code" not in html
     assert (
         "For each call site it holds the file path and line number, the SDK call or Stripe URL as it is written there, "
-        "the endpoint it reaches, and the names of the request fields it sends (names only, not values)." in html
+        "the endpoint it reaches, the names of the request fields it sends, and for a field whose value is written as a "
+        "literal in the code, a short one-way digest of that value: enough to tell whether a value Stripe withdraws is "
+        "the one sent, not the value itself" in html
     )
+    assert "names only, not values" not in html  # digests of literal values are stored now, and the page says so
+    assert "never the values your code sends to Stripe beyond the digests above" in html
+    assert "that function's name and location" in html and "the version it switches at" in html
     assert "so that a new Stripe release can be checked without downloading the code again" in html
     assert "one-way hashes of the property names read in that file" in html
     assert "deleted when the repository is removed from the installation" in html

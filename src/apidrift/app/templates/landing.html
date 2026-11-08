@@ -42,7 +42,7 @@
 <li>Stripe publishes <a href="https://github.com/stripe/openapi"><code>spec3.sdk.json</code></a>; apidrift keeps every version{% if stripe_latest %} (the latest it holds is <code>{{ stripe_latest }}</code>){% endif %}.</li>
 <li>Each release is diffed against the one your code last passed, release by release, so every finding names the release that introduced it.</li>
 <li>Your Python, JavaScript, TypeScript, Ruby, PHP and Go are parsed for Stripe calls and the fields they send. Only the calls the diff touches are reported.</li>
-<li>When Stripe's changelog documents what to send instead (a field renamed, a field removed, or a value that changed shape), apidrift rewrites the request at every affected call site, re-scans the changed files to confirm they now send what the new release expects, pushes a branch named <code>apidrift/stripe-&lt;version&gt;</code>, and opens one pull request per repository. The pull request lists the API-version pins it found and asks you to merge it together with your API-version and SDK upgrade, because Stripe rejects renamed and reshaped fields on older versions (a removed field can go on any version). Merging stays a human click.</li>
+<li>When Stripe's changelog documents what to send instead (a field renamed, a field removed, or a value that changed shape), apidrift rewrites the request at every affected call site, re-scans the changed files to confirm they now send what the new release expects, pushes a branch named <code>apidrift/stripe-&lt;version&gt;</code>, and opens one pull request per repository. Tests that expected the exact old request are updated in the same pull request; other tests that name the old field are listed. The pull request lists the API-version pins and the locked Stripe SDK version it found and asks you to merge it together with your API-version and SDK upgrade, because older API versions may not accept the new names and reject the new shapes (a removed field can go on any version). Merging stays a human click.</li>
 </ol>
 
 <h2>What it does not do yet</h2>
@@ -52,6 +52,7 @@
 <li>Stripe only.</li>
 <li>It does not read which API version your account is pinned to.</li>
 <li>Calls whose arguments it cannot see are marked <code>?</code> (possibly affected), not guessed.</li>
-<li>Other languages get endpoint-level matches from literal URLs only.</li>
+<li>Other languages get endpoint-level matches from literal URLs only. Code that reaches Stripe through your own HTTP helper is found and reported, never edited.</li>
+<li>A wrapper function in another file is followed one hop, when its name is unique and the receiver's type proves which class it is. A wrapper behind dependency injection, an untyped property or a generic method name stays a possibly-affected call.</li>
 </ul>
 {% endblock %}

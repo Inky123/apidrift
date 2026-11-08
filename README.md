@@ -75,5 +75,5 @@ comment in that file describes first boot and the proxy site block.
 Fix what Stripe has not documented a replacement for. The pull request covers renamed fields, removed
 fields and fields whose value changed shape (today: `payment_method_types`, `payto`, `filters.countries`,
 `billing_cycle_anchor`); anything else, such as a new required field whose value only you know, still
-arrives as an issue. Vendors other than Stripe. Go, Java and .NET (literal URLs only; the issue
-says so when such files mention Stripe). Stripe clients behind a local wrapper that never names Stripe.
+arrives as an issue. Other vendors in the App. Java, .NET, Rust, Elixir and Scala (literal URLs only).
+Your own HTTP helpers are found, never edited; a wrapper in another file is fixed only one hop away.
