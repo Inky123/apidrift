@@ -361,6 +361,20 @@ def unread_note(payload: dict) -> str:
     return unread_sentence({str(k): int(v) for k, v in unread.items()}) if isinstance(unread, dict) else ""
 
 
+MAX_NOTES, MAX_NOTE_CHARS = 20, 300
+
+
+def notes_note(payload: dict) -> str:
+    """One footer line for the cross-file caps the child's scan ran into (``payload["notes"]``), or "" when
+    there were none or the list is not short printable text: output of the sandboxed child, taken as data."""
+    notes = payload.get("notes")
+    if not isinstance(notes, list) or not 0 < len(notes) <= MAX_NOTES:
+        return ""
+    if any(not isinstance(n, str) or not 0 < len(n) <= MAX_NOTE_CHARS or not n.isprintable() for n in notes):
+        return ""
+    return "Not every wrapper was followed across files: " + "; ".join(escape(n) for n in notes) + "."
+
+
 UNREAD_MARKER = "<!-- apidrift:unread -->"
 
 
@@ -396,8 +410,10 @@ def render_issue(
     fingerprint: str,
     supersedes: int | None = None,
     unread: str = "",
+    notes: str = "",
 ) -> tuple[str, str]:
-    """(title, body) for an issue listing ``items`` (as produced by :func:`findings`)."""
+    """(title, body) for an issue listing ``items`` (as produced by :func:`findings`). ``unread`` and ``notes``
+    are footer sentences (:func:`unread_note`, :func:`notes_note`), "" when there is nothing to say."""
     sites = distinct_sites(items)
     versions = versions_of(items, new_version)
     newest = versions[-1]
@@ -418,8 +434,7 @@ def render_issue(
         f"Scanned {full_name} at {sha} against Stripe {old_version} -> {new_version}: {call_sites} Stripe call sites; "
         "unaffected call sites are not listed.",
     ]
-    if unread:
-        footer.append(unread)
+    footer += [line for line in (unread, notes) if line]
     footer.append(marker(fingerprint))
     pin = ["", _option(guidance.PIN_HOW)]  # said once, for every "Your options" list above it
     budget = MAX_BODY_CHARS - sum(len(ln) + 1 for ln in lines + pin + footer) - 64  # room for the "and N more." line

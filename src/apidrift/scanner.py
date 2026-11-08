@@ -137,6 +137,7 @@ class ScanResult:
     reader: Reader = Reader()  # the vendor the scan was for
     pyrepo: object | None = field(default=None, repr=False, compare=False)  # pyrepo.Repo: the fixer reads with it too
     table: crosstable.Table | None = field(default=None, repr=False, compare=False)  # wrappers followed across files
+    notes: list[str] = field(default_factory=list)  # cross-file caps the scan ran into (crosstable.cap_notes)
 
     @property
     def counted(self) -> list[Usage]:
@@ -211,7 +212,7 @@ def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> Scan
     usages.sort(key=lambda u: (u.file, u.line, u.path))
     return ScanResult(
         str(root), usages, len(per_file), unresolved, skipped_files, skipped_dirs, dict(sorted(unread.items())), reader,
-        pyrepo=repo, table=table,
+        pyrepo=repo, table=table, notes=crosstable.cap_notes(table) if table is not None else [],
     )
 
 
@@ -436,6 +437,7 @@ def render_scan_text(result: ScanResult) -> str:
         )
     if result.unread:
         lines.append("not read: " + unread_sentence(result.unread, words.vendor))
+    lines += result.notes
     for u in counted:
         lines.append(f"{u.where}  {u.label}  via {u.call}")
         shown = ", ".join(sorted(u.fields)[:8])
@@ -463,6 +465,7 @@ def render_scan_json(result: ScanResult) -> str:
         "skipped_files": result.skipped_files,
         "skipped_dirs": result.skipped_dirs,
         "unread": result.unread,
+        "notes": result.notes,
         "usages": [u.to_dict() for u in result.usages],
         "unresolved": [{"file": f, "line": line, "call": call} for f, line, call in result.unresolved],
     }

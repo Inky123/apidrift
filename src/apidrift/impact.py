@@ -315,6 +315,7 @@ def render_impact_text(
     ]
     if result.unread:
         lines.append("not read: " + unread_sentence(result.unread, words.vendor))
+    lines += result.notes
     for sev in (BREAKING, WARNING, INFO):
         group = [i for i in counted if i.severity == sev]
         if not group:
@@ -358,6 +359,7 @@ def render_impact_json(result: ScanResult, impacts: list[Impact], old_label: str
         "call_sites": len(result.counted),
         "documentation_matches": len(result.docs),
         "unread": result.unread,
+        "notes": result.notes,  # cross-file caps the scan ran into; not part of the index
         "summary": summary(counted),
         "impacts": [i.to_dict() for i in impacts],  # documentation hits included, tagged language "doc"
     }
