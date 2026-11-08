@@ -106,7 +106,7 @@ def pin_versions(text: str, js: bool = True) -> list[tuple[int, str]]:
     out: list[tuple[int, str]] = []
     for m in PIN_HEAD.finditer(text):
         line = text[text.rfind("\n", 0, m.start()) + 1 : m.start()].lstrip()
-        if line.startswith(("//", "#", "*", "/*", "--")):
+        if line.startswith(("//", "#", "/*")) or (line.startswith("*") and not line.startswith("*/")):
             continue  # a commented-out line: not a pin
         seen: set[str] = set()
         for pos, version in _strings(text, m.end(), js):

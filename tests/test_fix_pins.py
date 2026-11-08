@@ -31,6 +31,8 @@ def versions(text: str) -> list[tuple[int, str]]:
     ('client = Stripe::StripeClient.new("sk", stripe_version: "2020-08-27")\n', [(1, "2020-08-27")]),
     ("Stripe::Customer.create({ email: e }, { stripe_version: '2024-06-20', idempotency_key: k })\n", [(1, "2024-06-20")]),
     ("$stripe->customers->create([], ['stripe_version' => '2024-06-20']);\n", [(1, "2024-06-20")]),
+    # a minified bundle line that starts by closing a licence comment is code
+    (' */class m{init(){let e={};e.apiVersion="2020-08-27"}}\n', [(1, "2020-08-27")]),
     # the forms the old pattern read keep reading the same
     ("apiVersion: '2023-10-16',\n", [(1, "2023-10-16")]),
     ("headers: { 'Stripe-Version': \"2022-11-15\" }\n", [(1, "2022-11-15")]),
