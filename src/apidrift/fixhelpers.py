@@ -308,6 +308,9 @@ def php_caller_sites(loc, usage, m):
     if not found:
         return Sites(found_call=False)
     k, out, src = found[0], Sites(), loc.src
+    if k.call.hidden_by:  # a dispatch wrapper may change these parameters (phpdispatch): never edited
+        out.incomplete = True
+        return out
     if not src.balanced or src.uncertain or loc._unbounded_near(k.pos):
         out.why = "unbounded"
         return out

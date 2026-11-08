@@ -275,7 +275,7 @@ def test_a_variable_bound_to_a_literal_in_the_same_function_is_read(index):
     assert one(text, index) == (7, "$stripe->charges->create", "POST /v1/charges", ["amount", "shipping", "shipping.name"], True)
 
 
-def test_keys_written_into_the_variable_before_the_call_are_fields_and_make_it_incomplete(index):
+def test_keys_written_into_the_variable_by_a_literal_path_are_fields_and_hide_nothing_else(index):
     text = H + (
         "function pay($stripe, $extra) {\n"
         "    $data = ['amount' => 100];\n"
@@ -285,7 +285,63 @@ def test_keys_written_into_the_variable_before_the_call_are_fields_and_make_it_i
         "    return $stripe->charges->create($data);\n"
         "}\n"
     )
-    assert one(text, index)[3:] == (["amount", "currency", "description", "metadata"], False)
+    assert one(text, index)[3:] == (["amount", "currency", "description", "metadata", "metadata.order"], True)
+
+
+@pytest.mark.parametrize("write,fields,hidden", [
+    ("$d[$k] = 1;", ["amount"], {""}),
+    ("$d[] = 1;", ["amount"], {""}),
+    ("$d .= 'x';", ["amount"], {""}),
+    ("$d += $more;", ["amount"], {""}),
+    ("$d['shipping'][$k] = 1;", ["amount", "shipping"], {"", "shipping.", "shipping[]."}),
+    ("$d['shipping'] = ['name' => 'n'] + $more;", ["amount", "shipping", "shipping.name"], {"shipping.", "shipping[]."}),
+    ("$d['line_items'][] = ['price' => $p];", ["amount", "line_items", "line_items[].price"], set()),
+    ("$d['line_items'][0]['quantity'] = 2;", ["amount", "line_items", "line_items[].quantity"], set()),
+    ("$d['metadata'] .= 'x';", ["amount", "metadata"], set()),
+    ("$d['shipping'] = $address;", ["amount", "shipping"], set()),
+])
+def test_a_later_write_hides_only_what_its_key_path_does_not_show(index, write, fields, hidden):
+    text = H + f"function pay($stripe, $k, $more, $p, $address) {{\n  $d = ['amount' => 1];\n  {write}\n  return $stripe->charges->create($d);\n}}\n"
+    usages, _, _ = scan_text(text, "a.php", index)
+    assert [(sorted(u.fields), set(u.hidden)) for u in usages] == [(fields, hidden)]
+
+
+def test_a_write_in_the_loop_after_the_call_reaches_it_on_the_next_pass(index):
+    text = H + (
+        "function pay($stripe, $rows) {\n"
+        "    $d = ['amount' => 1];\n"
+        "    foreach ($rows as $r) {\n"
+        "        $stripe->charges->create($d);\n"
+        "        $d['currency'] = 'usd';\n"
+        "    }\n"
+        "}\n"
+    )
+    assert one(text, index)[3:] == (["amount", "currency"], True)
+
+
+def test_a_wordpress_filter_of_the_variable_keeps_its_fields_and_hides_the_rest(index):
+    text = H + (
+        "function pay($stripe, $order) {\n"
+        "    $p = ['amount' => 1, 'shipping' => ['name' => 'n']];\n"
+        "    $p['currency'] = 'usd';\n"
+        "    $p = apply_filters('my_hook', $p, $order);\n"
+        "    $p['description'] = 'd';\n"
+        "    return $stripe->charges->create($p);\n"
+        "}\n"
+    )
+    assert one(text, index)[3:] == (["amount", "currency", "description", "shipping", "shipping.name"], False)
+
+
+@pytest.mark.parametrize("rebind", [
+    "$p = $this->add_fee($p);",  # any other call: what it returns is not known
+    "$p = apply_filters('my_hook', $q);",  # a filter of another value
+    "$p = apply_filters($hook, $p);",  # a hook name that is not a literal
+    "$p = apply_filters('my_hook', $p) + $more;",
+])
+def test_any_other_rebinding_hides_everything(index, rebind):
+    text = H + f"function pay($stripe, $q, $hook, $more) {{\n  $p = ['amount' => 1];\n  {rebind}\n  return $stripe->charges->create($p);\n}}\n"
+    usages, _, _ = scan_text(text, "a.php", index)
+    assert [(sorted(u.fields), set(u.hidden)) for u in usages] == [([], {""})]
 
 
 def test_both_branches_of_an_if_reach_the_call(index):

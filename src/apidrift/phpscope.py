@@ -58,6 +58,8 @@ class Use:
     key_end: int = 0
     plain: bool = False  # exactly ``$p['k'] = value``: the one write the fixer may rename
     literal: int | None = None  # ``$p += [...]``: the array merged in
+    path: tuple[str, ...] | None = None  # ``$p['a']['b'] = v`` / ``.=``: every subscript a plain string literal
+    value: int = -1  # ``$p['a']['b'] = v``: where ``v`` starts (-1 for a compound assignment)
 
 
 class Scopes:
@@ -175,20 +177,42 @@ class Bindings:
         if not text.startswith("[", j) or j not in src.pairs:
             return Use(start, USED)
         key, ks, ke = None, 0, 0
+        subscript = self._subscript(j)
+        if subscript is not None:
+            key, ks, ke = subscript
+        keys: list[str] | None = [key] if key is not None else None
+        depth, j = 1, src.skip_space(src.pairs[j] + 1)
+        while text.startswith("[", j) and j in src.pairs:
+            more = self._path_part(j)
+            keys = keys + [more] if keys is not None and more is not None else None
+            depth, j = depth + 1, src.skip_space(src.pairs[j] + 1)
+        path = tuple(keys) if keys is not None else None
+        if text.startswith("=", j) and text[j + 1 : j + 2] not in ("=", ">"):
+            value = src.skip_space(j + 1)
+            return Use(start, WRITE, key, ks, ke, plain=key is not None and depth == 1, path=path, value=value)
+        if OP_ASSIGN.match(text, j):
+            return Use(start, WRITE, key, ks, ke, path=path)
+        return Use(start, INPLACE if key is not None else USED, key, ks, ke)
+
+    def _path_part(self, j: int) -> str | None:
+        """A later subscript as a field path step: its key, or ``[]`` for ``[]`` / ``[0]`` (an element of a list)."""
+        src, text = self.src, self.src.text
+        inner = src.skip_space(j + 1)
+        if inner == src.pairs[j] or (re.fullmatch(r"\d+", text[inner : src.back_space(src.pairs[j])]) is not None):
+            return "[]"
+        sub = self._subscript(j)
+        return sub[0] if sub else None
+
+    def _subscript(self, j: int) -> tuple[str, int, int] | None:
+        """(key, span of the name inside its quotes) when the subscript at ``j`` is one plain string literal."""
+        src, text = self.src, self.src.text
         inner = src.skip_space(j + 1)
         span = src.span_at(inner)
         if span and span[2] == STRING and span[0] == inner and src.skip_space(span[1]) == src.pairs[j]:
             body = text[inner + 1 : span[1] - 1]
             if re.fullmatch(r"[A-Za-z_]\w*", body) and text[inner] in "'\"":
-                key, ks, ke = body, inner + 1, span[1] - 1
-        depth, j = 1, src.skip_space(src.pairs[j] + 1)
-        while text.startswith("[", j) and j in src.pairs:
-            depth, j = depth + 1, src.skip_space(src.pairs[j] + 1)
-        if text.startswith("=", j) and text[j + 1 : j + 2] not in ("=", ">"):
-            return Use(start, WRITE, key, ks, ke, plain=key is not None and depth == 1)
-        if OP_ASSIGN.match(text, j):
-            return Use(start, WRITE, key, ks, ke)
-        return Use(start, INPLACE if key is not None else USED, key, ks, ke)
+                return body, inner + 1, span[1] - 1
+        return None
 
     def _written_by_context(self, pos: int) -> bool:
         """``foreach (... as $x)``, ``[$a, $x] = ...`` / ``list($x) = ...``, or the first argument of a

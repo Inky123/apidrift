@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 
-from . import fixhelpers, fixvalue, phpparse
+from . import fixhelpers, fixvalue, phpflow, phpparse
 from .fixedit import Sites, _checked
 from .fixvalue import UNSUPPORTED, Container, Entry
 from .jsparse import Fields, Span
@@ -63,7 +63,7 @@ class Locator:
         if not src.balanced or src.uncertain or self._unbounded_near(c.pos):
             out.why = UNBOUNDED
             return out
-        if c.params is None or any(src.text.startswith("...", src.skip_space(a)) for a, _ in c.spans[: c.params + 1]):
+        if c.hidden_by or m.target.split(".")[0] in {e.split(".")[0] for e in c.extra} or c.params is None or any(src.text.startswith("...", src.skip_space(a)) for a, _ in c.spans[: c.params + 1]):
             out.incomplete = True
             return out
         a, b = c.spans[c.params]
@@ -78,6 +78,12 @@ class Locator:
             self._literal(opener, m, out)
         elif variable and variable.group(1) != "this" and src.skip_space(variable.end()) >= b:
             self._variable(variable.group(1), i, m, out)
+        elif (parts := phpflow.merge_parts(self.parsed, i, b)) is not None:
+            for kind, pos, name in parts:  # array_merge(A, $b): the key is renamed in every argument that holds it
+                if kind == "literal":
+                    self._literal(pos, m, out)
+                else:
+                    self._variable(name, pos, m, out)
         else:
             out.incomplete = True  # array_merge(...), a call, a property: not a literal this module can bound
         return out
@@ -245,7 +251,7 @@ class Locator:
                 self._literal(b.literal, m, out)
         stop = min(b.pos for b in reaching)
         head = m.target.split(".")[0]
-        for write in bindings.mutations(name, stop, at):
+        for write in phpflow.writes(self.parsed, name, stop, at):
             if write.key == head:
                 if m.action == "rename" and head == m.target and write.plain:
                     out.add(_checked(self.text, write.key_start, write.key_end, m.target, m.replacement))
