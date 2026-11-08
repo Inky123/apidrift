@@ -292,3 +292,18 @@ def test_the_changelog_link_is_the_migration_entry_when_the_table_has_one():
     assert f"[changelog]({issue.changelog_url(NEW_VERSION)})" in body  # no table entry: the release page
     _, body = render([dict(anchor, introduced="2027-01-01.later")])  # table entry from another release: not used
     assert "[changelog](https://docs.stripe.com/changelog/later)" in body
+
+
+def test_unread_names_are_validated_and_escaped_before_any_body_or_title():
+    hostile = {"<img src=x onerror=1>\n# Heading": 5, "Go": 2, "C#": 1, "C++": 3, ".NET": 4, "Objective-C": 1,
+               "#12": 9, " Rust": 1, "x" * 41: 1, "Elixir": True, "Zig": -1, "Nim": "3", 7: 2}
+    assert issue.unread_counts({"unread": hostile}) == {"Go": 2, "C#": 1, "C++": 3, ".NET": 4, "Objective-C": 1}
+    assert issue.unread_counts({"unread": [("Go", 2)]}) == {} and issue.unread_counts({}) == {}
+    note = issue.unread_note({"unread": hostile})
+    assert "<img" not in note and "Heading" not in note and "#12" not in note
+    assert note.startswith("apidrift does not read Go, C#, C++, .NET or Objective-C call sites yet")
+    assert issue.unread_note({"unread": {"<b>": 1}}) == ""
+    title, body = issue.render_unread_issue("octo/shop", "a" * 40, {"unread": hostile, "call_sites": 1})
+    assert title == "apidrift cannot read Go, C#, C++, .NET or Objective-C call sites in this repository yet"
+    assert "<img" not in body and "Heading" not in body
+    assert "\n# Heading" not in body

@@ -120,3 +120,46 @@ def test_r8_an_edit_outside_any_expectation_is_refused(tmp_path):
             "line": line, "start": s, "end": s + len("payment_method_types"), "text": "allowed_payment_method_types",
             **{k: site[k] for k in ("path", "target", "replacement", "action")}}]}]
         assert checked(tmp_path, payload)[1] == [], needle  # a mock's return value, a string: no expectation found
+
+
+def test_the_pull_request_body_is_bounded_whatever_the_child_lists(tmp_path):
+    """60 kept entries with 3 KB paths gave a 155,943-char body, which GitHub refuses: now every list shrinks
+    until the body fits, and a single absurd line is cut before the footer rather than sent."""
+    from conftest import SHA, Disk
+    from test_fix_test_edits import JS_APP
+    from test_fixer import plan_for
+
+    from apidrift.app import fixcheck, prbody
+    from apidrift.app.issue import MAX_BODY_CHARS
+
+    plan = plan_for(tmp_path, {"src/pay.js": JS_APP})
+    payload = plan.to_dict()
+    fixes = fixcheck.validate(Disk(tmp_path), "t", "o/r", SHA, payload["fixes"])
+    assert fixes
+    evil = "../../x`\n# Heading\n[link](http://evil)\n<img src=x onerror=1>|table| @octocat #1 " + "A" * 3000
+    long_path = "dir/" + "p" * 3000 + ".js"
+    hostile = {
+        **payload,
+        "kept": [{"file": long_path, "line": n} for n in range(60)],
+        "unfixable": [{"file": long_path, "line": n, "why": evil} for n in range(60)],
+        "not_attempted": [{"file": long_path, "line": n, "why": evil} for n in range(60)],
+        "tests": [{"file": long_path, "line": n} for n in range(60)],
+        "leftovers": [{"file": long_path, "line": n} for n in range(60)],
+        "cassettes": [{"file": long_path + ".yml", "line": n} for n in range(60)],
+        "unread": {evil: 10**9},
+    }
+    render = lambda p: prbody.render_pr(p, fixes, full_name="o/r", sha=SHA, version="2026-09-30.endive",  # noqa: E731
+                                        issue_number=1, fingerprint="f" * 64, tests=[])
+    title, body = render(hostile)
+    assert len(body) <= MAX_BODY_CHARS and body.rstrip().endswith(prbody.pr_marker("f" * 64))
+    assert "Addresses #1" in body and " more" in body and prbody.TRUNCATED not in body
+    assert "# Heading" not in body and "<img" not in body
+    # the lists are cut, not the sections: every section is still announced
+    for label in ("Kept on purpose", "Not changed", "Not attempted", "Tests that name the old field", "re-record", "Still mentions"):
+        assert label in body, label
+    # one path longer than the whole budget: the body is cut before the footer, which stays intact
+    _, body = render({**payload, "kept": [{"file": "q" * 70_000 + ".js", "line": 1}]})
+    assert len(body) <= MAX_BODY_CHARS and prbody.TRUNCATED in body and body.rstrip().endswith(prbody.pr_marker("f" * 64))
+    # an ordinary payload is rendered as before, with the full lists
+    _, body = render({**payload, "kept": [{"file": f"src/k{n}.js", "line": n} for n in range(60)]})
+    assert "and 10 more" in body and prbody.TRUNCATED not in body
