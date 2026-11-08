@@ -29,6 +29,8 @@ CALLEE = re.compile(r"([A-Za-z_$][\w$]*(?:\s*(?:\.|->|::|\\)\s*[A-Za-z_$][\w$]*)
 METHOD_VARIABLE = re.compile(r"""\bmethod['"]?\s*(?:=>|:|=)\s*(?!['"])[$A-Za-z_]""", re.I)
 OPEN, CLOSE = "([{", ")]}"
 REACH = 600  # how far back the enclosing call's ``(`` is looked for
+CLIENTISH = re.compile(  # receivers whose get/post/delete is an HTTP request
+    r"requests|httpx|http|client|session|axios|faraday|restclient|httparty|guzzle|conn|urllib|request|api|net", re.I)
 
 
 def language_of(rel: str) -> str | None:
@@ -196,7 +198,46 @@ def call_method(text: str, pos: int) -> str | None:
             if word:
                 return word
         return None
+    if not default_holds(last, top_args(args)):
+        return None
+    receiver = callee[: len(callee) - len(last)]
+    if receiver and not CLIENTISH.search(receiver):
+        return None  # ``os.environ.get(url)``, ``$cache->get(url)``: not a request
     return httpurl.callee_method(callee)
+
+
+def top_args(args: str) -> list[str]:
+    """A call's argument text split at its top-level commas."""
+    out, depth, start, i = [], 0, 0, 0
+    while i < len(args):
+        c = args[i]
+        if c in QUOTES:
+            i = string_end(args, i)
+            continue
+        if c in OPEN:
+            depth += 1
+        elif c in CLOSE:
+            depth -= 1
+        elif c == "," and depth == 0:
+            out.append(args[start:i])
+            start = i + 1
+        i += 1
+    out.append(args[start:])
+    return [a.strip() for a in out if a.strip()]
+
+
+def default_holds(last: str, args: list[str]) -> bool:
+    """Whether a client's own method holds: ``fetch(url)`` and ``wp_remote_get(url, $args)`` take it from
+    their options (a variable, a spread, or a ``method`` key), urllib's ``Request(url, data)`` posts."""
+    if last in httpurl.OVERRIDABLE:
+        if len(args) < 2:
+            return True
+        options = args[1]
+        literal = re.match(r"(?:\{|\[|array\s*\()", options, re.I) is not None
+        return literal and "..." not in options and not re.search(r"""['"]?\bmethod\b['"]?\s*(?::|=>|=)""", options)
+    if last in httpurl.POSITIONAL_BODY:  # urllib Request / urlopen, PHP file_get_contents(url, false, $context)
+        return len(args) == 1 and not any(re.match(r"(?:data|method)\s*=", a) for a in args)
+    return True
 
 
 def site(text: str, start: int, rel: str, index) -> tuple[str, str | None] | None:

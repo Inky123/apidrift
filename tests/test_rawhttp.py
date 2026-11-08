@@ -78,6 +78,35 @@ def test_a_joined_id_fills_the_next_segment_and_the_call_names_the_method(index,
     assert u.language == "http" and not u.complete
 
 
+SUB = "https://api.stripe.com/v1/subscriptions/"
+
+
+@pytest.mark.parametrize("rel,src,method", [
+    # review item 1: a client's default GET does not hold when options or a body can override it
+    ("a.js", f"// stripe\nfetch('{SUB}' + id, opts);\n", "?"),
+    ("a.js", f"// stripe\nfetch('{SUB}' + id, {{ ...base, body }});\n", "?"),
+    ("a.js", f"// stripe\nfetch('{SUB}' + id);\n", "get"),
+    ("a.js", f"// stripe\nfetch('{SUB}' + id, {{ headers: h }});\n", "get"),
+    ("a.py", f'import stripe, urllib.request\nurllib.request.Request("{SUB}" + sid, data=body)\n', "?"),
+    ("a.py", f'import stripe, urllib.request\nurllib.request.Request("{SUB}" + sid)\n', "get"),
+    ("a.php", P + f"wp_remote_request('{SUB}' . $id, $args); // stripe\n", "?"),
+    ("a.php", P + f"wp_remote_get('{SUB}' . $id, $args); // stripe\n", "?"),
+    ("a.php", P + f"wp_remote_get('{SUB}' . $id, ['timeout' => 5]); // stripe\n", "get"),
+    ("a.py", f'import os, stripe\nurl = os.environ.get("X", "{SUB}" + sid)\n', "get"),  # not a call: the old hint's word
+])
+def test_a_default_method_holds_only_when_nothing_can_override_it(index, rel, src, method):
+    assert one(src, rel, index).method == method
+
+
+def test_a_wrapper_whose_options_are_not_visible_has_no_method(index):
+    src = P + """class API { const E = 'https://api.stripe.com/v1/';
+  static function request($request, $api, $args) { return wp_remote_request(self::E . $api, $args); } }
+API::request([], 'subscriptions/' . $id, ['method' => 'DELETE']);
+"""
+    u = one(src, "a.php", index)
+    assert (u.method, u.path, u.complete) == ("?", "/v1/subscriptions/{subscription}", False)
+
+
 def test_an_explicit_method_the_path_lacks_is_unknown_rather_than_the_only_method(index):
     u = one(P + "wp_remote_get('https://api.stripe.com/v1/tokens', ['method' => 'GET']); // stripe\n", "a.php", index)
     assert (u.method, u.path) == ("?", "/v1/tokens")
@@ -226,6 +255,18 @@ def test_a_path_built_from_a_variable_or_helper_with_literal_values_is_one_site_
 def test_two_expressions_joined_in_a_row_may_carry_a_query(index):
     u = one(API + 'My_Stripe_API::retrieve("payment_intents/{$id}{$query}");\n', "a.php", index)
     assert (u.method, u.path, u.complete) == ("get", "/v1/payment_intents/{intent}", False)
+
+
+def test_a_constant_url_counts_only_in_a_real_http_client_and_guzzle_names_its_method(index):
+    src = P + """class X {
+    const SUB = 'https://api.stripe.com/v1/subscriptions/';
+    function f($id) { return $this->cache->get(self::SUB . $id); }
+    function g($id) { return $this->options->delete(self::SUB . $id); }
+    function h($id) { return $this->client->request('DELETE', self::SUB . $id); }
+}
+"""
+    found = [s for s in sites(src, "a.php", index) if s[0] != 3]  # line 3 is the URL scan's const literal
+    assert found == [(6, "delete", "/v1/subscriptions/{subscription}")]
 
 
 def test_a_class_constant_url_in_an_http_call_is_a_call_site(index):

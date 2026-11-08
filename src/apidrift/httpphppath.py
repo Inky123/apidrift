@@ -111,21 +111,16 @@ def constant_sites(f: File, text: str, rel: str, index, reads, language) -> list
         pieces = f.pieces(*args[url_at])
         if not pieces or pieces[0][0] != "lit":
             continue
-        method = verb if verb in ("get", "post", "delete") else None
-        if callee:
+        if not real_client(f, m):
+            continue
+        if callee == "curl_init":
             fn = f.func_at(m.start())
             rest = f.text[m.end() : fn.close if fn else len(text)]
-            if callee == "curl_init":
-                named = re.search(r"CURLOPT_CUSTOMREQUEST\s*(?:,|=>)\s*['\"](\w+)['\"]", rest)
-                method = httpurl.method_word(named.group(1)) if named else "post" if "CURLOPT_POST" in rest else "get"
-            else:
-                options = f.array_items(*args[1]) if len(args) > 1 else {}
-                given = (options or {}).get("method")
-                got = f.pieces(*given) if given else []
-                if given:
-                    method = httpurl.method_word(got[0][1]) if len(got) == 1 and got[0][0] == "lit" else None
-                else:
-                    method = "post" if callee.endswith("_post") else "get"
+            named = re.search(r"CURLOPT_CUSTOMREQUEST\s*(?:,|=>)\s*['\"](\w+)['\"]", rest)
+            custom = "CURLOPT_CUSTOMREQUEST" in rest
+            method = httpurl.method_word(named.group(1)) if named else None if custom else "post" if "CURLOPT_POST" in rest else "get"
+        else:
+            method = client_method(f, m, args)[0]
         w = httpwrap.Wrapper("php", rel, callee or verb, "", "", 0, method, body_seen=False)
         u = httpwrap.build(text, rel, index, w, f.line(m.start()), callee or verb,
                            [v if k == "lit" else None for k, v in pieces], method, set(), {""}, reads, language)
@@ -138,3 +133,15 @@ def _http():
     from .httpphp import HTTP
 
     return HTTP
+
+
+def real_client(f, m):
+    from .httpphp import real_client as check
+
+    return check(f, m)
+
+
+def client_method(f, m, args):
+    from .httpphp import client_method as read
+
+    return read(f, m, args)
