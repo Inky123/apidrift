@@ -166,3 +166,11 @@ def test_a_helper_caller_is_still_fixed_when_the_wrapper_adds_another_key(tmp_pa
     files = _dispatch_files("$args[0]['metadata']['via'] = 'edd';")
     files["app/Pay.php"] = HELPER
     assert outcome(tmp_path, files)[0] == "fixed"
+
+
+def test_a_wrapper_that_hands_its_arguments_to_a_by_reference_helper_is_not_edited(tmp_path):
+    files = _dispatch_files("$this->defaults($args);")
+    files["src/API.php"] = files["src/API.php"].replace(
+        "  }\n}\n", "  }\n  private function defaults(array &$args) { $args[0]['" + OLD + "'] = ['card']; }\n}\n"
+    )
+    assert outcome(tmp_path, files)[:2] == ("refused", ["incomplete_binding"])

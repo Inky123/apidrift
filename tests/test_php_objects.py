@@ -355,6 +355,48 @@ def test_a_wrapper_that_rebinds_its_arguments_hides_every_position(tmp_path, ind
     assert all(not complete for c, _, _, complete in found if c.startswith("edds") and "retrieve" not in c)
 
 
+def _with_method(method):
+    return {"src/API.php": API.replace("@WRITE@", "@CALL@").replace("  }\n}\n", f"  }}\n  {method}\n}}\n")}
+
+
+@pytest.mark.parametrize("write,extra", [
+    ("self::prepare($args);", None),  # a helper this file does not define: it may take it by reference
+    ("$this->defaults($args);", "private function defaults(array &$args) { $args[0]['currency'] = 'eur'; }"),
+    ("prepare_args($args[0]);", None),
+    ("do_action_ref_array('edds_pre', array(&$args));", None),
+    ("foreach ($args as &$a) { $a = apply_filters('x', $a); }", None),
+    ("foreach ($args[0] as $k => &$v) { $v = 1; }", None),
+    ("$first = &$args[0]; $first['currency'] = 'usd';", None),
+    ("unset($args[0]['currency']);", None),
+    ("array_unshift($args, $x);", None),
+    ("$args = apply_filters('edds_args', $args);", None),
+    ("extract($args);", None),
+    ("$f = function () use (&$args) { $args[0] = []; };", None),
+])
+def test_anything_else_a_wrapper_may_do_to_its_arguments_hides_every_position(tmp_path, index, write, extra):
+    over = _with_method(extra) if extra else {}
+    if extra:
+        over["src/API.php"] = over["src/API.php"].replace("@CALL@", write)
+    found = dispatch(tmp_path, index, write=write, **over)
+    assert {c.split("'")[3]: ok for c, _, _, ok in found if c.startswith("edds")} == {
+        "create": False, "retrieve": True, "update": False,
+    }
+
+
+@pytest.mark.parametrize("write,extra", [
+    ("do_action('edds_pre', $this, $stripe_object, $method, $args);", None),
+    ("if (isset($args[1]) && count($args) > 1) { $n = 1; }", None),
+    ("$this->check($stripe_object, $method, $args);", "private function check($o, $m, $args): bool { return true; }"),
+    ("log_it(count($args));", None),  # an expression is a value, never a reference
+])
+def test_what_takes_the_arguments_by_value_changes_nothing(tmp_path, index, write, extra):
+    over = _with_method(extra) if extra else {}
+    if extra:
+        over["src/API.php"] = over["src/API.php"].replace("@CALL@", write)
+    found = dispatch(tmp_path, index, write=write, **over)
+    assert all(ok for c, _, _, ok in found if c.startswith("edds"))
+
+
 @pytest.mark.parametrize("change", [
     {"src/API.php": API.replace("'EDD\\\\Vendor\\\\Stripe\\\\' . ", "'App\\\\Models\\\\' . ").replace("@WRITE@", "")},
     {"src/API.php": API.replace("@WRITE@", "$method = 'create';")},  # the method is changed in the wrapper
