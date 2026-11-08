@@ -59,7 +59,7 @@ PHPUNIT = re.compile(
     r"\s*->\s*with\s*\("
 )
 PHP_MOCK = r"(?:(?:\\?Mockery|\bm)::(?:mock|spy)|\$this\s*->\s*(?:createMock|createStub))\(\s*(?P<cls>[^,()]+?)\s*[,)]"
-PHP_USE = re.compile(r"^\s*use\s+\\?([A-Za-z_][\w\\]*)(?:\s+as\s+(\w+))?\s*;", re.M)
+PHP_USE = re.compile(r"^[^\S\n]*use\s+\\?([A-Za-z_][\w\\]*)(?:\s+as\s+(\w+))?\s*;", re.M)
 RUBY_WRAPPERS = ("a_hash_including(", "hash_including(")
 JS_WRAPPERS = ("expect.objectContaining(",)
 PHP_WRAPPERS = ("$this->equalTo(", "self::equalTo(", "static::equalTo(", "\\Mockery::subset(", "Mockery::subset(")

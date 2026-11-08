@@ -403,9 +403,9 @@ def _defined_elsewhere(loc, name: str) -> bool:
 def _definition(name: str, language: str) -> str:
     n = re.escape(name)
     if language == "ruby":
-        return rf"^\s*def\s+(?:self\.)?{n}\b"
+        return rf"^[^\S\n]*def\s+(?:self\.)?{n}\b"
     if language == "python":
-        return rf"^\s*(?:async\s+)?def\s+{n}\s*\("
+        return rf"^[^\S\n]*(?:async\s+)?def\s+{n}\s*\("
     if language == "php":
         return rf"function\s*&?\s*{n}\s*\("
-    return rf"(?:function\s*\*?\s*{n}\s*\(|^\s*(?:(?:public|private|protected|static|async|override)\s+)*{n}\s*\([^)]*\)\s*(?::[^{{;]*)?\{{)"
+    return rf"(?:function\s*\*?\s*{n}\s*\(|^[^\S\n]*(?:(?:public|private|protected|static|async|override)\s+)*{n}\s*\([^)]*\)\s*(?::[^{{;]*)?\{{)"
