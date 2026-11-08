@@ -31,6 +31,7 @@ CALLED = re.compile(r"([A-Za-z_]\w*)\s*(?:\(|::)")
 PARAM = re.compile(r"^\s*(?:[\w\\?|]+\s+)?(&\s*)?(\.\.\.)?\s*\$([A-Za-z_]\w*)\s*(?:=\s*(.*?))?\s*$", re.S)
 ENCODERS = re.compile(r"^(?:http_build_query|json_encode|wp_json_encode)\s*\(\s*\$([A-Za-z_]\w*)\s*\)$")
 SELF = {"self", "static"}
+MAX_PATHS = 4  # templates one path argument may stand for before it counts as not visible
 NOT_CALLS = {"function", "fn", "if", "elseif", "while", "for", "foreach", "switch", "array", "list", "isset", "unset",
              "empty", "return", "echo", "print", "new", "catch", "match", "use", "and", "or", "not"}
 
@@ -134,7 +135,7 @@ class File:
         while i < b:
             value = self.string_at(i)
             if value is not None:
-                out.append(("lit", value))
+                out += self.interpolated(i) if self.text[i] == '"' else [("lit", value)]
                 i = src.span_at(i)[1]
             else:
                 j = i
@@ -156,13 +157,104 @@ class File:
                 elif re.fullmatch(r"\$[A-Za-z_]\w*", expr):
                     out.append(("var", expr[1:]))
                 else:
-                    out.append(("expr", None))
+                    out.append(("expr", f"{i}:{end}"))
                 i = j
             i = src.skip_space(i)
             if i < b:
                 if code[i] != ".":
                     return out + [("expr", None)]
                 i = src.skip_space(i + 1)
+        return out
+
+    def interpolated(self, i: int) -> list[tuple[str, str | None]]:
+        """A double-quoted string split into its text and the variables interpolated in it."""
+        from .httplit import PHP_VAR
+
+        raw, out, last = self.text[i + 1 : self.src.span_at(i)[1] - 1], [], 0
+        for m in PHP_VAR.finditer(raw):
+            if m.start() > last:
+                out.append(("lit", raw[last : m.start()].replace('\\"', '"')))
+            name = re.fullmatch(r"\{?\$([A-Za-z_]\w*)\}?", m.group(0))
+            out.append(("var", name.group(1)) if name else ("expr", None))
+            last = m.end()
+        if last < len(raw) or not out:
+            out.append(("lit", raw[last:].replace('\\"', '"')))
+        return out
+
+    def expand(self, pieces: list[tuple[str, str | None]], at: int, depth: int = 0) -> list[list[str | None]]:
+        """The path templates ``pieces`` can stand for: a variable whose every reaching assignment is a
+        string (``$id = ''`` / ``$id = '/' . $intent->id``), or a same-class method whose every ``return``
+        is a literal or a ternary of two, gives one template per value. At most MAX_PATHS of them."""
+        out: list[list[str | None]] = [[]]
+        for kind, value in pieces:
+            options: list[list[str | None]] = [[value if kind == "lit" else None]]
+            if depth < 2 and kind == "var":
+                options = self._variable(value, at, depth) or options
+            elif depth < 2 and kind == "expr" and value:
+                options = self._returns(*map(int, value.split(":"))) or options
+            out = [a + b for a in out for b in options]
+            if len(out) > MAX_PATHS:
+                return [[None]]
+        return out
+
+    def _variable(self, name: str, at: int, depth: int) -> list[list[str | None]] | None:
+        reaching = self.parsed.bindings.reaching(name, at)
+        if not reaching or any(b.value < 0 or b.literal is not None for b in reaching):
+            return None
+        out = []
+        for b in reaching:
+            end = self.src.skip_scalar(b.value, ";")
+            got = self.pieces(b.value, end)
+            if not got:
+                return None
+            out += self.expand(got, b.value, depth + 1)
+        return out
+
+    def _returns(self, a: int, b: int) -> list[list[str | None]] | None:
+        m = re.fullmatch(r"(?:\$this\s*->|(?:self|static)\s*::)\s*([A-Za-z_]\w*)\s*\(.*\)", self.code[a:b].strip(), re.S)
+        if m is None:
+            return None
+        owner = self.class_at(a)
+        fns = [fn for fn in self.funcs if fn.name == m.group(1) and fn.owner == owner]
+        if len(fns) != 1:
+            return None
+        fn, out = fns[0], []
+        for r in re.finditer(r"(?<![\w$>:\\])return\b", self.code[fn.open : fn.close]):
+            start = self.src.skip_space(fn.open + r.end())
+            end = self.src.skip_scalar(start, ";")
+            if self.func_at(start) is not fn:
+                continue  # a closure's return
+            values = self._literal_or_ternary(start, end)
+            if values is None:
+                return None
+            out += [[v] for v in values]
+        return out or None
+
+    def _literal_or_ternary(self, a: int, b: int) -> list[str] | None:
+        code = self.code
+        depth, q = 0, -1
+        for j in range(a, b):
+            if self.src.masked(j):
+                continue
+            c = code[j]
+            depth += c in "([{"
+            depth -= c in ")]}"
+            if depth == 0 and c == "?" and code[j + 1 : j + 2] not in ("?", "-", ">") and code[j - 1 : j] != "?":
+                q = j
+                break
+        spans = [(a, b)]
+        if q >= 0:
+            colon = next((j for j in range(q + 1, b) if code[j] == ":" and not self.src.masked(j)
+                          and code[j - 1 : j] != ":" and code[j + 1 : j + 2] != ":"), -1)
+            if colon < 0:
+                return None
+            spans = [(q + 1, colon), (colon + 1, b)]
+        out = []
+        for x, y in spans:
+            got = self.pieces(x, y)
+            if len(got) != 1 or got[0][0] != "lit":
+                return None
+            out.append(got[0][1])
         return out
 
     def array_items(self, a: int, b: int) -> dict[str, tuple[int, int]] | None:
@@ -379,7 +471,7 @@ def sites(text: str, rel: str, index, reads: frozenset[str], language: str, regi
         else:
             default = _default(w.defaults[w.path] if w.path < len(w.defaults) else None)
             pieces = [("lit", default)] if default is not None else []
-        template = [v if k == "lit" else None for k, v in pieces]
+        templates = f.expand(pieces, start) if pieces else []
         method = w.method
         if w.method_param is not None:
             if w.method_param < len(args):
@@ -396,10 +488,13 @@ def sites(text: str, rel: str, index, reads: frozenset[str], language: str, regi
                 phpparse.collect(f.parsed, call, fields, Via(PhpHelpers(f.parsed)))
             elif not _empty(w.defaults[w.body] if w.body < len(w.defaults) else None):
                 fields.hide("")
-        u = httpwrap.build(text, rel, index, w, f.line(start), display, template, method, fields.paths, fields.hidden,
-                           reads, language)
-        if u is not None:
-            out.append(u)
+        paths = set()
+        for template in templates:  # one call site per endpoint the path can name
+            u = httpwrap.build(text, rel, index, w, f.line(start), display, template, method, fields.paths,
+                               fields.hidden, reads, language)
+            if u is not None and u.path not in paths:
+                paths.add(u.path)
+                out.append(u)
     return out
 
 
