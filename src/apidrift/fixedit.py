@@ -15,7 +15,7 @@ import re
 import tokenize
 from dataclasses import dataclass, field
 
-from . import fixcross, fixhelpers, fixvalue, jsparse, jsspread, pyparse, scanner
+from . import fixcross, fixhelpers, fixtsvalue, fixvalue, jsparse, jsspread, pyparse, scanner
 from .fixtokens import _Offsets
 from .fixvalue import Edit, Entry
 from .jsparse import IDENT, QUOTES, RUBY_KEYWORD, Fields, Source
@@ -179,6 +179,8 @@ class Locator:
         if m.action in ("rename_first", "wrap_type"):
             bad = lambda name, action: self._js_bad_binding(name, vs, action)  # noqa: E731
             new = fixvalue.js_rewrite(m, self.text, src, vs, ve, ruby=self.ruby, quote=self.quote, bad_name=bad)
+            if m.action == "wrap_type" and self.language == "typescript" and fixtsvalue.refused(self, src, vs, ve, m):
+                new = fixvalue.UNSUPPORTED  # its declared type may not check once wrapped
         entry = Entry(span.key_start, ns, ne, ne if shorthand else vs, ve, shorthand)
         cont = fixvalue.js_container(src, cont_start, literal=cont_literal) if m.action == "delete" else None
         return fixvalue.entry_edit(self.text, entry, m, new, cont, comment="#" if self.ruby else "//")
