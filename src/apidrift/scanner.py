@@ -16,16 +16,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import crosstable, goparse, httplit, httpurl, httpwrap, jsparse, phpparse, phpvendor, pyparse, pyrepo
+from . import crosstable, goparse, httplit, httpurl, httpwrap, jsparse, phpparse, phpvendor, pyparse, pyrepo, scanfiles
+from .scanfiles import BUILD_DIRS, MAX_BYTES, PROJECT_FILES, SKIP_DIRS, SKIP_NAMES  # noqa: F401 - the scan's file rules
 from .sdkmap import Resolved, SdkIndex
 
-SKIP_DIRS = {"node_modules", "vendor", "site-packages", "__pycache__"}  # skipped anywhere
-BUILD_DIRS = {"dist", "build", "coverage", "target", "tmp"}  # skipped at the repo root or next to a project file
-PROJECT_FILES = {
-    "package.json", "pyproject.toml", "setup.py", "Gemfile", "Cargo.toml", "go.mod", "pom.xml", "composer.json",
-    "tsconfig.json",
-}
-SKIP_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "Pipfile.lock", "Gemfile.lock"}
 LANGUAGES = {
     ".py": "python",
     ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
@@ -51,7 +45,6 @@ DOC_EXT = {".md", ".txt", ".yml", ".yaml", ".json", ".env"}
 DOC_DIRS = {"docs", "doc", "fixtures", "__fixtures__", "cassettes"}
 TEST_DIRS = {"spec", "specs", "test", "tests", "__tests__", "__mocks__", "e2e", "cypress"}
 TEST_FILE = re.compile(r"(?:^test_.*\.py|.*_test\.py|.*_spec\.rb|.*_test\.rb|.*_test\.go|.*\.(?:test|spec)\.[cm]?[jt]sx?)$")
-MAX_BYTES = 1_500_000
 STRIPE_HINT = re.compile(r"stripe", re.I)
 URL_RE = re.compile(r"api\.stripe\.com(/v\d+(?:/[^\s'\"`<>)\],;?]+)+)")
 VERB_RE = re.compile(r"\b(get|post|delete)\b", re.I)
@@ -276,43 +269,11 @@ def unread_sentence(unread: dict[str, int], vendor: str = "Stripe") -> str:
 
 def _iter_files(root: Path, suffixes: set[str] | None = None) -> tuple[list[Path], int, int]:
     """The files a scan reads (``suffixes``: of these extensions instead of every text file), with the
-    counts of files and directories left out. Every walk over a checkout goes through here, so the same
-    files are read on every machine whatever is installed (dependency and build directories are skipped)."""
-    suffixes = TEXT_EXT if suffixes is None else suffixes
-    files: list[Path] = []
-    skipped_files = skipped_dirs = 0
-    for dirpath, dirs, names in os.walk(root):
-        here, present = Path(dirpath), set(names)
-        keep = []
-        for d in sorted(dirs):
-            if d.startswith("."):
-                continue
-            if d in SKIP_DIRS or (d in BUILD_DIRS and (here == root or present & PROJECT_FILES)):
-                skipped_dirs += 1
-                continue
-            keep.append(d)
-        dirs[:] = keep
-        for name in sorted(names):
-            path = here / name
-            if name in SKIP_NAMES or name.endswith((".min.js", ".map")) or path.suffix.lower() not in suffixes:
-                continue
-            if path.is_symlink():
-                continue
-            if path.stat().st_size > MAX_BYTES:
-                skipped_files += 1
-                continue
-            files.append(path)
-    return files, skipped_files, skipped_dirs
+    counts of files and directories left out (:func:`scanfiles.iter_files`)."""
+    return scanfiles.iter_files(root, TEXT_EXT if suffixes is None else suffixes)
 
 
-def _read(path: Path) -> str | None:
-    try:
-        raw = path.read_bytes()
-    except OSError:
-        return None
-    if b"\x00" in raw[:8192]:
-        return None
-    return raw.decode("utf-8", errors="replace")
+_read = scanfiles.read
 
 
 def _doc_like(rel: str, suffix: str) -> bool:
