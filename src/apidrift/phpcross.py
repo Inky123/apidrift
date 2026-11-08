@@ -147,7 +147,9 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
     if not names:
         return
     pattern = "|".join(re.escape(w.name) for w in names.values())
-    definition = re.compile(rf"(?<![\w$])function\s*&?\s*({pattern})\s*\(", re.I)
+    # ``[fF]`` is exactly what ``f`` matches under re.I (no other character lower-cases to it), and a literal
+    # class first lets the engine scan for it instead of trying the look-behind at every character
+    definition = re.compile(rf"[fF](?<![\w$][fF])(?i:unction\s*&?\s*({pattern})\s*\()")
     mention = re.compile(rf"(?<![\w$])(?:{pattern})(?!\w)", re.I)
     defs: Counter[str] = Counter()
     source = {p.resolve() for p in sources}
