@@ -62,6 +62,7 @@ class Fix:
     content: str
     sites: list[FixSite]
     original: str = field(default="", repr=False)  # for diffs; not part of the payload
+    edits: list[Edit] = field(default_factory=list, repr=False)  # what the App re-derives the content from
 
     def diff(self) -> str:
         lines = difflib.unified_diff(
@@ -106,7 +107,7 @@ class FixPlan:
         return {
             "fixes": [
                 {
-                    "file": f.file, "blob_sha": f.blob_sha, "content": f.content,
+                    "file": f.file, "blob_sha": f.blob_sha, "content": f.content, "edits": fixtestedit.edit_dicts(f.edits),
                     "sites": [
                         {"line": s.line, "path": s.path, "target": s.target, "replacement": s.replacement, "action": s.action}
                         for s in f.sites
@@ -234,7 +235,7 @@ def _plan_file(
         {"file": file, "line": i.usage.line, "path": i.usage.path, "target": m.target} for i, m in possibly
     ]
     sites = [FixSite(i.usage.line, i.usage.path, m.target, m.replacement, m.action) for i, m in pairs]
-    return Fix(file, "", content, sites, original=text), leftovers
+    return Fix(file, "", content, sites, original=text, edits=sorted(set(edits), key=lambda e: e.start)), leftovers
 
 
 def _candidate_edits(locator: Locator, usage: Usage, migration: Migration) -> tuple[str | None, list[Edit]]:

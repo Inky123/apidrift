@@ -144,6 +144,29 @@ def blob_sha(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
+class Disk:
+    """GitHub's content lookup and blob fetch for the parent's checks, answered from a checkout on disk (a
+    ``swap`` maps a path to the bytes a lying blob endpoint returns instead)."""
+
+    def __init__(self, root: Path, swap: dict[str, bytes] | None = None) -> None:
+        self.root, self.swap = Path(root), swap or {}
+
+    def get_content_meta(self, token, full_name, file, sha):
+        path = self.root / file
+        if not path.is_file():
+            return {"type": None, "sha": None, "size": None}
+        raw = path.read_bytes()
+        return {"type": "file", "sha": blob_sha(raw), "size": len(raw)}
+
+    def get_blob(self, token, full_name, sha):
+        from apidrift.app.github import GitHubError
+
+        for path in sorted(self.root.rglob("*")):
+            if path.is_file() and blob_sha(path.read_bytes()) == sha:
+                return self.swap.get(path.relative_to(self.root).as_posix(), path.read_bytes())
+        raise GitHubError("Not Found", 404)
+
+
 def _fake_sha(*parts: object) -> str:
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()
 

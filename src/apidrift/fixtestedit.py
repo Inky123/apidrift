@@ -72,6 +72,11 @@ class TestFix:
         return "".join(ln if ln.endswith("\n") else ln + "\n\\ No newline at end of file\n" for ln in lines)
 
 
+def edit_dicts(edits: list[Edit]) -> list[dict]:
+    """A code fix's edits as the payload carries them: the App rebuilds the file from these, never the content."""
+    return [{"start": e.start, "end": e.end, "text": e.text, "target": e.key} for e in edits]
+
+
 def plan_tests(plan, impacts, index, base: Path) -> tuple[list[TestFix], list[tuple[str, int]], list[tuple[str, int]]]:
     """The test files to update for ``plan`` (a :class:`fixer.FixPlan`), the plan's test lines with the edited
     ones included (a wrap_type key is listed only where it is edited), and the recorded cassettes whose

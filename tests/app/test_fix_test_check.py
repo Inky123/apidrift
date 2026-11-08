@@ -8,13 +8,13 @@ import hashlib
 import shutil
 
 import pytest
-from conftest import REPO, blob_sha
+from conftest import REPO, Disk, blob_sha
 from test_fix import charges_migration, claim, scan  # noqa: F401  (fixtures)
 from test_fix_test_edits import JS_APP, JS_TEST, PHP_APP, PHP_TEST, PY_APP, PY_TEST, RUBY_APP, RUBY_SPEC
 from test_fixer import plan_for
 from test_fixer_v2 import plan_v2
 
-from apidrift.app import fixcheck, fixpr, fixtestcheck, prbody
+from apidrift.app import editshape, fixcheck, fixpr, fixtestcheck, prbody
 from apidrift.app.checker import run_job
 from apidrift.app.github import GitHubError
 
@@ -25,23 +25,17 @@ def git_sha(raw: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(raw) + raw).hexdigest()
 
 
-class Repo:
-    """GitHub's content lookup and blob fetch, answered from a checkout on disk."""
+class Repo(Disk):
+    """:class:`conftest.Disk`, whose blob endpoint can also fail (``lie``) for the files in ``failing``."""
 
-    def __init__(self, root, swap: dict[str, bytes] | None = None, lie: bool = False) -> None:
-        self.root, self.swap, self.lie = root, swap or {}, lie
-
-    def get_content_meta(self, token, full_name, file, sha):
-        path = self.root / file
-        return {"type": "file", "sha": git_sha(path.read_bytes())} if path.is_file() else {"type": None, "sha": None}
+    def __init__(self, root, swap: dict[str, bytes] | None = None, lie: bool = False, failing: tuple = ()) -> None:
+        super().__init__(root, swap)
+        self.lie, self.failing = lie, failing
 
     def get_blob(self, token, full_name, sha):
-        if self.lie:
+        if self.lie and (not self.failing or any(git_sha((self.root / f).read_bytes()) == sha for f in self.failing)):
             raise GitHubError("boom", 500)
-        for path in self.root.rglob("*"):
-            if path.is_file() and git_sha(path.read_bytes()) == sha:
-                return self.swap.get(path.relative_to(self.root).as_posix(), path.read_bytes())
-        raise GitHubError("not found", 404)
+        return super().get_blob(token, full_name, sha)
 
 
 def checked(root, payload, gh=None):
@@ -153,8 +147,8 @@ def test_the_parent_reads_the_base_blob_itself(real):
     root, plan, payload = real
     fixes, tests = checked(root, payload, Repo(root, swap={"spec/pay_spec.rb": b"evil"}))
     assert "spec/pay_spec.rb" not in [t["file"] for t in tests]  # bytes that do not hash to the sha
-    _, tests = checked(root, payload, Repo(root, lie=True))
-    assert tests == []  # GitHub errors drop the tests, not the pull request
+    with pytest.raises(GitHubError):  # a test blob GitHub fails to serve: no reduced pull request goes out
+        checked(root, payload, Repo(root, lie=True, failing=("spec/pay_spec.rb",)))
     bad = copy.deepcopy(payload)
     bad["test_fixes"][0]["blob_sha"] = git_sha(b"other")
     assert bad["test_fixes"][0]["file"] not in [t["file"] for t in checked(root, bad)[1]]
@@ -196,7 +190,7 @@ def test_delete_shapes(language, text, start_after, old, new, ok):
     start = text.index(start_after) + len(start_after)
     assert text[start : start + len(old)] == old
     e = {"start": start, "end": start + len(old), "text": new}
-    assert (fixtestcheck._shape(text, language, e, m) is not None) is ok
+    assert (editshape.shape(text, language, e, m) is not None) is ok
 
 
 @pytest.mark.parametrize("language, text, old, new, ok", [
@@ -214,7 +208,7 @@ def test_wrap_shapes(language, text, old, new, ok):
     m = migrations.for_site("/v1/subscriptions/{subscription_exposed_id}", "billing_cycle_anchor")
     start = text.index(old)
     e = {"start": start, "end": start + len(old), "text": new}
-    assert (fixtestcheck._shape(text, language, e, m) is not None) is ok
+    assert (editshape.shape(text, language, e, m) is not None) is ok
 
 
 @pytest.mark.parametrize("text, old, new, ok", [
@@ -229,12 +223,12 @@ def test_rename_first_shapes(text, old, new, ok):
     m = migrations.for_site("/v1/financial_connections/sessions", "filters.countries")
     start = text.index(old)
     e = {"start": start, "end": start + len(old), "text": new}
-    assert (fixtestcheck._shape(text, "ruby", e, m) is not None) is ok
+    assert (editshape.shape(text, "ruby", e, m) is not None) is ok
 
 
 # --- through a real job ----------------------------------------------------------------------------
 
-TEST = 'def test_charge(create):\n    create.assert_called_once_with(amount=1, description="x")\n'
+TEST = "@patch(\"stripe.Charge.create\")\ndef test_charge(create):\n    create.assert_called_once_with(amount=1, description=\"x\")\n"
 
 
 def test_a_job_pushes_the_updated_test_in_the_same_commit(scan, installed, conn, gh, settings, tmp_path):
@@ -244,9 +238,10 @@ def test_a_job_pushes_the_updated_test_in_the_same_commit(scan, installed, conn,
     (tree / "tests/test_server.py").write_text(TEST)
     installed.tree = tree
     at = TEST.index("description")
-    scan.payload["tests"] = [{"file": "tests/test_server.py", "line": 2}]
+    scan.payload["tests"] = [{"file": "tests/test_server.py", "line": 3}]
+    scan.payload["unfixable"] = []  # every description site is fixed, so its tests may be updated
     scan.payload["test_fixes"] = [{"file": "tests/test_server.py", "blob_sha": blob_sha(TEST.encode()), "edits": [
-        {"line": 2, "path": "/v1/charges", "target": "description", "replacement": "allowed_description",
+        {"line": 3, "path": "/v1/charges", "target": "description", "replacement": "allowed_description",
          "action": "rename", "start": at, "end": at + len("description"), "text": "allowed_description"}]}]
     installed.grant_writes()
     assert run_job(claim(conn), conn, gh, settings) == "findings: opened #1; pr: opened #2"
@@ -256,7 +251,7 @@ def test_a_job_pushes_the_updated_test_in_the_same_commit(scan, installed, conn,
     assert entries["tests/test_server.py"] == TEST.replace('description="x"', 'allowed_description="x"')
     assert "server.py" in entries
     body = installed.pulls[2]["body"]
-    assert "**Tests updated**" in body and "tests/test_server.py#L2" in body
+    assert "**Tests updated**" in body and "tests/test_server.py#L3" in body
     assert "Tests that name the old field" not in body  # its only listed line was updated
     blobs = [r for r in installed.requests if r.method == "GET" and "/git/blobs/" in r.url.path]
-    assert len(blobs) == 1  # the parent read the base blob itself
+    assert len(blobs) == 2  # the parent read both base blobs itself, the code and the test

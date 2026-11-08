@@ -3,13 +3,16 @@
 Every value in a fix is child output computed from untrusted repository bytes. A fix is pushed only when its
 path is a plain relative path in a scanned language outside ``.github/``, its tokens are Stripe field/path
 names, every site matches a migration in the parent's own table (same action, same replacement), it fits the
-caps, and GitHub confirms the file at the base commit has exactly the ``blob_sha`` the child rewrote. File
-modes come from the base tree, never from a guess. One bad site rejects the whole file: its content carries
-that site's edit too, and content cannot be pushed in part.
+caps, and GitHub confirms the file at the base commit has exactly the ``blob_sha`` the child rewrote. The
+pushed content is never the child's: the parent fetches the base blob itself (it must hash to that sha) and
+applies the child's edits, each of which must be the documented action of one of the fix's sites on its key,
+written the way the fixer writes it (:mod:`editshape`). File modes come from the base tree, never from a
+guess. One bad site or edit rejects the whole file: content cannot be pushed in part.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from pathlib import PurePosixPath
@@ -20,40 +23,123 @@ from . import issue
 from .github import GitHubClient, GitHubError
 
 MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_BYTES = 25, 1_000_000, 3_000_000
+MAX_EDITS, MAX_EDIT_TEXT = 400, 2000
 BLOB_MODES = ("100644", "100755")
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
 logger = logging.getLogger("apidrift.fixpr")
 
 
 def validate(gh: GitHubClient, token: str, full_name: str, base_sha: str, fixes: object) -> list[dict]:
-    """The fixes the parent is willing to push, each reduced to ``{file, blob_sha, content, sites}``."""
+    """The fixes the parent is willing to push, each ``{file, blob_sha, content, sites, original}``, the content
+    rebuilt here from the base blob and the child's edits (:func:`rebuild`); the child's own content is never
+    pushed. A GitHub error raises: a check that cannot read every blob pushes nothing (no reduced PR)."""
     accepted: list[dict] = []
     total = 0
-    for fix in fixes if isinstance(fixes, list) else []:
-        if not isinstance(fix, dict):
+    for fix in claimed(fixes):
+        if len(accepted) >= MAX_FILES:
+            logger.info("repo %s: not pushing one file (over the size caps)", full_name)
             continue
-        why = reject(fix.get("file"), fix.get("blob_sha"), fix.get("content")) or reject_sites(fix.get("sites"))
-        size = 0
+        text, why = base_text(gh, token, full_name, base_sha, fix["file"], fix["blob_sha"])
+        content = None
         if why is None:
-            try:
-                size = len(fix["content"].encode("utf-8"))
-            except UnicodeEncodeError:
-                why = "content is not encodable text"
-        if why is None and (len(accepted) >= MAX_FILES or size > MAX_FILE_BYTES or total + size > MAX_TOTAL_BYTES):
+            content, why = rebuild(text, fix)
+        size = len(content.encode("utf-8")) if content is not None else 0
+        if why is None and (size > MAX_FILE_BYTES or total + size > MAX_TOTAL_BYTES):
             why = "over the size caps"
-        if why is None:
-            meta = _content_meta(gh, token, full_name, fix["file"], base_sha)
-            if meta.get("type") != "file" or meta.get("sha") != fix["blob_sha"]:
-                why = "not the file that was scanned"
         if why is not None:
             logger.info("repo %s: not pushing one file (%s)", full_name, why)
             continue
         total += size
-        accepted.append({
-            "file": fix["file"], "blob_sha": fix["blob_sha"], "content": fix["content"],
-            "sites": [_site(s) for s in fix["sites"]],
-        })
+        kept = {k: v for k, v in fix.items() if k != "content_claim"}
+        accepted.append({**kept, "content": content, "original": text})
     return accepted
+
+
+def claimed(fixes: object) -> list[dict]:
+    """The child's fixes that pass the checks needing no network, reduced to ``{file, blob_sha, sites, edits}``
+    (edits still unchecked): what the fingerprint of an unchanged pull request is computed from."""
+    out = []
+    for fix in fixes if isinstance(fixes, list) else []:
+        if not isinstance(fix, dict):
+            continue
+        why = reject(fix.get("file"), fix.get("blob_sha"), fix.get("content", "")) or reject_sites(fix.get("sites"))
+        if why is None and any(f["file"] == fix["file"] for f in out):
+            why = "the file is twice in the plan"
+        edits = _edits(fix.get("edits"), {s["target"] for s in fix["sites"]}) if why is None else None
+        if why is None and edits is None:
+            why = "malformed edits"
+        if why is not None:
+            logger.info("not pushing one file (%s)", why)
+            continue
+        out.append({"file": fix["file"], "blob_sha": fix["blob_sha"], "sites": [_site(s) for s in fix["sites"]],
+                    "edits": edits, "content_claim": fix.get("content")})
+    return out
+
+
+def rebuild(text: str, fix: dict) -> tuple[str | None, str | None]:
+    """The fixed file from the base text and the fix's edits, when every edit is the documented action of one
+    of the fix's sites on its key (:func:`editshape.shape`); else (None, why)."""
+    from .editshape import shape  # the shapes the fixer writes
+
+    language = LANGUAGES[PurePosixPath(fix["file"]).suffix.lower()]
+    by_target: dict[str, list] = {}
+    for s in fix["sites"]:
+        m = migrations.for_site(s["path"], s["target"])
+        if m is not None and m not in by_target.setdefault(s["target"], []):
+            by_target[s["target"]].append(m)
+    for e in fix["edits"]:
+        if e["end"] > len(text) or not any(shape(text, language, e, m, code=True) is not None for m in by_target[e["target"]]):
+            return None, "an edit is not a documented rewrite of its key"
+    content = apply_edits(text, fix["edits"])
+    claim = fix.get("content_claim")
+    if isinstance(claim, str) and claim != content:
+        return None, "the child's content is not its edits"
+    return content, None
+
+
+def apply_edits(text: str, edits: list[dict]) -> str:
+    out = text
+    for e in sorted(edits, key=lambda e: e["start"], reverse=True):
+        out = out[: e["start"]] + e["text"] + out[e["end"] :]
+    return out
+
+
+def _edits(items: object, targets: set[str]) -> list[dict] | None:
+    """``{start, end, text, target}`` edits rebuilt with exactly these keys, sorted; None when one is malformed,
+    names a key no site of the fix declares, or overlaps another."""
+    if not isinstance(items, list) or not 0 < len(items) <= MAX_EDITS:
+        return None
+    out = []
+    for e in items:
+        if not isinstance(e, dict) or any(type(e.get(k)) is not int for k in ("start", "end")):
+            return None
+        if not isinstance(e.get("text"), str) or len(e["text"]) > MAX_EDIT_TEXT or not 0 <= e["start"] <= e["end"]:
+            return None
+        if e.get("target") not in targets:
+            return None
+        out.append({"start": e["start"], "end": e["end"], "text": e["text"], "target": e["target"]})
+    out.sort(key=lambda e: (e["start"], e["end"]))
+    if any(a["end"] > b["start"] or a["start"] == b["start"] for a, b in zip(out, out[1:])):
+        return None
+    return out
+
+
+def base_text(gh: GitHubClient, token: str, full_name: str, base_sha: str, file: str, sha: str) -> tuple[str | None, str | None]:
+    """The file's text at the base commit, read by the parent itself: GitHub must name ``sha`` for the path, the
+    size must fit, and the blob fetched by that sha must hash to it. GitHub errors raise."""
+    meta = _content_meta(gh, token, full_name, file, base_sha)
+    if meta.get("type") != "file" or meta.get("sha") != sha:
+        return None, "not the file that was scanned"
+    size = meta.get("size")
+    if not isinstance(size, int) or isinstance(size, bool) or size > MAX_FILE_BYTES:
+        return None, "over the size caps"
+    raw = gh.get_blob(token, full_name, sha)
+    if len(raw) != size or hashlib.sha1(b"blob %d\0" % len(raw) + raw).hexdigest() != sha:
+        return None, "the blob is not the one named"
+    try:
+        return raw.decode("utf-8"), None
+    except UnicodeDecodeError:
+        return None, "the file is not UTF-8"
 
 
 def reject(file: object, blob_sha: object, content: object) -> str | None:

@@ -102,7 +102,7 @@ def test_payload_shape_is_the_frozen_contract(sample_plan):
     data = sample_plan.to_dict()
     assert set(data) == {"fixes", "unfixable", "pins", "migrations", "leftovers", "not_attempted", "possibly_remaining", "tests",
                          "test_fixes", "cassettes"}
-    assert set(data["fixes"][0]) == {"file", "blob_sha", "content", "sites"}
+    assert set(data["fixes"][0]) == {"file", "blob_sha", "content", "sites", "edits"}
     assert set(data["fixes"][0]["sites"][0]) == {"line", "path", "target", "replacement", "action"}
     assert data["fixes"][0]["sites"][0]["action"] == "rename" and data["possibly_remaining"] == []
     assert set(data["pins"][0]) == {"file", "line", "version"}

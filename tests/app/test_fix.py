@@ -61,6 +61,8 @@ def fix_payload(tree=REPO, files=("server.py",)) -> dict:
         fixes.append({
             "file": name, "blob_sha": blob_sha((tree / name).read_bytes()),
             "content": text.replace("description", "allowed_description"),
+            "edits": [{"start": m.start(), "end": m.end(), "text": "allowed_description", "target": "description"}
+                      for m in re.finditer("description", text)],
             "sites": [
                 {"line": ln, "path": "/v1/charges", "target": "description", "replacement": "allowed_description", "action": "rename"}
                 for ln in lines

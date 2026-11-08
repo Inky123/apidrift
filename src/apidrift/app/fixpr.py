@@ -207,8 +207,14 @@ def _push(
 ) -> str:
     _settle_pull(conn, gh, token, repo, full_name)
     repo = db.get_repo(conn, repo["id"]) or repo
-    accepted = fixcheck.validate(gh, token, full_name, base_sha, payload.get("fixes"))
     number, state = repo["pr_number"], repo["fix_state"]
+    claims = fixcheck.claimed(payload.get("fixes"))  # no network: an unchanged plan is not fetched again
+    claimed_tests = [{"file": t["file"], "blob_sha": t["blob_sha"], "edits": t["edits"]}
+                     for t in fixtestcheck.claimed(payload, claims)]
+    if number is not None and state == "open" and claims and \
+            fingerprint(claims, version, issue_number, claimed_tests) == repo["pr_fingerprint"]:
+        return f"#{number} unchanged"
+    accepted = fixcheck.validate(gh, token, full_name, base_sha, payload.get("fixes"))
     if not accepted:
         if number is not None and state in CLOSABLE:
             return _close(conn, gh, token, repo, full_name, gone_comment(base_sha))
