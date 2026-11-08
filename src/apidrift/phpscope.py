@@ -17,10 +17,10 @@ from .phplex import STRING, Lex
 
 # These run over whole files, some of them damaged: no pattern may hold two runs of whitespace that can
 # trade characters with each other, or a long blank stretch costs its length squared.
-FUNC = re.compile(r"(?<![\w$>:\\])function\b\s*(?:&\s*)?(?:[A-Za-z_]\w*\s*)?\(")
-ARROW = re.compile(r"(?<![\w$>:\\])fn\s*(?:&\s*)?\(")
+FUNC = re.compile(r"function(?<![\w$>:\\]function)\b\s*(?:&\s*)?(?:[A-Za-z_]\w*\s*)?\(")
+ARROW = re.compile(r"fn(?<![\w$>:\\]fn)\s*(?:&\s*)?\(")
 USE = re.compile(r"use\s*\(")
-CLASS = re.compile(r"(?<![\w$>:\\])(?:class|trait|interface|enum)\b")
+CLASS = re.compile(r"(?:class(?<![\w$>:\\]class)|trait(?<![\w$>:\\]trait)|interface(?<![\w$>:\\]interface)|enum(?<![\w$>:\\]enum))\b")
 BRACE_OR_END = re.compile(r"[{;]")
 HEADER_REACH = 4000  # how far past ``class`` its ``{`` is looked for
 VAR = re.compile(r"\$([A-Za-z_]\w*)")
@@ -33,11 +33,12 @@ BY_REF = {  # built-ins and Laravel helpers that change their first argument in 
     "array_multisort", "settype", "data_set", "data_fill", "data_forget", "array_set", "array_forget", "set",
     "forget", "pull",
 }
-ALT_SYNTAX = re.compile(r"\b(?:endif|endforeach|endwhile|endfor|endswitch)\b")
+ALT_SYNTAX = re.compile(r"endif(?<!\wendif)\b|endforeach(?<!\wendforeach)\b|endwhile(?<!\wendwhile)\b|endfor(?<!\wendfor)\b|endswitch(?<!\wendswitch)\b")
 UNBOUNDED = re.compile(  # code that can create or change a variable without naming it
-    r"\b(?:extract|eval|parse_str)\s*\(|\b(?:include|include_once|require|require_once)\b|\$\$|\$\{"
+    r"extract(?<!\wextract)\s*\(|eval(?<!\weval)\s*\(|parse_str(?<!\wparse_str)\s*\(|include(?<!\winclude)\b"
+    r"|include_once(?<!\winclude_once)\b|require(?<!\wrequire)\b|require_once(?<!\wrequire_once)\b|\$\$|\$\{"
 )
-READS_ALL = re.compile(r"\b(?:compact|get_defined_vars)\s*\(")
+READS_ALL = re.compile(r"compact(?<!\wcompact)\s*\(|get_defined_vars(?<!\wget_defined_vars)\s*\(")
 BIND, WRITE, INPLACE, OPAQUE, USED = "bind", "write", "inplace", "opaque", "use"
 
 

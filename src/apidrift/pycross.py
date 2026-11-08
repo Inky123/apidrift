@@ -177,8 +177,8 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
     if not names:
         return
     pattern = "|".join(re.escape(w.name) for w in names.values())
-    definition = re.compile(rf"(?<![\w.])def\s+({pattern})\s*\(")
-    mention = re.compile(rf"(?<!\w)(?:{pattern})(?!\w)")
+    definition = re.compile(rf"def(?<![\w.]def)\s+({pattern})\s*\(")
+    mention = re.compile(rf"(?:{crosstable.names_pattern([re.escape(w.name) for w in names.values()], r'\w')})(?!\w)")
     defs: dict[str, int] = {}
     facts = Facts(set(), set(), set(), {}, set())
     source = {str(p) for p in sources}

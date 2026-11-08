@@ -27,13 +27,13 @@ from dataclasses import dataclass, field
 from .jsparse import QUOTES, OPENERS
 
 IDENT = r"[A-Za-z_$][\w$]*"
-SUPERS = re.compile(r"(?<![\w$.])(?:extends|implements)\s+([^{};=]{1,300})\{")  # bounded: no backtracking
-NEW = re.compile(rf"(?<![\w$.])new\s+({IDENT})\s*[(<]")
-PROVIDE = re.compile(r"(?<![\w$.])provide\s*:")
-CLASS_DECL = re.compile(rf"(?<![\w$.])class\s+({IDENT})")
+SUPERS = re.compile(r"(?:extends(?<![\w$.]extends)|implements(?<![\w$.]implements))\s+([^{};=]{1,300})\{")  # bounded
+NEW = re.compile(rf"new(?<![\w$.]new)\s+({IDENT})\s*[(<]")
+PROVIDE = re.compile(r"provide(?<![\w$.]provide)\s*:")
+CLASS_DECL = re.compile(rf"class(?<![\w$.]class)\s+({IDENT})")
 # ``x.p = `` / ``x['p'] = ``: group 1 the receiver word ("" after ``)`` or ``]``), group 2 a ``?.``
 WRITE = re.compile(
-    rf"(?:(?<![\w$])({IDENT})|[)\]])\s*(\?)?(?:\.\s*({IDENT})|\[\s*['\"]({IDENT})['\"]\s*\])\s*"
+    rf"(?:(?<![\w$])({IDENT}+)|[)\]])\s*+(\?)?(?:\.\s*({IDENT}+)|\[\s*['\"]({IDENT}+)['\"]\s*\])\s*"
     r"(?:[-+*/%&|^]|\?\?|\|\||&&)?=(?![=>])"
 )
 

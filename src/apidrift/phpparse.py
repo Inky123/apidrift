@@ -24,13 +24,13 @@ from .sdkmap import Resolved, without_id
 
 VERB = re.compile(r"(\?->|->|::)\s*([A-Za-z_]\w*)\s*\(")
 NEW = re.compile(r"new\s+(\\?[A-Za-z_][\w\\]*)")
-USE_HEAD = re.compile(r"(?<![\w$>:\\])use\s+(?!function\b|const\b)")
+USE_HEAD = re.compile(r"use(?<![\w$>:\\]use)\s+(?!function\b|const\b)")
 USE_STOP = re.compile(r"[;(){}]")
-NAMESPACE_DECL = re.compile(r"(?<![\w$>:\\])namespace\s+([A-Za-z_][\w\\]*)\s*[;{]")
+NAMESPACE_DECL = re.compile(r"namespace(?<![\w$>:\\]namespace)\s+([A-Za-z_][\w\\]*)\s*[;{]")
 USE_REACH = 4000  # an import statement longer than this is not read
 CLIENT = re.compile(
-    r"(?:\$this\s*->\s*|\$)([A-Za-z_]\w*)\s*=\s*new\s+(\\?[A-Za-z_][\w\\]*)"  # $stripe = new StripeClient(
-    r"|(?<![\w\\])(\\?[A-Za-z_][\w\\]*)\s+\$([A-Za-z_]\w*)"  # a typed property or parameter: StripeClient $stripe
+    r"(?:\$this\s*->\s*|\$)([A-Za-z_]\w*+)\s*=\s*new\s+(\\?[A-Za-z_][\w\\]*)"  # $stripe = new StripeClient(
+    r"|(?<![\w\\])(\\?[A-Za-z_][\w\\]*+)\s+\$([A-Za-z_]\w*)"  # a typed property or parameter: StripeClient $stripe
 )
 MERGE = re.compile(r"(?:array_merge|array_replace|array_merge_recursive|array_replace_recursive|array_filter)\s*\(")
 VARIABLE = re.compile(r"\$([A-Za-z_]\w*)")

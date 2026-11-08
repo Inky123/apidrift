@@ -34,12 +34,12 @@ from . import phpinstance, phpvendor
 from .phplex import STRING, Lex, lex
 from .phpscope import BIND, OPAQUE, WRITE, Bindings, Scopes
 
-NAMED_FUNC = re.compile(r"(?<![\w$>:\\])function\s*&?\s*([A-Za-z_]\w*)\s*\(")
-CALLERS = re.compile(r"(?<![\w$>:\\])(call_user_func_array|call_user_func)\s*\(")
-NAMESPACE = re.compile(r"(?<![\w$>:\\])namespace\s+([A-Za-z_][\w\\]*)\s*[;{]")
-CLASS_NAME = re.compile(r"(?<![\w$>:\\])(?:class|trait)\s+([A-Za-z_]\w*)[^{;]*\{")
+NAMED_FUNC = re.compile(r"function(?<![\w$>:\\]function)\s*&?\s*([A-Za-z_]\w*)\s*\(")
+CALLERS = re.compile(r"(call_user_func_array(?<![\w$>:\\]call_user_func_array)|call_user_func(?<![\w$>:\\]call_user_func))\s*\(")
+NAMESPACE = re.compile(r"namespace(?<![\w$>:\\]namespace)\s+([A-Za-z_][\w\\]*)\s*[;{]")
+CLASS_NAME = re.compile(r"(?:class(?<![\w$>:\\]class)|trait(?<![\w$>:\\]trait))\s+([A-Za-z_]\w*)[^{;]*\{")
 PAIR = re.compile(r"\(\s*(['\"])[A-Z][\w\\]*\1\s*,\s*(['\"])[A-Za-z_]\w*\2")  # f('PaymentIntent', 'create'
-FREE_CALL = re.compile(r"(?<![\w$>:\\])\\?([A-Za-z_]\w*)\s*\(")
+FREE_CALL = re.compile(r"(?<![\w$>:\\])\\?([A-Za-z_]\w*+)\s*\(")
 PARAM = re.compile(r"^\s*(?:\??[\\\w|]+\s+)?(&\s*)?(\.\.\.\s*)?\$([A-Za-z_]\w*)\s*(?:=.*)?$", re.S)
 FORWARD = re.compile(
     r"\s*(?:\$([A-Za-z_]\w*)\s*=\s*new\s+(\\?[A-Za-z_][\w\\]*)\s*(?:\(\s*\))?\s*;\s*)?"

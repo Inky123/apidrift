@@ -133,7 +133,7 @@ def collect(calls: list[jsparse.Call], helpers: Helpers, table: Table, rel: str)
         if len(args) != 1 or args[0][1] not in names or not re.fullmatch(IDENT, args[0][1]):
             continue
         name = args[0][1]
-        word = re.compile(rf"(?<![\w$.]){re.escape(name)}(?![\w$])")
+        word = re.compile(rf"{re.escape(name)}(?<![\w$.]{re.escape(name)})(?![\w$])")
         if sum(1 for m in word.finditer(text, d.open, d.close) if not _comment(helpers, m.start())) != 1:
             continue  # also read, written or passed on in the wrapper (in a template's ``${}`` too)
         if d.kind == "method":
@@ -179,7 +179,7 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
     source = {str(p) for p in sources}
     facts = jsreach.Facts()
     defined: Counter[str] = Counter()
-    mention = re.compile(rf"(?<![\w$])(?:{'|'.join(re.escape(w.name) for w in names.values())})(?![\w$])")
+    mention = re.compile(rf"(?:{crosstable.names_pattern([re.escape(w.name) for w in names.values()], r'\w$')})(?![\w$])")
     mentioned: list[Path] = []
     test = lambda rel: scanner._doc_like(rel, Path(rel).suffix.lower())  # noqa: E731  a test's mocks reach its own calls
     for item in crosstable.walk(base, DEFINES, skip=test):
@@ -191,7 +191,9 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
         facts.learn(text)
         for f in funcs:
             if f in text:
-                defined[f] += len(re.findall(rf"(?<![\w$])function\s*\*?\s*{re.escape(f)}\s*[<(]|(?<![\w$])(?:const|let|var)\s+{re.escape(f)}(?![\w$])", text))
+                n = re.escape(f)
+                defined[f] += len(re.findall(rf"function(?<![\w$]function)\s*\*?\s*{n}\s*[<(]|const(?<![\w$]const)\s+{n}(?![\w$])"
+                                             rf"|let(?<![\w$]let)\s+{n}(?![\w$])|var(?<![\w$]var)\s+{n}(?![\w$])", text))
         if str(path) in source and path.suffix.lower() in SUFFIXES and mention.search(text):
             mentioned.append(path)
     for key, w in names.items():

@@ -137,7 +137,9 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
         return
     pattern = "|".join(re.escape(w.name) for w in names.values())
     definition = re.compile(rf"^func[ \t]*(?:\([^()\n]*\)[ \t]*)?({pattern})[ \t]*[(\[]", re.M)
-    mention = re.compile(rf"\b(?:{pattern})\b")
+    escaped = [re.escape(w.name) for w in names.values()]  # identifiers: ``\b`` before one is "no word character before"
+    mention = re.compile(rf"(?:{crosstable.names_pattern(escaped, r'\w')})\b" if all(re.match(r"\w", n) for n in escaped)
+                         else rf"\b(?:{pattern})\b")
     defs: dict[str, int] = {}
     source = {str(p) for p in sources}
     mentioned: list[Path] = []

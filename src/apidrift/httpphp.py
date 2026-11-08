@@ -19,21 +19,22 @@ from .httpphpbody import Writes, _writes
 from .jsparse import Fields
 from .phplex import STRING, lex
 
-FUNC = re.compile(r"(?<![\w$>:\\])function\s*(?:&\s*)?([A-Za-z_]\w*)\s*\(")
-CLASS = re.compile(r"(?<![\w$>:\\])(?:class|trait)\s+([A-Za-z_]\w*)[^{;]*?\{")
-CONST = re.compile(r"(?<![\w$>:\\])const\s+([A-Za-z_]\w*)\s*=")
-DEFINE = re.compile(r"(?<![\w$>:\\])define\s*\(")
+FUNC = re.compile(r"function(?<![\w$>:\\]function)\s*(?:&\s*)?([A-Za-z_]\w*)\s*\(")
+CLASS = re.compile(r"(?:class(?<![\w$>:\\]class)|trait(?<![\w$>:\\]trait))\s+([A-Za-z_]\w*)[^{;]*?\{")
+CONST = re.compile(r"const(?<![\w$>:\\]const)\s+([A-Za-z_]\w*)\s*=")
+DEFINE = re.compile(r"define(?<![\w$>:\\]define)\s*\(")
 HTTP = re.compile(
-    r"(?<![\w$>:\\])(wp_(?:safe_)?remote_(?:get|post|request)|curl_init|file_get_contents)\s*\("
+    r"(wp_(?<![\w$>:\\]wp_)(?:safe_)?remote_(?:get|post|request)|curl_init(?<![\w$>:\\]curl_init)"
+    r"|file_get_contents(?<![\w$>:\\]file_get_contents))\s*\("
     r"|->\s*(request|get|post|delete)\s*\("
 )
-STATIC_CALL = re.compile(r"(?<![\w$\\>])(\\?[A-Za-z_][\w\\]*)\s*::\s*([A-Za-z_]\w*)\s*\(")
+STATIC_CALL = re.compile(r"(?<![\w$\\>])(\\?[A-Za-z_][\w\\]*+)\s*::\s*([A-Za-z_]\w*+)\s*\(")
 THIS_CALL = re.compile(r"\$this\s*->\s*([A-Za-z_]\w*)\s*\(")
-PLAIN_CALL = re.compile(r"(?<![\w$>:\\])([A-Za-z_]\w*)\s*\(")
-NAMESPACE = re.compile(r"(?<![\w$>:\\])namespace\s+([\w\\]+)\s*[;{]")
-USE_STMT = re.compile(r"(?<![\w$>:\\])use\s+(?!function\b|const\b)([\w\\][\w\\\s,]*?)\s*;")
+PLAIN_CALL = re.compile(r"(?<![\w$>:\\])([A-Za-z_]\w*+)\s*\(")
+NAMESPACE = re.compile(r"namespace(?<![\w$>:\\]namespace)\s+([\w\\]+)\s*[;{]")
+USE_STMT = re.compile(r"use(?<![\w$>:\\]use)\s+(?!function\b|const\b)([\w\\][\w\\\s,]*?)\s*;")
 USE_PART = re.compile(r"\s*\\?([\w\\]+)(?:\s+as\s+(\w+))?\s*")
-EXTENDS = re.compile(r"\bextends\s+(\\?[\w\\]+)")
+EXTENDS = re.compile(r"extends(?<!\wextends)\s+(\\?[\w\\]+)")
 CALLED = re.compile(r"(?<!\w)[^\W_A-Za-z]*+([A-Za-z_]\w*+)\s*(?:\(|::)")  # linear: one try per word (a long word is no cost)
 PARAM = re.compile(r"^\s*(?:[\w\\?|]+\s+)?(&\s*)?(\.\.\.)?\s*\$([A-Za-z_]\w*)\s*(?:=\s*(.*?))?\s*$", re.S)
 ENCODERS = re.compile(r"^(?:http_build_query|json_encode|wp_json_encode)\s*\(\s*\$([A-Za-z_]\w*)\s*\)$")
