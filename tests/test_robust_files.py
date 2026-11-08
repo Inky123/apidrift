@@ -73,3 +73,36 @@ def test_fixes_in_bom_files_place_their_edits_in_the_bytes_on_disk(tmp_path):
         2: (f"stripe.paymentIntents.create({{amount: 1, {OLD}: ['card']}});", f"stripe.paymentIntents.create({{amount: 1, {NEW}: ['card']}});")
     }
     assert [(u.file, u.why) for u in plan.unfixable] == [("src/pay.py", "not_found")]
+
+
+STUB_TS = 'const url = "https://api.stripe.com/v1/charges";\nexport const stub = () => fetch(url, { method: "post" });\n'
+
+
+def test_a_single_file_is_reported_relative_to_its_repository_so_the_test_rules_see_its_directory(tmp_path, index):
+    write(tmp_path, {"repo/tests/stub.ts": STUB_TS, "loose/tests/stub.ts": STUB_TS})
+    (tmp_path / "repo" / ".git").mkdir()
+    in_repo = scan_repo(tmp_path / "repo" / "tests" / "stub.ts", index)
+    assert [(u.file, u.language) for u in in_repo.usages] == [("tests/stub.ts", "doc")]
+    whole = scan_repo(tmp_path / "repo", index)
+    assert [(u.file, u.language) for u in whole.usages] == [("tests/stub.ts", "doc")]  # the same answer either way
+    loose = scan_repo(tmp_path / "loose" / "tests" / "stub.ts", index)  # no repository above it: its own directory
+    assert [(u.file, u.language) for u in loose.usages] == [("stub.ts", "http")]
+
+
+def test_a_fix_planned_for_a_single_file_finds_it_under_the_same_base(tmp_path):
+    from test_fixer import NEW, OLD, changed_lines, docs
+    from apidrift.diff import diff_chain
+    from apidrift.fixer import plan_fixes
+    from apidrift.impact import assess
+    from apidrift.report import filter_changes
+
+    js = "const stripe = require('stripe')('sk');\n" f"stripe.paymentIntents.create({{amount: 1, {OLD}: ['card']}});\n"
+    write(tmp_path, {"src/pay.js": js})
+    (tmp_path / ".git").mkdir()
+    old, new = (load_spec(d) for d in docs())
+    idx = SdkIndex.build(old, new)
+    file = tmp_path / "src" / "pay.js"
+    result = scan_repo(file, idx)
+    plan = plan_fixes(result, assess(result.usages, filter_changes(diff_chain([old, new])[0], min_severity="breaking")), idx, file)
+    assert [f.file for f in plan.fixes] == ["src/pay.js"] and plan.unfixable == []
+    assert list(changed_lines(plan.fixes[0])) == [2] and NEW in plan.fixes[0].content

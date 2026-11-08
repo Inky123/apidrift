@@ -54,6 +54,16 @@ def iter_files(root: Path, suffixes: set[str]) -> tuple[list[Path], int, int]:
     return files, skipped_files, skipped_dirs
 
 
+def repo_root(file: Path) -> Path:
+    """What a single file's path is reported relative to: the nearest directory above it holding a ``.git``
+    entry, else its own directory. So ``tests/stub.ts`` keeps its directory and the documentation and test
+    rules see it, as they would in a scan of the whole checkout."""
+    for parent in file.parents:
+        if (parent / ".git").exists():
+            return parent
+    return file.parent
+
+
 BOM = b"\xef\xbb\xbf"
 
 

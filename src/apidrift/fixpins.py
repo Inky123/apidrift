@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import scanner
+from . import scanfiles, scanner
 from .jsparse import Mask, Source
 from .scanner import LANGUAGES
 
@@ -202,7 +202,7 @@ def find_pins(root: Path, fixed: list[str]) -> list[Pin]:
     if not fixed or not root.exists():
         return []
     if root.is_file():
-        files, base = [root], root.parent
+        files, base = [root], scanfiles.repo_root(root)  # as the scan reported the file
     else:
         base = root
         files, seen = [], set()

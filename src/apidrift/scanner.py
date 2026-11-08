@@ -168,7 +168,7 @@ def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> Scan
     if not (root.is_file() or root.is_dir()):
         raise SystemExit(f"apidrift: {root} is not a file or directory")
     if root.is_file():
-        files, base, skipped_files, skipped_dirs = [root], root.parent, 0, 0
+        files, base, skipped_files, skipped_dirs = [root], scanfiles.repo_root(root), 0, 0
     else:
         files, skipped_files, skipped_dirs = _iter_files(root)
         base = root
