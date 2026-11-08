@@ -96,6 +96,9 @@ class Usage:
     # (field, value) for plain values the call sends, value None where it is not a visible literal ("~name": an
     # SDK enum member). None: the reader does not collect values, and a sent field is judged without them.
     values: frozenset[tuple[str, str | None]] | None = None
+    # (old, new, since, hidden): the call sends ``old`` only through a helper that sends ``new`` instead on API
+    # versions ``since`` (">=2026-07-29") and later; ``hidden``: an argument not visible could also send ``old``
+    switched: frozenset[tuple[str, str, str, bool]] = frozenset()
 
     def hides(self, path: str) -> bool:
         """Whether ``path`` could be sent here without being visible (a spread, ``**kwargs`` or variable)."""
@@ -373,7 +376,7 @@ def _scan_dynamic(text: str, rel: str, index: SdkIndex, reads: frozenset[str], l
         found, missing = jsparse.extract(text, index, ruby=language == "ruby", resolve=resolve)
     usages = [
         Usage(rel, f.line, f.resolved.method, f.resolved.path, f.call, frozenset(f.fields.paths), f.fields.complete,
-              language, reads, frozenset(f.fields.hidden))
+              language, reads, frozenset(f.fields.hidden), switched=frozenset(getattr(f.fields, "switched", ())))
         for f in found
     ]
     return usages, [(rel, line, call) for line, call in missing]

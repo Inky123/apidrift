@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from . import migrations
 from .diff import BREAKING, INFO, SEVERITY_RANK, WARNING, Change
+from .jsswitch import holds as switched_holds
 from .scanner import ScanResult, Usage, unread_sentence
 
 AFFECTED, POSSIBLE = "affected", "possible"
@@ -137,6 +138,9 @@ def _request_impact(change: Change, usage: Usage) -> Impact | None:
         return _required_impact(change, usage, target, parent, use)
     if _migrated(change, usage, action):
         return None
+    switch = _switched(change, usage, action)
+    if switch is not None:
+        return switch[0]
     if use == SENT and usage.values is not None and action in VALUE_ACTIONS:
         return _value_impact(change, usage, target, action)
     if use == SENT:
@@ -190,6 +194,27 @@ def _migrated(change: Change, usage: Usage, action: str) -> bool:
     if migration is None or not migrations.migrated(migration, usage.fields):
         return False
     return migration.action != "delete" or not usage.hides(migration.target)
+
+
+def _switched(change: Change, usage: Usage, action: str) -> tuple[Impact | None] | None:
+    """A removed key that the call sends only through a helper choosing by API version between it and its
+    documented replacement (:mod:`jsswitch`): None when that does not apply; otherwise ``(impact,)``. On the release
+    that removes the key the helper sends the replacement when its threshold is not later: then nothing is hit,
+    unless an argument that is not visible could still send the old key. A later threshold means the release
+    still gets the old key."""
+    if action != "removed" or not usage.switched:
+        return None
+    m = migrations.lookup(change)
+    if m is None or m.action not in ("rename", "rename_first"):
+        return None
+    for old, new, since, hidden in sorted(usage.switched):
+        if (old, new) != (m.target, m.replacement):
+            continue
+        if not switched_holds(since, m.introduced):
+            before = f"before {since[2:]}" if since.startswith(">=") else f"up to {since[1:]}"
+            return (Impact(usage, change, AFFECTED, f"{old} is sent here on API versions {before}, {m.introduced} among them"),)
+        return (Impact(usage, change, POSSIBLE, "arguments are not fully visible at this call") if hidden else None,)
+    return None
 
 
 def _required_impact(change: Change, usage: Usage, target: str, parent: str, use: str) -> Impact | None:

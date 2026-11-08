@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from . import jsspread, jsswitch
 from .jsroots import NAME
 
 if TYPE_CHECKING:
@@ -148,7 +149,7 @@ class Helpers:
         return out
 
     def unique(self, name: str, kind: str) -> Definition | None:
-        found = self.defs.get(name, [])
+        found = [f for f in self.defs.get(name, []) if not self.ruby or f.kind == kind]  # Ruby: def x, def self.x
         if len(found) != 1 or found[0].kind != kind:
             return None
         if not self.ruby and any(b.pos != found[0].pos for b in self.bindings.by_name.get(name, ())):
@@ -278,6 +279,10 @@ class Helpers:
                     return None
                 out.append(Value(m.start(), literal=k))
                 continue
+            choice = jsspread.returned_choice(src, j)  # return cond ? { a } : {}: each literal branch
+            if choice is not None:
+                out += [Value(m.start(), literal=k) for k in choice[2:] if k is not None]
+                continue
             n = re.compile(NAME).match(text, j)
             if n is None or not _statement_ends(src, n.end()):
                 return None
@@ -307,7 +312,11 @@ class Helpers:
         tail = text[last:d.close].strip()
         if text.startswith("{", last):
             end = src.skip_balanced(last)
-            return [Value(last, literal=last)] if text[end:d.close].strip() == "" else None
+            return [Value(last, literal=last)] if text[end:d.close].strip() in ("", ".compact") else None  # nils go
+        own = re.fullmatch(r"self\s*\.\s*class\s*\.\s*([A-Za-z_]\w*[?!]?)", tail) if d.kind == "instance" else None
+        if own is not None:  # handed on to the class method of the same name's class: self.class.expand_options
+            helper = self.unique(own.group(1), "class")
+            return [Value(last, helper=helper)] if helper and self.container(helper.pos) == self.container(d.pos) else None
         n = RUBY_CALLEE.match(text, last)
         if n is None or tail != text[last:n.end()]:
             return None
@@ -351,6 +360,7 @@ class Helpers:
                 merge(out, sub)
             elif not self._local(v.name, v.at, out, stack, seen):
                 return None
+        jsswitch.mark(self, d, values, out)  # a choice by API version between the old key and its replacement
         return out
 
     def _local(self, name: str, at: int, out: Fields, stack: list[Definition], seen: list[Definition]) -> bool:
@@ -358,8 +368,8 @@ class Helpers:
         from .jsparse import merge, parse_object
 
         reaching = self.bindings.reaching(name, at)
-        if not reaching or any(b.literal is None for b in reaching):
-            return False
+        if not reaching or any(b.literal is None or not stack[-1].open <= b.pos < stack[-1].close for b in reaching):
+            return False  # not a literal bound in this helper: a module-level object another function may change
         for b in reaching:
             merge(out, parse_object(self.src, b.literal + 1))
         self._writes(name, min(b.pos for b in reaching), at, out, stack, seen)
@@ -459,7 +469,7 @@ def _value_end(src: Source, i: int) -> int:
     """End of an assigned value starting at ``i`` (``;``, a closer, or in Ruby the end of the line)."""
     from .jsroots import _statement_end
 
-    end = _statement_end(src, i)
+    end = _statement_end(src, i) if src.ruby else jsspread.asi_end(src, i, _statement_end(src, i))
     while end > i and src.text[end - 1] in " \t\r":
         end -= 1
     return end
@@ -485,14 +495,4 @@ def _assign_at(src: Source, key_end: int, end: int) -> int | None:
     return j if j < end and text[j] == "=" and not text.startswith("==", j) else None
 
 
-def _merged_argument(src: Source, start: int, end: int) -> tuple[int, int] | None:
-    """The one argument of ``p.merge!(x)`` / ``p.update(x)`` written at ``start``."""
-    text = src.text
-    m = re.compile(r"[^(\n]*?(?:merge!|deep_merge!|update)\s*\(").match(text, start)
-    if m is None:
-        return None
-    args = src.args(m.end() - 1)
-    if len(args) != 1:
-        return None
-    a = src.skip_space(args[0][0])
-    return a, args[0][1]
+_merged_argument = jsspread.merged_argument  # ``p.merge!(x)``, ``p.update(x)``, ``Object.assign(p, x)``

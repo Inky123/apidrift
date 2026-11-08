@@ -24,11 +24,12 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import jshelpers, phphelpers, phpparse, pyhelpers, pyparse, scanner
+from . import jshelpers, jsswitch, phphelpers, phpparse, pyhelpers, pyparse, scanner
 from .jsparse import Fields, collect
 
 SHARED, OTHER_CALLS, ELSEWHERE = "helper_shared", "helper_feeds_other_calls", "helper_used_elsewhere"
-REASONS = (SHARED, OTHER_CALLS, ELSEWHERE)
+VERSIONED = "helper_version_switch"  # the helper picks its keys by comparing an API version (jsswitch.version_shaped)
+REASONS = (SHARED, OTHER_CALLS, ELSEWHERE, VERSIONED)
 FAMILY = {"javascript": ("javascript", "typescript"), "typescript": ("javascript", "typescript")}
 MAX_FILES = 20_000
 
@@ -94,6 +95,8 @@ def js_sites(loc, c, i: int, b: int, m, out) -> bool:
     if read.local is not None:
         _js_writes(loc, helpers, read.local, read.call, i, m, out)
     if len(out.edits) > before and not out.why:
+        if any(jsswitch.version_shaped(helpers, d) for d in chain):
+            out.why = VERSIONED  # a person moves the version it switches at; renaming a branch would undo the switch
         for d in chain:
             out.why = out.why or _js_screen(loc, helpers, reads, d, chain, m)
     return True

@@ -15,7 +15,7 @@ import re
 import tokenize
 from dataclasses import dataclass, field
 
-from . import fixhelpers, fixscope, fixvalue, jsparse, jsspread, pyparse, scanner
+from . import fixhelpers, fixscope, fixvalue, jsparse, jsspread, jswrites, pyparse, scanner
 from .fixtokens import _Offsets
 from .fixvalue import Edit, Entry
 from .jsparse import IDENT, QUOTES, RUBY_KEYWORD, Fields, Source
@@ -204,9 +204,9 @@ class Locator:
             return
         src = c.bindings.src
         for binding in bindings:
-            if binding.literal is None:
-                out.incomplete = True
-            else:
+            if binding.literal is None or not jswrites._whole(src, binding.literal):
+                out.incomplete = True  # not a literal, or one merged with more: ``args = { .. }.merge(options)``
+            if binding.literal is not None:
                 self._js_literal(src, binding.literal + 1, m, out, literal=True)
         stop = min(b.pos for b in bindings)
         head = m.target.split(".")[0]
