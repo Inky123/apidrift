@@ -6,8 +6,9 @@ written into it before the call, ``apply_filters`` and ``array_merge``.
 - A write whose subscripts are all plain string literals (``$d['k'] = v``, ``$d['a']['b'] = v``,
   ``$d['k'] .= v``) sends that key path and hides nothing else: an array literal assigned there is read too. Any
   other write (``$d[$k] = v``, ``$d[] = v``, ``$d['k'][] = v``, ``$d .= x``) hides what else is sent.
-- ``$d = apply_filters('hook', $d, ...)`` (WordPress) returns ``$d`` unless a plugin hooks in: what ``$d`` held is
-  still sent, and anything else may be.
+- ``$d = apply_filters('hook', $d, ...)`` (WordPress) returns ``$d`` unless a callback hooks in: what ``$d`` held
+  is still sent. Nothing else is when the checkout never registers on that literal hook (:mod:`phpfilters`);
+  when it does, or outside a checkout scan, anything else may be. A hook name that is not a literal hides all.
 - ``array_merge(A, B, ...)`` / ``array_replace(...)`` sends the keys of every argument; it is fully visible only
   when every argument is an array literal or a local variable whose fields are fully visible.
 """
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import re
 
+from . import phpfilters, phpvendor
 from .jsparse import Fields
 from .phplex import STRING
 from .phpscope import BIND, WRITE
@@ -23,6 +25,7 @@ from .phpscope import BIND, WRITE
 FILTER = re.compile(r"apply_filters\s*\(")
 MERGE_ONLY = re.compile(r"(?:array_merge|array_replace|array_merge_recursive|array_replace_recursive)\s*\(")
 VARIABLE = re.compile(r"\$([A-Za-z_]\w*)")
+PLAIN_STRING = re.compile(r"(['\"])([^'\"\\$]*)\1")
 
 
 def variable_fields(parsed, name: str, at: int, out: Fields, depth: int = 0) -> None:
@@ -36,8 +39,11 @@ def variable_fields(parsed, name: str, at: int, out: Fields, depth: int = 0) -> 
         return
     for binding in reaching:
         if binding.literal is None:
-            if depth < 8 and filtered(parsed, name, binding):
+            hook = filtered(parsed, name, binding) if depth < 8 else None
+            if hook is not None:
                 variable_fields(parsed, name, binding.pos, out, depth + 1)
+                if phpfilters.pass_through(hook, hooks()):
+                    continue  # nothing in this checkout hooks the filter: it returns the value unchanged
             out.hide("")
             continue
         before = len(out.paths)
@@ -114,25 +120,50 @@ def _hide(out: Fields, path: str) -> None:
     out.hide(path + "[].")
 
 
-def filtered(parsed, name: str, binding) -> bool:
-    """``$name = apply_filters('hook', $name, ...);``: a WordPress filter of the variable's own value."""
+def filtered(parsed, name: str, binding) -> str | None:
+    """``$name = apply_filters('hook', $name, ...);``: a WordPress filter of the variable's own value; the hook's
+    name (None when this is not one, or the name is not one plain string literal)."""
     src, text = parsed.src, parsed.src.text
     if binding.value < 0:
-        return False
+        return None
     m = FILTER.match(src.code, binding.value)
     if m is None or (m.end() - 1) not in src.pairs:
-        return False
+        return None
     args = src.args(m.end() - 1)
     if len(args) < 2:
-        return False
+        return None
     first = src.skip_space(args[0][0])
     hook = src.span_at(first)
     if hook is None or hook[0] != first or hook[2] != STRING or src.skip_space(hook[1]) < args[0][1]:
-        return False  # the hook's name is one string literal
+        return None
+    literal = PLAIN_STRING.fullmatch(text, first, hook[1])
     a, b = args[1]
     v = VARIABLE.fullmatch(text, src.skip_space(a), src.back_space(b))
     after = src.skip_space(src.pairs[m.end() - 1] + 1)
-    return v is not None and v.group(1) == name and after < src.n and text[after] == ";"
+    if literal is None or v is None or v.group(1) != name or after >= src.n or text[after] != ";":
+        return None
+    return literal.group(2)
+
+
+def hooks() -> set[str] | None:
+    """The filter hooks this checkout registers callbacks on (None outside a checkout scan)."""
+    return phpvendor.per_repo("php-filters", _registered)
+
+
+def _registered(root) -> set[str]:
+    from .scanner import _iter_files  # the scanner builds on this module
+
+    texts = {}
+    for path in _iter_files(root)[0]:
+        if path.suffix.lower() != ".php":
+            continue
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        if b"add_filter" in raw:
+            texts[str(path)] = raw.decode("utf-8", errors="replace")
+    return phpfilters.registered(texts)
 
 
 def merge_parts(parsed, at: int, end: int) -> list[tuple[str, int, str]] | None:
