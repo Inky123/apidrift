@@ -52,3 +52,28 @@ def test_r4_a_derivation_that_names_the_old_key_keeps_the_literal_listed(tmp_pat
         spec = BUILDER_SPEC.replace(*change)
         plan = plan_for(tmp_path / str(n), {"app/pay_service.rb": BUILDER_APP, "spec/pay_service_spec.rb": spec})
         assert plan.test_fixes == [] and ("spec/pay_service_spec.rb", 7) in plan.tests, change
+
+
+def test_r1_form_encoded_bodies_in_http_stubs_are_listed(tmp_path):
+    from apidrift.fixtests import stale_tests
+
+    files = {
+        "spec/pay_spec.rb": (
+            "stub_request(:post, 'https://api.stripe.com/v1/payment_intents')\n"
+            "  .with(body: 'amount=1&payment_method_types[0]=card')\n"
+            "  .with(body: { 'payment_method_types[0]' => 'card' })\n"
+            "expect(WebMock).to have_requested(:post, /payment_intents/).with(body: /payment_method_types/)\n"
+            "it 'drops my_payment_method_types=1 and payment_method_types from the description' do\n"
+        ),
+        "tests/test_pay.py": (
+            "responses.add(responses.POST, URL, match=[matchers.urlencoded_params_matcher({'payment_method_types[0]': 'card'})])\n"
+            "assert 'payment_method_types%5B0%5D=card' in responses.calls[0].request.body\n"
+            "# payment_method_types[0]=card in a comment\n"
+        ),
+    }
+    for name, text in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text)
+    found = stale_tests(tmp_path, [("rename", "payment_method_types")], {"app/pay.rb", "app/pay.py"})
+    assert found == [("spec/pay_spec.rb", 2), ("spec/pay_spec.rb", 3), ("spec/pay_spec.rb", 4),
+                     ("tests/test_pay.py", 1), ("tests/test_pay.py", 2)]

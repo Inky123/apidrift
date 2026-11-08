@@ -7,7 +7,8 @@ a person should check. Only code files in test locations are read (the scanner's
 rules); recorded fixtures are Stripe's own payloads, not the customer's expectations, and are left out. A line
 is listed only when it can be about the request the fix changed:
 
-- the name is a code token (or a whole quoted key), not words in a comment or a test's description;
+- the name is a code token (or a whole quoted key) or a form-encoded key in a string
+  (``payment_method_types[0]=card``), not words in a comment or a test's description;
 - the spelling is the request key's: ``payment_method_types`` everywhere, and Go's struct field
   ``PaymentMethodTypes`` in Go only (a camelCase ``paymentMethodTypes`` in JS is Stripe.js or the app's own
   model, never a server request key);
@@ -24,7 +25,7 @@ import re
 from pathlib import Path
 
 from . import jsparse, phplex
-from .fixtokens import PY_MASK, tokens
+from .fixtokens import PY_MASK, Token, tokens
 from .fixvalue import leaf
 from .scanner import LANGUAGES, TEST_DIRS, TEST_FILE, _iter_files, _read
 
@@ -71,6 +72,7 @@ def stale_tests(root: Path, sites: list[tuple[str, str]], edited: set[str]) -> l
         if text is None or not loose.search(text.replace("_", "")):
             continue
         found = [t for name in fields for spelling in _spellings(name, language) for t in tokens(text, language, spelling)]
+        found += _form_encoded(text, language, fields)
         objects = _stripe_objects(text, language, {t.pos for t in found})
         if language == "ruby":  # ``receive(:payment_method_types)`` stubs the response's reader, not a request key
             objects |= {t.pos for t in found if STUBBED.search(text, max(0, t.pos - 40), t.pos)}
@@ -78,6 +80,20 @@ def stale_tests(root: Path, sites: list[tuple[str, str]], edited: set[str]) -> l
             out.append((rel, number))
             if len(out) >= MAX_MENTIONS:
                 return out
+    return out
+
+
+def _form_encoded(text: str, language: str, fields: set[str]) -> list[Token]:
+    """The field as a form-encoded request key inside a string (``'amount=1&payment_method_types[0]=card'``,
+    ``'payment_method_types[0]' => 'card'``): an HTTP stub or a recorded body that expects the old request."""
+    names = "|".join(re.escape(f) for f in sorted(fields))
+    form = re.compile(rf"(?:^|(?<=[&?\s'\"`]))(?:{names})(?=\[|=|%5B)", re.I)
+    out = []
+    for lo, hi in _spans(text, language):
+        if text[lo] not in "'\"`":
+            continue  # a comment
+        for m in form.finditer(text, lo + 1, hi):
+            out.append(Token(m.start(), text.count("\n", 0, m.start()) + 1, False))
     return out
 
 
