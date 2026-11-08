@@ -81,7 +81,7 @@ def _others(pins: list[dict], where: Where) -> list[str]:
         return []
     kinds = sorted({p["kind"] for p in pins})
     what = {("test",): "tests", ("browser",): "browser Stripe.js code"}.get(tuple(kinds), "tests and browser Stripe.js code")
-    return [f"Also pinned in {what}, which does not set your server's API version ({len(pins)}): "
+    return [f"Also pinned in {what} ({len(pins)}), none of which sets your server's API version: "
             + _inline(pins, where) + "."]
 
 

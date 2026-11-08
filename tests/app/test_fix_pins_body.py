@@ -68,7 +68,7 @@ def test_server_pins_first_and_test_and_browser_pins_on_one_counted_line():
         f"- https://github.com/o/r/blob/{SHA}/app/services/tax.rb#L19 pins `2022-11-15`",
     ]
     assert lines[4] == (
-        "Also pinned in tests and browser Stripe.js code, which does not set your server's API version (2): "
+        "Also pinned in tests and browser Stripe.js code (2), none of which sets your server's API version: "
         f"https://github.com/o/r/blob/{SHA}/spec/a_spec.rb#L9 (`2023-10-16`), "
         f"https://github.com/o/r/blob/{SHA}/client/card.js#L13 (`2020-08-27`)."
     )
@@ -78,13 +78,13 @@ def test_server_pins_first_and_test_and_browser_pins_on_one_counted_line():
 def test_only_test_pins_say_there_is_no_server_pin():
     text = section(body([ANCHOR], pins=[pin("2023-10-16", "test/a.py", 1), pin("2023-10-16", "test/b.py", 2)]))
     assert f"No server-side API-version pin older than {ENDIVE} was found in the scanned files." in text
-    assert "Also pinned in tests, which does not set your server's API version (2): " in text
+    assert "Also pinned in tests (2), none of which sets your server's API version: " in text
 
 
 def test_a_deletes_only_pull_splits_them_too():
     text = section(body([PAYTO], pins=[pin("2023-10-16", "client/x.js", 1, kind="browser")]))
-    assert text.split("\n")[1] == ("Also pinned in browser Stripe.js code, which does not set your server's API version "
-                                   f"(1): https://github.com/o/r/blob/{SHA}/client/x.js#L1 (`2023-10-16`).")
+    assert text.split("\n")[1] == ("Also pinned in browser Stripe.js code (1), none of which sets your server's API version: "
+                                   f"https://github.com/o/r/blob/{SHA}/client/x.js#L1 (`2023-10-16`).")
 
 
 def section(text: str) -> str:
