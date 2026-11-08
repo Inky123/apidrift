@@ -89,3 +89,38 @@ def test_embedded_list_params_send_their_fields_at_the_top_level():
         ("customer.List", "GET /v1/customers", ["limit"], True),
         ("customer.List", "GET /v1/customers", [], False),  # a whole ListParams from elsewhere: anything
     ]
+
+
+@pytest.mark.parametrize("body", [
+    "\tparams := &stripe.TaxIDParams{Type: stripe.String(\"eu_vat\")}\n\tif cus != \"\" {\n\t\tparams.Customer = stripe.String(cus)\n\t}\n\ttaxid.New(params)\n",
+    "\ttaxid.New(&stripe.TaxIDParams{Customer: p, Type: stripe.String(\"eu_vat\")})\n",  # a pointer that may be nil
+    "\tparams := &stripe.TaxIDParams{}\n\tparams.Customer = nil\n\ttaxid.New(params)\n",
+    "\tparams := &stripe.TaxIDParams{}\n\tsetCustomer(params, cus)\n\ttaxid.New(params)\n",
+    "\tparams := &stripe.TaxIDParams{}\n\tpp := params\n\tpp.Customer = stripe.String(cus)\n\ttaxid.New(params)\n",
+])
+def test_a_parent_not_set_for_certain_decides_nothing(body):
+    text = go(f"func f(cus string, p *string) {{\n{body}}}\n", "taxid")
+    assert found(text) == [] and unresolved(text) == ["taxid.New"]
+
+
+def test_a_parent_set_for_certain_picks_the_nested_path():
+    text = go(
+        "func f(cus string) {\n"
+        "\ttaxid.New(&stripe.TaxIDParams{Customer: &cus, Type: stripe.String(\"eu_vat\")})\n"
+        "\tparams := &stripe.TaxIDParams{Type: stripe.String(\"eu_vat\")}\n"
+        "\tparams.Customer = new(string)\n"
+        "\ttaxid.New(params)\n"
+        "}\n", "taxid",
+    )
+    assert [label for _, label, _, _ in found(text)] == ["POST /v1/customers/{customer}/tax_ids"] * 2
+
+
+def test_an_embedded_struct_built_elsewhere_hides_the_call():
+    text = go(
+        "func f(lp stripe.ListParams, p stripe.Params) {\n"
+        "\tcustomer.List(&stripe.CustomerListParams{ListParams: lp})\n"
+        "\tcustomer.New(&stripe.CustomerParams{Params: p, Email: stripe.String(\"a\")})\n"
+        "\tcustomer.List(&stripe.CustomerListParams{ListParams: *stripe.NewListParams()})\n"
+        "}\n", "customer",
+    )
+    assert [(fields, complete) for _, _, fields, complete in found(text)] == [([], False), (["email"], False), ([], False)]

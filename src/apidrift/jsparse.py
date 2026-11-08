@@ -381,9 +381,9 @@ def extract(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> 
         helpers.src.spreads = jsspread.Reader(helpers)
     for c in resolved_calls:
         fields, via = Fields(), jshelpers.Via(helpers)
-        collect(c.args_src, c.spans, "{" in c.resolved.path, c.bindings, fields, ruby=ruby, helper=via)
+        collect(c.args_src, c.spans, jsbare.id_slot(c), c.bindings, fields, ruby=ruby, helper=via)
         jsswitch.settle(helpers, fields, lambda out, c=c: collect(
-            c.args_src, c.spans, "{" in c.resolved.path, c.bindings, out, ruby=ruby, helper=jshelpers.Via(helpers)))
+            c.args_src, c.spans, jsbare.id_slot(c), c.bindings, out, ruby=ruby, helper=jshelpers.Via(helpers)))
         found.append(Found(c.line, c.call + via.suffix, c.resolved, fields))
     found += rbobjects.extract(text, resolved_calls, resolve or index.resolve) if ruby else []  # pi.confirm(...)
     return found, unresolved
@@ -398,7 +398,7 @@ def calls(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> tu
     bindings = jsroots.Bindings(src, mask, scopes)
     resolve = resolve or index.resolve
     found: list[Call] = []
-    unresolved: list[tuple[int, str]] = []
+    unresolved: dict[int, tuple[int, str]] = {}  # chain start -> (line, call)
     taken: set[int] = set()
     pattern, at = (RUBY_CALL if ruby else JS_CALL), 0
     while (m := pattern.search(src.text, at)) is not None:
@@ -416,7 +416,7 @@ def calls(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> tu
         line = src.text.count("\n", 0, m.start()) + 1
         resolved = resolve(chain)
         if resolved is None:
-            unresolved.append((line, call))
+            unresolved[m.start(1)] = (line, call)
             continue
         if ruby and m.group(2) is None:  # Stripe::PaymentIntent.create amount: 1, currency: 'usd'
             end = src.line_end(m.end())
@@ -427,8 +427,8 @@ def calls(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> tu
         resolved = jsbare.by_id(resolve, resolved, args_src, spans, ruby=ruby)
         found.append(Call(line, call, resolved, m.end() - 1, args_src, spans, bindings))
         taken.add(m.start(1))
-    bare = jsbare.calls(src, mask, lambda chain: eligible(chain, roots), resolve, taken) if ruby else []
-    return sorted(found + [Call(*b, bindings) for b in bare], key=lambda c: c.pos), unresolved  # bare: no parentheses
+    bare = jsbare.calls(src, mask, roots, resolve, taken, unresolved) if ruby else []  # no parentheses
+    return sorted(found + [Call(*b, bindings) for b in bare], key=lambda c: c.pos), list(unresolved.values())
 
 
 def collect(

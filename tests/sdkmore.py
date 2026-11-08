@@ -76,6 +76,12 @@ def more_doc() -> dict:
             _op("list_payment_methods", "custom", "get", "/v1/customers/{customer}/payment_methods"),
         ],
     }
+    _put(paths, "/v1/financial_connections/accounts/{account}", "get", "financial_connections.account", expand, query=True)
+    schemas["financial_connections.account"] = {
+        "type": "object", "properties": {"id": s},
+        "x-stripeResource": {"class_name": "Account", "in_package": "FinancialConnections"},
+        "x-stripeOperations": [_op("retrieve", "retrieve", "get", "/v1/financial_connections/accounts/{account}")],
+    }
     schemas["login_link"] = {
         "type": "object", "properties": {"url": s},
         "x-stripeResource": {"class_name": "LoginLink", "in_package": ""},

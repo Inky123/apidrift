@@ -72,8 +72,27 @@ def by_parent(f, style: str, owner: str, verb: str, paren: int) -> Resolved | No
     if top is None or params_type(f, paren) is None:
         return None  # nil params (stripe-go would panic), or params whose struct is not written here
     params = f.read(paren, top)
+    if "" in params.hidden:
+        return None  # params that may hold more: the parent may be set where this reader does not see
     for name in sorted({flat(path) for path in params.fields if "." not in path and "[" not in path}):
         nested = go.resolve(style, owner, f"{verb}{VIA}{name}")
-        if nested is not None:
+        if nested is None:
+            continue
+        sets = [e for e in params.entries if flat(e.path) == name and "." not in e.path]
+        if sets and all(not e.conditional and _not_nil(f, e.a, e.b) for e in sets):
             return Resolved(nested.method, nested.path, f"{owner}.{verb}")
-    return Resolved(top.method, top.path, f"{owner}.{verb}") if "" not in params.hidden else None
+        return None  # set under a condition, to nil, or to a pointer that may be nil: either path
+    return Resolved(top.method, top.path, f"{owner}.{verb}")
+
+
+def _not_nil(f, a: int, b: int) -> bool:
+    """Value tokens ``[a, b)`` are a pointer that cannot be nil: ``&x``, ``new(...)``, ``stripe.String(...)``."""
+    src = f.src
+    if a >= b:
+        return False
+    if src.tok[a] == "&" or (src.tok[a] == "new" and a + 1 < b and src.tok[a + 1] == "("):
+        return True
+    return (
+        b - a >= 4 and src.tok[a] in f.roots and src.tok[a + 1] == "." and src.tok[a + 2] == "String"
+        and src.tok[a + 3] == "(" and src.match[a + 3] == b - 1
+    )

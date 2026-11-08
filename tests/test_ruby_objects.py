@@ -127,3 +127,88 @@ def test_javascript_objects_are_not_read(index):
     text = "const stripe = new Stripe(k);\nasync function f(id) {\n  const pi = await stripe.paymentIntents.retrieve(id);\n  pi.confirm();\n}\n"
     usages, _, _ = scan_text(text, "a.js", index)
     assert [u.call for u in usages] == ["stripe.paymentIntents.retrieve"]
+
+
+def test_save_reads_only_writes_that_reach_it(index):
+    text = (
+        "RSpec.describe Billing do\n"
+        "  it \"ends the trial\" do\n"
+        "    sub = Stripe::Subscription.retrieve(\"sub_1\")\n"
+        "    sub.billing_cycle_anchor = \"now\"\n"
+        "    sub.save\n"
+        "  end\n"
+        "\n"
+        "  it \"tags it\" do\n"
+        "    sub = Stripe::Subscription.retrieve(\"sub_2\")\n"
+        "    sub.metadata = { a: 1 }\n"
+        "    sub.save\n"
+        "  end\n"
+        "\n"
+        "  it \"passes it on\" do\n"
+        "    sub = Stripe::Subscription.retrieve(\"sub_3\")\n"
+        "    notify(sub)\n"
+        "  end\n"
+        "\n"
+        "  it \"saves plainly\" do\n"
+        "    sub = Stripe::Subscription.retrieve(\"sub_4\")\n"
+        "    sub.save\n"
+        "  end\n"
+        "end\n"
+        "def rebound(a, b)\n"
+        "  sub = Stripe::Subscription.retrieve(a)\n"
+        "  sub.cancel_at_period_end = true\n"
+        "  sub = Stripe::Subscription.retrieve(b)\n"
+        "  sub.metadata = { k: 1 }\n"
+        "  sub.save\n"
+        "end\n"
+        "def twice(id)\n"
+        "  sub = Stripe::Subscription.retrieve(id)\n"
+        "  sub.cancel_at_period_end = true\n"
+        "  sub.save\n"
+        "  sub.billing_cycle_anchor = \"now\"\n"
+        "  sub.save\n"
+        "end\n"
+        "def nested(id, xs)\n"
+        "  sub = Stripe::Subscription.retrieve(id)\n"
+        "  xs.each do |x|\n"
+        "    sub.metadata = { x: 1 }\n"
+        "  end\n"
+        "  sub.save\n"
+        "end\n"
+    )
+    saves = [(line, fields, complete) for line, call, _, fields, complete in instance(index, text) if call == "sub.save"]
+    assert saves == [
+        (5, ["billing_cycle_anchor"], True),
+        (11, ["metadata", "metadata.a"], True),
+        (21, [], True),
+        (29, ["metadata", "metadata.k"], True),  # not the write before the rebinding
+        (34, ["cancel_at_period_end"], True),
+        (36, ["billing_cycle_anchor"], True),  # only what changed since the first save
+        (43, [], False),  # written in a nested block: hidden
+    ]
+
+
+def test_a_write_through_a_method_is_under_its_first_field(index):
+    text = "def go(id, p)\n  sub = Stripe::Subscription.retrieve(id)\n  sub.items.first.price = p\n  sub.save\nend\n"
+    (found,) = instance(index, text)
+    assert found[3] == ["items"] and found[4] is False
+
+
+def test_many_examples_read_in_linear_time(index):
+    import time
+    block = (
+        "  it 'case {n}' do\n    sub = Stripe::Subscription.retrieve(id)\n    sub.metadata = {{a: {n}}}\n"
+        "    sub.save\n    pi = Stripe::PaymentIntent.create(amount: {n})\n    pi.confirm\n  end\n"
+    )
+    text = "RSpec.describe Billing do\n" + "".join(block.format(n=n) for n in range(1500)) + "end\n"
+    started = time.perf_counter()
+    found = instance(index, text)
+    assert len(found) == 3000
+    assert time.perf_counter() - started < 5  # about 0.2 s; quadratic reading took minutes
+
+
+def test_past_the_work_cap_no_instance_calls_are_read(index, monkeypatch):
+    from apidrift import rbobjects
+    monkeypatch.setattr(rbobjects, "MAX_WORK", 2)  # three mentions of pi
+    text = "def go(id)\n  pi = Stripe::PaymentIntent.retrieve(id)\n  pi.confirm\n  pi.cancel\nend\n"
+    assert instance(index, text) == []
