@@ -72,7 +72,7 @@ def resource(parsed, name: str, at: int, starts: dict, uses, static) -> Owner | 
     if key in memo:
         owner, bound = memo[key]
         return owner if bound < at else None
-    binds = [b for b in bindings.by_name.get(name, ()) if bindings._scope[b.pos] == body]
+    binds = bindings.scoped_binds(name, body)
     if scopes.parameter(name, at):
         found = (None if binds or not _plain(parsed, name, body) else _typed(parsed, name, body, uses, static), -1)
         memo[key] = found
@@ -99,7 +99,7 @@ def _plain(parsed, name: str, body) -> bool:
         memo[(lo, hi)] = bindings.unbounded(lo, hi)
     if memo[(lo, hi)]:
         return False
-    return not any(u.kind == OPAQUE and bindings._scope[u.pos] == body for u in bindings.uses.get(name, ()))
+    return not any(u.kind == OPAQUE for u in bindings.scoped_uses(name, body))
 
 
 def _typed(parsed, name: str, body, uses, static) -> Owner | None:
@@ -179,7 +179,7 @@ def account(resolved, src, spans: list[tuple[int, int]], verb: str, resolve):
 def since(parsed, name: str, at: int) -> int:
     """Where the object ``$name`` holds at ``at`` came to be: its one assignment, else its function's start."""
     bindings, body = parsed.bindings, parsed.scopes.innermost(at)
-    binds = [b.pos for b in bindings.by_name.get(name, ()) if bindings._scope[b.pos] == body and b.pos < at]
+    binds = [b.pos for b in bindings.scoped_binds(name, body) if b.pos < at]
     return max(binds, default=parsed.scopes.extent(at)[0])
 
 
@@ -194,12 +194,15 @@ def saved_fields(parsed, name: str, start: int, at: int, out: Fields) -> None:
     lo, hi = parsed.scopes.extent(at)
     if bindings._same_loop(at, at):
         out.hide("")  # values assigned after the call reach it on the next pass
-    if not any(bindings._scope[b.pos] == body and b.pos < at for b in bindings.by_name.get(name, ())):
+    if not any(b.pos < at for b in bindings.scoped_binds(name, body)):
         out.hide("")  # not made here (a parameter): whoever made it may have set values that save() sends too
-    if READS_ALL.search(src.code, lo, hi) or THIS_CALL.search(src.code, start, at):
+    reads_all = parsed.memo.setdefault("reads_all", {})  # once per function body, not per save()
+    if (lo, hi) not in reads_all:
+        reads_all[(lo, hi)] = READS_ALL.search(src.code, lo, hi) is not None
+    if reads_all[(lo, hi)] or THIS_CALL.search(src.code, start, at):
         out.hide("")  # ``compact()``, or a method of ``$this`` that may reach the object through a property
-    for u in bindings.uses.get(name, ()):
-        if bindings._scope[u.pos] != body or not start <= u.pos < at or u.kind == BIND:
+    for u in bindings.scoped_uses(name, body):
+        if not start <= u.pos < at or u.kind == BIND:
             continue
         m = PROPERTY.match(text, u.pos + 1 + len(name))
         if m is None:

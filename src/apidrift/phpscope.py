@@ -137,6 +137,7 @@ class Bindings:
         self.uses: dict[str, list[Use]] = {}
         self._loops: list[tuple[int, int]] | None = None
         self._scope: dict[int, tuple | None] = {}  # occurrence -> the function body it is in
+        self._scoped: tuple[dict, dict] | None = None  # (name, body) -> its uses / its bindings, built on first use
         text = src.text
         for m in VAR.finditer(src.code):
             p = src.back_space(m.start())
@@ -251,8 +252,32 @@ class Bindings:
     # --- questions ----------------------------------------------------------------------
 
     def _in_scope(self, name: str, at: int) -> list[Use]:
-        body = self.scopes.innermost(at)
-        return [u for u in self.uses.get(name, ()) if self._scope[u.pos] == body]
+        return self.scoped_uses(name, self.scopes.innermost(at))
+
+    def scoped_uses(self, name: str, body) -> list[Use]:
+        """The uses of ``name`` whose function body is ``body`` (None: top level), in text order. The list is
+        shared: read it, do not change it."""
+        return self._by_scope()[0].get((name, body[0] if body else -1), [])
+
+    def scoped_binds(self, name: str, body) -> list[Binding]:
+        """The bindings of ``name`` in ``body``, in text order (shared, read-only)."""
+        return self._by_scope()[1].get((name, body[0] if body else -1), [])
+
+    def _by_scope(self) -> tuple[dict, dict]:
+        # a body is known by its opening brace (-1 for the top level): one body per brace
+        if self._scoped is None:
+            uses: dict[tuple[str, int], list[Use]] = {}
+            binds: dict[tuple[str, int], list[Binding]] = {}
+            for name, items in self.uses.items():
+                for u in items:
+                    body = self._scope[u.pos]
+                    uses.setdefault((name, body[0] if body else -1), []).append(u)
+            for name, items in self.by_name.items():
+                for b in items:
+                    body = self._scope[b.pos]
+                    binds.setdefault((name, body[0] if body else -1), []).append(b)
+            self._scoped = (uses, binds)
+        return self._scoped
 
     def reaching(self, name: str, at: int) -> list[Binding]:
         """Every binding of ``name`` that can be the one in force at ``at``, nearest first. An unconditional
@@ -264,7 +289,7 @@ class Bindings:
         body = scopes.innermost(at)
         lo, hi = scopes.extent(at)
         unknown = [Binding(name, lo, None)]
-        mine = [b for b in self.by_name.get(name, ()) if self._scope[b.pos] == body]
+        mine = self.scoped_binds(name, body)
         out: list[Binding] = []
         dominated = False
         for binding in reversed([b for b in mine if b.pos < at]):
@@ -349,7 +374,7 @@ class Bindings:
         unnamed between the first assignment of ``name`` and the call."""
         lo, hi = self.scopes.extent(at)
         body = self.scopes.innermost(at)
-        first = min((b.pos for b in self.by_name.get(name, ()) if b.pos < at and self._scope[b.pos] == body), default=lo)
+        first = min((b.pos for b in self.scoped_binds(name, body) if b.pos < at), default=lo)
         return READS_ALL.search(self.src.code, lo, hi) is not None or self.unbounded(first, at)
 
     def unbounded(self, lo: int, hi: int) -> bool:
