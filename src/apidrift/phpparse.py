@@ -88,8 +88,10 @@ class Parsed:
     memo: dict = field(default_factory=dict)  # per-parse caches of the modules that read it (phpinstance)
 
 
-def extract(text: str, resolve) -> tuple[list[Found], list[tuple[int, str]]]:
-    """Stripe SDK calls in a PHP source, plus (line, call) pairs that look like Stripe but match no endpoint."""
+def extract(text: str, resolve, table=None, rel: str = "") -> tuple[list[Found], list[tuple[int, str]]]:
+    """Stripe SDK calls in a PHP source, plus (line, call) pairs that look like Stripe but match no endpoint.
+    ``table`` (:mod:`crosstable`): wrappers followed across files, for the file at ``rel``."""
+    from . import phpcross
     from .phphelpers import PhpHelpers, Via  # builds on this module
 
     parsed = parse(text, resolve)
@@ -107,7 +109,7 @@ def extract(text: str, resolve) -> tuple[list[Found], list[tuple[int, str]]]:
             for path in c.extra:
                 phpflow.add_path(f.fields, path)
         found += callers
-    return found, parsed.unresolved
+    return phpcross.extend(parsed, helpers, table, rel, found), parsed.unresolved
 
 
 def parse(text: str, resolve) -> Parsed:

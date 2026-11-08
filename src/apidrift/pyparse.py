@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from . import pyreach
+from .pyimports import import_aliases as _import_aliases
 from .sdkmap import Resolved, without_id
 
 OPTION_KWARGS = {
@@ -44,10 +45,11 @@ class PyCall:
 
 
 def extract(
-    text: str, resolve: Callable[[list[str]], Resolved | None], *, repo=None
+    text: str, resolve: Callable[[list[str]], Resolved | None], table=None, rel: str = "", *, repo=None
 ) -> tuple[list[PyFound], list[tuple[int, str]]]:
     """Stripe SDK calls in a Python source, plus (line, call) pairs that matched no endpoint. ``repo`` (a
-    :class:`pyrepo.Repo`) lets calls and spreads through ``self`` be followed (:mod:`pyself`)."""
+    :class:`pyrepo.Repo`) lets calls and spreads through ``self`` be followed (:mod:`pyself`); ``table``
+    (:mod:`crosstable`): wrappers followed across files, for the file at ``rel``."""
     from . import pyhelpers  # builds on this module
 
     resolved_calls, unresolved = calls(text, resolve, repo=repo)
@@ -60,6 +62,9 @@ def extract(
         except RecursionError:  # arguments nested too deeply to read: the call, with nothing visible
             fields, hidden = set(), {""}
         found.append(PyFound(c.node.lineno, c.call + via.suffix, c.resolved, fields, not hidden, frozenset(hidden)))
+    if table is not None:  # wrappers defined in other files (pycross builds on this module)
+        from . import pycross
+        found = pycross.extend(text, table, rel, found, resolved_calls)
     return found, unresolved
 
 
@@ -125,20 +130,6 @@ def _no_id(node: ast.Call, path: str) -> bool:
 
 def stripe_like(chain: list[str]) -> bool:
     return any("stripe" in part.lower() for part in chain) or any(part in ("v1", "v2") for part in chain[1:-1])
-
-
-def _import_aliases(tree: ast.AST) -> dict[str, str]:
-    aliases: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "stripe" or alias.name.startswith("stripe."):
-                    aliases[alias.asname or alias.name.split(".")[0]] = alias.name if alias.asname else "stripe"
-        elif isinstance(node, ast.ImportFrom) and node.module and node.module.split(".")[0] == "stripe":
-            for alias in node.names:
-                if alias.name != "*":
-                    aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
-    return aliases
 
 
 Binding = tuple[int, ast.expr, ast.stmt]  # (line, value, the assignment statement)

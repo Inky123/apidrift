@@ -107,22 +107,28 @@ class GoLocator:
         ]
         if not matches:
             return Sites(found_call=False)
-        c, out = matches[0], Sites()
-        if any(m.target.startswith(prefix) for prefix in c.params.hidden):
+        return self.params_sites(matches[0].params, m)
+
+    def params_sites(self, params, m: Migration):
+        """Edit sites in what one params value sends (a call's argument; :mod:`gocross`: a wrapper caller's)."""
+        from .fixedit import Sites
+
+        out = Sites()
+        if any(m.target.startswith(prefix) for prefix in params.hidden):
             out.incomplete = True
             return out
         rule = GO_RULES.get((m.path, m.target))
-        for entry in c.params.entries:
+        for entry in params.entries:
             if entry.path == m.target:
                 self._pad = []
                 out.add(self._edit(entry, m, rule) if rule is not None else NO_REWRITE)
                 if out.edits and out.why is None and not out.unsupported:
                     out.edits += self._pad  # sibling lines re-padded so the block stays column-aligned
-        if rule is not None and m.action == "rename" and c.params.struct in rule.structs and out.edits:
+        if rule is not None and m.action == "rename" and params.struct in rule.structs and out.edits:
             src = self.file.src  # the same variable's field read elsewhere (``p.F = append(p.F, x)``): same struct
             out.edits += [
                 Edit(src.start[t], src.start[t] + len(rule.old), rule.new, m.target)
-                for path, t in c.params.reads if path == m.target and src.tok[t] == rule.old
+                for path, t in params.reads if path == m.target and src.tok[t] == rule.old
             ]
         return out
 

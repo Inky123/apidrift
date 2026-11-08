@@ -261,3 +261,16 @@ def test_fields_added_after_the_literal_are_hidden_when_the_path_names_several_e
     # detect-php reads a write by literal key ($request['k'] = ...) instead of hiding everything (""), so only the
     # conditional key is hidden: not claimed for either endpoint
     assert found == [("/v1/charges", ["amount"], [OLD]), ("/v1/payment_intents", ["amount"], [OLD])]
+
+
+def test_called_names_is_linear_on_a_long_word():
+    import time
+
+    from apidrift import httpphp, httppy
+
+    text = "<?php\nreturn hex2bin('" + "89504e470d0a1a0a" * 8000 + "'); f1oo(1); 9bar::x(); $o->baz ('a');\n"
+    t = time.time()
+    got = [httpwrap.called_names(text, httpphp.CALLED), httpwrap.called_names(text, httppy.CALL)]
+    assert time.time() - t < 1
+    assert got[0] == {"hex2bin": True, "f1oo": False, "bar": False, "x": False, "baz": True}
+    assert got[1] == {"hex2bin": True, "f1oo": False, "x": False, "baz": True}

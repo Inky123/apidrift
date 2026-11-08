@@ -16,7 +16,8 @@ import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import fixhelpers, fixscope, fixsdk, fixtestedit, fixtests, gofix, goowned, migrations, phpfix, phplex, phpvendor
+from . import fixhelpers, fixreads, fixscope, fixsdk, fixtestedit, fixtests, gofix, goowned, migrations
+from . import phpfix, phplex, phpvendor
 from .diff import BREAKING, Change
 from .fixedit import Edit, Locator, apply
 from .fixpins import Pin, find_pins
@@ -88,9 +89,10 @@ class FixPlan:
     tests: list[tuple[str, int]] = field(default_factory=list)  # test lines that still name a renamed/removed field
     test_fixes: list[fixtestedit.TestFix] = field(default_factory=list)  # tests that expect the changed request
     cassettes: list[tuple[str, int]] = field(default_factory=list)  # recorded requests that send a changed field
+    kept: list[tuple[str, int]] = field(default_factory=list)  # old-key reads of a payload, kept on purpose (fixreads)
     root: Path | None = field(default=None, repr=False, compare=False)  # the checkout (the oracle reads Go types)
     pyrepo: object | None = field(default=None, repr=False, compare=False)  # pyrepo.Repo of the scan: read as it was
-    table: object = field(default=None, repr=False, compare=False)  # the scan's whole-repo context, for the oracle
+    table: object = field(default=None, repr=False, compare=False)  # the scan's crosstable.Table (table.http: raw HTTP)
 
     def to_dict(self) -> dict:
         """The ``--fix`` payload: a frozen contract with the App's pull-request step."""
@@ -119,6 +121,7 @@ class FixPlan:
             "tests": [{"file": f, "line": line} for f, line in self.tests],
             "test_fixes": [t.to_dict() for t in self.test_fixes],
             "cassettes": [{"file": f, "line": line} for f, line in self.cassettes],
+            "kept": [{"file": f, "line": line} for f, line in self.kept],
         }
 
 
@@ -193,8 +196,11 @@ def _plan_file(
     plan: FixPlan, file: str, text: str, group: list[Candidate], index: SdkIndex, changes: list[Change], base: Path | None = None
 ) -> tuple[Fix | None, list[int]]:
     language = group[0][0].usage.language
-    locator = phpfix.Locator(text, language, index) if language == "php" else Locator(text, language, index, repo=plan.pyrepo)
-    locator.context, locator.group = (base, file) if base is not None else None, group  # for fixhelpers
+    if language == "php":
+        locator = phpfix.Locator(text, language, index)
+    else:
+        locator = Locator(text, language, index, repo=plan.pyrepo)
+    locator.context, locator.group, locator.table = (base, file) if base is not None else None, group, plan.table
     edits: list[Edit] = []
     planned: list[Planned] = []
     heredocs = fixscope.ruby_heredocs(text) if language == "ruby" else []
@@ -232,6 +238,7 @@ def _plan_file(
     plan.possibly_remaining += [
         {"file": file, "line": i.usage.line, "path": i.usage.path, "target": m.target} for i, m in possibly
     ]
+    plan.kept += fixreads.kept_places(file, content, planned, plan.root) if language == "php" else []
     sites = [FixSite(i.usage.line, i.usage.path, m.target, m.replacement, m.action) for i, m in pairs]
     return Fix(file, "", content, sites, original=text, edits=sorted(set(edits), key=lambda e: e.start)), leftovers
 
@@ -258,8 +265,9 @@ def _oracle(
     index: SdkIndex, changes: list[Change], root: Path | None = None, table=None, repo=None,
 ) -> tuple[str | None, list[int], list[Candidate]]:
     """Why the edited file must not be offered (None when every check holds), the old-name tokens left,
-    and the planned deletions a call's hidden arguments may still send."""
-    u_before, _, _ = scan_text(before, file, index, table, repo=repo)  # read as the scan read it, other files too
+    and the planned deletions a call's hidden arguments may still send. Both scans read as the scan read:
+    wrappers in other files through the scan's own table, Python classes through its repo."""
+    u_before, _, _ = scan_text(before, file, index, table, repo=repo)
     u_after, _, _ = scan_text(after, file, index, table, repo=repo)
     shape = lambda us: [(u.method, u.path, u.call, u.complete) for u in us]  # noqa: E731
     if shape(u_before) != shape(u_after):
@@ -350,11 +358,12 @@ def _oracle_tokens(
         # exceptions: a value carried into the new text (``country: countries[0]``), and the app's own names
         # that happen to be spelled like the key (a parameter or variable, never a key, member or string).
         carried = {t.pos for t in remaining for e in mine if placed[e][0] <= t.pos < placed[e][1]}
-        allowed = app_names(after, language, remaining)
+        kept = fixreads.kept(after, language, m, remaining, where)  # tested reads of a webhook payload
+        allowed = app_names(after, language, remaining) | kept
         stray = stray or any(t.pos not in allowed and t.pos not in carried for t in remaining)
         if m.action == "rename_first":  # the old value is kept on purpose: its variables are not leftovers
             remaining = [t for t in remaining if t.pos not in allowed and t.pos not in carried]
-        leftovers += [t.line for t in remaining]
+        leftovers += [t.line for t in remaining if t.pos not in kept]
     return ("leftover_tokens" if stray else None), sorted(set(leftovers))
 
 
@@ -441,6 +450,9 @@ def render_fix_text(plan: FixPlan, root: str) -> str:
         lines += ["", "possibly affected, not attempted (arguments not fully visible):"]
         lines += [f"  {u.file}:{u.line}  {u.target}  {u.path}" for u in plan.not_attempted]
     lines += fixtestedit.render_text(plan.test_fixes, plan.tests, plan.cassettes)
+    if plan.kept:
+        lines += ["", "kept on purpose (reads of a webhook or response payload, unchanged):"]
+        lines += [f"  {f}:{line}" for f, line in plan.kept]
     if plan.leftovers:
         lines += ["", "still mentions the old name:"]
         lines += [f"  {f}:{line}" for f, line in plan.leftovers]

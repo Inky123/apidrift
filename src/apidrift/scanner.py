@@ -9,7 +9,6 @@ HTTP stubs) those are tagged ``language="doc"`` and reported separately.
 
 from __future__ import annotations
 
-import functools
 import json
 import os
 import re
@@ -17,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import goparse, httplit, httpurl, httpwrap, jsparse, phpparse, phpvendor, pyparse, pyrepo
+from . import crosstable, goparse, httplit, httpurl, httpwrap, jsparse, phpparse, phpvendor, pyparse, pyrepo
 from .sdkmap import Resolved, SdkIndex
 
 SKIP_DIRS = {"node_modules", "vendor", "site-packages", "__pycache__"}  # skipped anywhere
@@ -144,7 +143,7 @@ class ScanResult:
     unread: dict[str, int] = field(default_factory=dict)  # language -> files mentioning Stripe in languages not parsed
     reader: Reader = Reader()  # the vendor the scan was for
     pyrepo: object | None = field(default=None, repr=False, compare=False)  # pyrepo.Repo: the fixer reads with it too
-    table: object = None  # what the whole-repo pass learnt (httpwrap.Registry): re-scans of one file pass it on
+    table: crosstable.Table | None = field(default=None, repr=False, compare=False)  # wrappers followed across files
 
     @property
     def counted(self) -> list[Usage]:
@@ -180,53 +179,58 @@ def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> Scan
     else:
         files, skipped_files, skipped_dirs = _iter_files(root)
         base = root
-    usages: list[Usage] = []
-    unresolved: list[tuple[str, int, str]] = []
-    unread: dict[str, int] = {}
-    scanned = 0
-    registry = httpwrap.Registry() if reader.scan_text is None and root.is_dir() else None  # raw-HTTP wrappers
+    # Stripe's own reader follows wrappers across files (crosstable): a first pass notes them, then the
+    # files that call them, or define one whose callers are all visible, are read again with the table.
+    # The table also carries the raw-HTTP wrappers (table.http, httpwrap.Registry), collected from every
+    # file before the hint check, and the checkout's Python classes (pyrepo), read on demand.
+    table = crosstable.Table(index=index) if reader.scan_text is None and root.is_dir() else None
     repo = None
-    if reader.scan_text is None and root.is_dir():  # the checkout's classes, read on demand; one file proves nothing
+    if table is not None:  # one file proves nothing about the checkout
         repo = pyrepo.Repo(base, files)
-        read = functools.partial(scan_text, repo=repo)
+        read = lambda text, rel, index: scan_text(text, rel, index, table, repo=repo)  # noqa: E731
+    registry = table.http if table is not None else None  # raw-HTTP wrappers
+    per_file: dict[str, tuple[list[Usage], list[tuple[str, int, str]]]] = {}
+    unread: dict[str, int] = {}
     for path in files:
         text = _read(path)
         if text is None:
             skipped_files += 1
             continue
+        rel = path.relative_to(base).as_posix()
         if registry is not None:
-            registry.collect(text, path.relative_to(base).as_posix())
+            registry.collect(text, rel)
         if not reader.hint.search(text):
             continue
-        scanned += 1
-        found, missing, unread_name = read(text, path.relative_to(base).as_posix(), index)
+        found, missing, unread_name = read(text, rel, index)
         if unread_name:
             unread[unread_name] = unread.get(unread_name, 0) + 1
-        unresolved += missing
-        usages += found
-    if registry is not None:  # wrapper files and their callers, read again now that every wrapper is known
-        registry.finish(lambda rel: _read(base / rel))
-        for rel in sorted(registry.rescan):
-            found, missing, _ = scan_text(_read(base / rel) or "", rel, index, registry, repo=repo)
-            usages = [u for u in usages if u.file != rel] + found
-            unresolved = [m for m in unresolved if m[0] != rel] + missing
-        if registry.skipped:  # never a silent drop: the files past the cap are named in the report
-            unread[httpwrap.OVER_CAP] = registry.skipped
+        per_file[rel] = (found, missing)
+    if table is not None:  # finishes table.http too; its wrapper files and callers join table.rescan
+        crosstable.finish(table, base, files, lambda chain: _resolve(index, chain))
+        for rel in sorted(table.rescan):
+            text = _read(base / rel)
+            if text is not None:
+                per_file[rel] = scan_text(text, rel, index, table, repo=repo)[:2]
+        if table.http.skipped:  # never a silent drop: the files past the cap are named in the report
+            unread[httpwrap.OVER_CAP] = table.http.skipped
+    usages = [u for found, _ in per_file.values() for u in found]
+    unresolved = [entry for _, missing in per_file.values() for entry in missing]
     usages.sort(key=lambda u: (u.file, u.line, u.path))
     return ScanResult(
-        str(root), usages, scanned, unresolved, skipped_files, skipped_dirs, dict(sorted(unread.items())), reader,
-        pyrepo=repo, table=registry,
+        str(root), usages, len(per_file), unresolved, skipped_files, skipped_dirs, dict(sorted(unread.items())), reader,
+        pyrepo=repo, table=table,
     )
 
 
 def scan_text(
-    text: str, rel: str, index: SdkIndex, table=None, *, repo: pyrepo.Repo | None = None
+    text: str, rel: str, index: SdkIndex, table: crosstable.Table | None = None, *, repo: pyrepo.Repo | None = None
 ) -> tuple[list[Usage], list[tuple[str, int, str]], str | None]:
     """Usages and unresolved calls of one file's text at repo-relative path ``rel``, with no filesystem
     (``repo`` answers questions about the checkout's other Python files).
 
     The third item names the language when the file is in one the scanner cannot parse yet (else None).
-    ``table`` carries what a whole-repo scan learnt about other files (:class:`httpwrap.Registry`).
+    ``table``: the repository's wrappers followed across files (:mod:`crosstable`), from :func:`scan_repo`;
+    its ``http`` registry (raw-HTTP wrappers, :mod:`httpwrap`) is consulted once the whole-repo pass is done.
     """
     suffix = os.path.splitext(rel)[1].lower()
     language = LANGUAGES.get(suffix)
@@ -234,17 +238,18 @@ def scan_text(
     found: list[Usage] = []
     unread_name: str | None = None
     if language == "python":
-        found, missing = _scan_python(text, rel, index, reads, repo=repo)
+        found, missing = _scan_python(text, rel, index, reads, table, repo=repo)
     elif language == "go":
-        found, missing, unread_name = _scan_go(text, rel, index)
+        found, missing, unread_name = _scan_go(text, rel, index, table)
     elif language:
-        found, missing = _scan_dynamic(text, rel, index, reads, language)
+        found, missing = _scan_dynamic(text, rel, index, reads, language, table)
     else:
         missing = []
         unread_name = UNREAD_LANGUAGES.get(suffix)
     url_language = "doc" if _doc_like(rel, suffix) else "http"
     found += _scan_urls(text, rel, index, reads, {u.line for u in found}, url_language)
-    found += _http_sites(text, rel, index, found, table, reads, url_language)
+    http = table.http if table is not None and not table.http.collecting else None  # only once every wrapper is known
+    found += _http_sites(text, rel, index, found, http, reads, url_language)
     return found, missing, unread_name
 
 
@@ -269,7 +274,11 @@ def unread_sentence(unread: dict[str, int], vendor: str = "Stripe") -> str:
     return f"apidrift does not read {names} call sites yet: {listed} mention {vendor} and were not checked."
 
 
-def _iter_files(root: Path) -> tuple[list[Path], int, int]:
+def _iter_files(root: Path, suffixes: set[str] | None = None) -> tuple[list[Path], int, int]:
+    """The files a scan reads (``suffixes``: of these extensions instead of every text file), with the
+    counts of files and directories left out. Every walk over a checkout goes through here, so the same
+    files are read on every machine whatever is installed (dependency and build directories are skipped)."""
+    suffixes = TEXT_EXT if suffixes is None else suffixes
     files: list[Path] = []
     skipped_files = skipped_dirs = 0
     for dirpath, dirs, names in os.walk(root):
@@ -285,7 +294,7 @@ def _iter_files(root: Path) -> tuple[list[Path], int, int]:
         dirs[:] = keep
         for name in sorted(names):
             path = here / name
-            if name in SKIP_NAMES or name.endswith((".min.js", ".map")) or path.suffix.lower() not in TEXT_EXT:
+            if name in SKIP_NAMES or name.endswith((".min.js", ".map")) or path.suffix.lower() not in suffixes:
                 continue
             if path.is_symlink():
                 continue
@@ -349,8 +358,8 @@ def _resolve(index: SdkIndex, chain: list[str]) -> Resolved | None:
 # --- Python -----------------------------------------------------------------
 
 
-def _scan_python(text: str, rel: str, index: SdkIndex, reads: frozenset[str], *, repo=None):
-    found, missing = pyparse.extract(text, lambda chain: _resolve(index, chain), repo=repo)
+def _scan_python(text: str, rel: str, index: SdkIndex, reads: frozenset[str], table=None, *, repo=None):
+    found, missing = pyparse.extract(text, lambda chain: _resolve(index, chain), table, rel, repo=repo)
     usages = [
         Usage(rel, f.line, f.resolved.method, f.resolved.path, f.call, frozenset(f.fields), f.complete, "python", reads, f.hidden)
         for f in found
@@ -361,11 +370,12 @@ def _scan_python(text: str, rel: str, index: SdkIndex, reads: frozenset[str], *,
 # --- Go -----------------------------------------------------------------------
 
 
-def _scan_go(text: str, rel: str, index: SdkIndex):
+def _scan_go(text: str, rel: str, index: SdkIndex, table=None):
     if index.go is None:
         return [], [], None
     try:
-        found, missing, reads = goparse.extract(text, index.go)
+        extra = (table, rel) if table is not None else ()
+        found, missing, reads = goparse.extract(text, index.go, *extra)
     except (IndexError, RecursionError):  # source the tokeniser's assumptions do not hold for: say it was not read
         return [], [], "Go"
     usages = [
@@ -378,12 +388,12 @@ def _scan_go(text: str, rel: str, index: SdkIndex):
 # --- JavaScript / TypeScript / Ruby / PHP ---------------------------------------
 
 
-def _scan_dynamic(text: str, rel: str, index: SdkIndex, reads: frozenset[str], language: str):
+def _scan_dynamic(text: str, rel: str, index: SdkIndex, reads: frozenset[str], language: str, table=None):
     resolve = lambda chain: _resolve(index, chain)  # noqa: E731
     if language == "php":
-        found, missing = phpparse.extract(text, resolve)
+        found, missing = phpparse.extract(text, resolve, table, rel)
     else:
-        found, missing = jsparse.extract(text, index, ruby=language == "ruby", resolve=resolve)
+        found, missing = jsparse.extract(text, index, ruby=language == "ruby", resolve=resolve, table=table, rel=rel)
     usages = [
         Usage(rel, f.line, f.resolved.method, f.resolved.path, f.call, frozenset(f.fields.paths), f.fields.complete,
               language, reads, frozenset(f.fields.hidden), switched=frozenset(getattr(f.fields, "switched", ())))

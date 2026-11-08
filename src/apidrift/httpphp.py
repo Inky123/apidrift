@@ -33,7 +33,7 @@ NAMESPACE = re.compile(r"(?<![\w$>:\\])namespace\s+([\w\\]+)\s*[;{]")
 USE_STMT = re.compile(r"(?<![\w$>:\\])use\s+(?!function\b|const\b)([\w\\][\w\\\s,]*?)\s*;")
 USE_PART = re.compile(r"\s*\\?([\w\\]+)(?:\s+as\s+(\w+))?\s*")
 EXTENDS = re.compile(r"\bextends\s+(\\?[\w\\]+)")
-CALLED = re.compile(r"([A-Za-z_]\w*)\s*(?:\(|::)")
+CALLED = re.compile(r"(?<!\w)[^\W_A-Za-z]*+([A-Za-z_]\w*+)\s*(?:\(|::)")  # linear: one try per word (a long word is no cost)
 PARAM = re.compile(r"^\s*(?:[\w\\?|]+\s+)?(&\s*)?(\.\.\.)?\s*\$([A-Za-z_]\w*)\s*(?:=\s*(.*?))?\s*$", re.S)
 ENCODERS = re.compile(r"^(?:http_build_query|json_encode|wp_json_encode)\s*\(\s*\$([A-Za-z_]\w*)\s*\)$")
 SELF = {"self", "static"}

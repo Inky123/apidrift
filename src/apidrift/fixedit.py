@@ -15,7 +15,7 @@ import re
 import tokenize
 from dataclasses import dataclass, field
 
-from . import fixhelpers, fixscope, fixvalue, jsparse, jsspread, jswrites, pyparse, scanner
+from . import fixcross, fixhelpers, fixscope, fixtsvalue, fixvalue, jsparse, jsspread, jswrites, pyparse, scanner
 from .fixtokens import _Offsets
 from .fixvalue import Edit, Entry
 from .jsparse import IDENT, QUOTES, RUBY_KEYWORD, Fields, Source
@@ -83,6 +83,8 @@ class Locator:
 
     def sites(self, usage: Usage, migration: Migration) -> Sites:
         if self.language == "go":
+            if fixcross.is_cross(usage.call):
+                return fixcross.go_sites(self, usage, migration)  # a caller of a wrapper (gocross)
             return self.go.sites(usage, migration)
         if self.language == "python":
             return self._py(usage, migration)
@@ -91,6 +93,8 @@ class Locator:
     # --- JavaScript / TypeScript / Ruby ---------------------------------------
 
     def _js(self, usage: Usage, m: Migration) -> Sites:
+        if fixcross.is_cross(usage.call):
+            return fixcross.js_sites(self, usage, m)  # a caller of a wrapper defined in another file
         matches = [
             c for c in self.js_calls
             if c.line == usage.line and c.call == fixhelpers.plain_call(usage.call) and c.resolved.path == usage.path
@@ -179,6 +183,8 @@ class Locator:
         if m.action in ("rename_first", "wrap_type"):
             bad = lambda name, action: self._js_bad_binding(name, vs, action)  # noqa: E731
             new = fixvalue.js_rewrite(m, self.text, src, vs, ve, ruby=self.ruby, quote=self.quote, bad_name=bad)
+            if m.action == "wrap_type" and self.language == "typescript" and fixtsvalue.refused(self, src, vs, ve, m):
+                new = fixvalue.UNSUPPORTED  # its declared type may not check once wrapped
         entry = Entry(span.key_start, ns, ne, ne if shorthand else vs, ve, shorthand)
         cont = fixvalue.js_container(src, cont_start, literal=cont_literal) if m.action == "delete" else None
         return fixvalue.entry_edit(self.text, entry, m, new, cont, comment="#" if self.ruby else "//")
@@ -229,6 +235,8 @@ class Locator:
     # --- Python -----------------------------------------------------------------
 
     def _py(self, usage: Usage, m: Migration) -> Sites:
+        if fixcross.is_cross(usage.call):
+            return fixcross.py_sites(self, usage, m)  # a caller of a wrapper (pycross)
         matches = [
             c for c in self.py_calls
             if c.node.lineno == usage.line and c.call == fixhelpers.plain_call(usage.call) and c.resolved.path == usage.path

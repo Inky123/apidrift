@@ -11,7 +11,7 @@ import bisect
 import re
 from dataclasses import dataclass, field
 
-from . import jsbare, jshelpers, jsroots, jsspread, jsswitch, jswrites, rbobjects
+from . import jsbare, jsroots, jsspread, jswrites
 from .jsroots import CALL_ARGS, NAME
 from .sdkmap import Resolved, SdkIndex
 
@@ -369,23 +369,18 @@ class Call:
     bindings: jsroots.Bindings
 
 
-def extract(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> tuple[list[Found], list[tuple[int, str]]]:
+def extract(
+    text: str, index: SdkIndex, *, ruby: bool = False, resolve=None, table=None, rel: str = ""
+) -> tuple[list[Found], list[tuple[int, str]]]:
     """Stripe SDK calls in a JS/TS/Ruby source, plus (line, call) pairs that matched no endpoint.
 
-    ``resolve`` maps a call chain to a :class:`Resolved` operation (defaults to ``index.resolve``).
+    ``resolve`` maps a call chain to a :class:`Resolved` operation (defaults to ``index.resolve``);
+    ``table`` (:mod:`crosstable`): wrappers followed across files, for the file at ``rel``.
     """
-    found: list[Found] = []
+    from . import jsfound  # what each call sends, Ruby's object calls, other files' wrappers
+
     resolved_calls, unresolved = calls(text, index, ruby=ruby, resolve=resolve)
-    helpers = jshelpers.Helpers(resolved_calls[0].bindings) if resolved_calls else None
-    if helpers is not None and not ruby:
-        helpers.src.spreads = jsspread.Reader(helpers)
-    for c in resolved_calls:
-        fields, via = Fields(), jshelpers.Via(helpers)
-        collect(c.args_src, c.spans, jsbare.id_slot(c), c.bindings, fields, ruby=ruby, helper=via)
-        jsswitch.settle(helpers, fields, lambda out, c=c: collect(
-            c.args_src, c.spans, jsbare.id_slot(c), c.bindings, out, ruby=ruby, helper=jshelpers.Via(helpers)))
-        found.append(Found(c.line, c.call + via.suffix, c.resolved, fields))
-    found += rbobjects.extract(text, resolved_calls, resolve or index.resolve) if ruby else []  # pi.confirm(...)
+    found = jsfound.found(text, index, resolved_calls, ruby=ruby, resolve=resolve, table=table, rel=rel)
     return found, unresolved
 
 

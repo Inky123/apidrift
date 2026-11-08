@@ -14,7 +14,7 @@ import re
 from . import httpurl, httpwrap
 
 RAW = {"raw_request", "raw_request_async"}
-CALL = re.compile(r"([A-Za-z_]\w*)\s*\(")
+CALL = re.compile(r"(?<!\w)[^\W_A-Za-z]*+([A-Za-z_]\w*+)\s*\(")  # linear: one try per word
 IMPORT_LINE = re.compile(r"(?m)^\s*from\s+\S+\s+import\s+\(?([^)\n]*)")
 OPTIONS = {
     "stripe_version", "stripe_account", "stripe_context", "api_key", "idempotency_key", "api_mode", "headers",

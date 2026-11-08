@@ -101,7 +101,7 @@ def test_sample_plan_reports_the_pins_and_no_leftovers(sample_plan):
 def test_payload_shape_is_the_frozen_contract(sample_plan):
     data = sample_plan.to_dict()
     assert set(data) == {"fixes", "unfixable", "pins", "sdks", "migrations", "leftovers", "not_attempted", "possibly_remaining", "tests",
-                         "test_fixes", "cassettes"}
+                         "test_fixes", "cassettes", "kept"}
     assert set(data["fixes"][0]) == {"file", "blob_sha", "content", "sites", "edits"}
     assert set(data["fixes"][0]["sites"][0]) == {"line", "path", "target", "replacement", "action"}
     assert data["fixes"][0]["sites"][0]["action"] == "rename" and data["possibly_remaining"] == []
@@ -296,5 +296,6 @@ def test_fix_command_prints_diffs_pins_and_exits_zero(tmp_path, capsys):
     assert main(["fix", str(repo), "--old", str(tmp_path / "a.json"), "--new", str(tmp_path / "b.json"), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert set(payload) == {
-        "fixes", "unfixable", "pins", "sdks", "migrations", "leftovers", "not_attempted", "possibly_remaining", "tests", "test_fixes", "cassettes"}
+        "fixes", "unfixable", "pins", "sdks", "migrations", "leftovers", "not_attempted", "possibly_remaining", "tests", "test_fixes", "cassettes",
+        "kept"}
 
