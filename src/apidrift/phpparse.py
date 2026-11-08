@@ -14,7 +14,7 @@ the request options, which are never read as parameters.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import phpdispatch, phpflow, phpinstance, phpvendor
 from .jsparse import Fields, Found, Span
@@ -26,6 +26,7 @@ VERB = re.compile(r"(\?->|->|::)\s*([A-Za-z_]\w*)\s*\(")
 NEW = re.compile(r"new\s+(\\?[A-Za-z_][\w\\]*)")
 USE_HEAD = re.compile(r"(?<![\w$>:\\])use\s+(?!function\b|const\b)")
 USE_STOP = re.compile(r"[;(){}]")
+NAMESPACE_DECL = re.compile(r"(?<![\w$>:\\])namespace\s+([A-Za-z_][\w\\]*)\s*[;{]")
 USE_REACH = 4000  # an import statement longer than this is not read
 CLIENT = re.compile(
     r"(?:\$this\s*->\s*|\$)([A-Za-z_]\w*)\s*=\s*new\s+(\\?[A-Za-z_][\w\\]*)"  # $stripe = new StripeClient(
@@ -84,6 +85,7 @@ class Parsed:
     bindings: Bindings
     calls: list[Call]
     unresolved: list[tuple[int, str]]
+    memo: dict = field(default_factory=dict)  # per-parse caches of the modules that read it (phpinstance)
 
 
 def extract(text: str, resolve) -> tuple[list[Found], list[tuple[int, str]]]:
@@ -99,8 +101,11 @@ def extract(text: str, resolve) -> tuple[list[Found], list[tuple[int, str]]]:
             continue  # ``save()`` with nothing assigned sends no request
         found.append(Found(c.line, c.call + via.suffix, c.resolved, fields))
         callers = helpers.callers_of(c)  # calls of a same-file wrapper that forwards its parameter here
-        for f in callers if c.hidden_by else ():
-            f.fields.hide("")  # what the dispatch wrapper writes reaches them too
+        for f in callers:  # what the dispatch wrapper writes or adds reaches them too
+            if c.hidden_by:
+                f.fields.hide("")
+            for path in c.extra:
+                phpflow.add_path(f.fields, path)
         found += callers
     return found, parsed.unresolved
 
@@ -245,6 +250,9 @@ def _uses(src: Lex) -> dict[str, list[str]]:
             parts = [p for p in name.strip().split("\\") if p]
             if parts and all(re.fullmatch(r"\w+", p) for p in parts):
                 out[alias.strip() or parts[-1]] = parts
+    spaces = {m.group(1) for m in NAMESPACE_DECL.finditer(code)}
+    if spaces:  # under "": the file's namespace, which a name no ``use`` covers is relative to
+        out[""] = [p for p in spaces.pop().split("\\") if p] if len(spaces) == 1 else ["?"]
     return out
 
 
@@ -254,7 +262,9 @@ def _qualify(name: str, uses: dict[str, list[str]]) -> list[str]:
     parts = [p for p in name.split("\\") if p]
     if name.startswith("\\") or not parts:
         return phpvendor.unprefix(parts)
-    return phpvendor.unprefix(uses.get(parts[0], [parts[0]]) + parts[1:])
+    if parts[0] in uses:
+        return phpvendor.unprefix(uses[parts[0]] + parts[1:])
+    return phpvendor.unprefix(uses.get("", []) + parts)  # ``namespace App; Stripe\X`` is App\Stripe\X
 
 
 def _clients(src: Lex, uses: dict[str, list[str]]) -> set[str]:

@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 
 from .jsparse import Fields
-from .phpscope import BIND, OPAQUE
+from .phpscope import BIND, OPAQUE, READS_ALL
 from .sdkmap import without_id
 
 Owner = tuple[str, ...]  # an object's collection path below /v1: ("payment_intents",), ("checkout", "sessions")
@@ -32,6 +32,7 @@ STATIC_ONLY = RETURNS_RESOURCE | {"list", "all", "search", "constructFrom"}
 INSTANCE_STANDARD = {"save": ("update", "post"), "delete": ("delete", "delete"), "refresh": ("retrieve", "get")}
 COLLECTION_VERBS = {"create": "create", "all": "list", "retrieve": "retrieve"}
 PARAM = r"^\s*(?:(?:public|private|protected|readonly)\s+)*\??(\\?[A-Za-z_][\w\\]*)\s+\${}\s*(?:=|$)"
+THIS_CALL = re.compile(r"\$this\s*->\s*[A-Za-z_]\w*\s*\(")
 PROPERTY = re.compile(r"\s*->\s*([A-Za-z_]\w*)")
 OP_ASSIGN = re.compile(r"(?:\*\*|<<|>>|\?\?|[-+*/.%&|^])=|\+\+|--")
 CLIENT_WORDS = {"stripe", "client", "api", "sdk", "get", "service", "instance", "default", "new", "make", "the", "my", "app"}
@@ -64,19 +65,41 @@ def resource(parsed, name: str, at: int, starts: dict, uses, static) -> Owner | 
     ``starts``: resolved calls by the start of their chain; ``static``: phpparse's static-call resolver."""
     src, scopes, bindings = parsed.src, parsed.scopes, parsed.bindings
     body = scopes.innermost(at)
-    lo, hi = scopes.extent(at)
-    mine = [u for u in bindings.uses.get(name, ()) if bindings._scope[u.pos] == body]
-    if any(u.kind == OPAQUE for u in mine) or scopes.arrow_parameter(name, at) or bindings.unbounded(lo, hi):
+    if scopes.arrow_parameter(name, at):
         return None
+    key = (name, body[0] if body else -1)
+    memo = parsed.memo.setdefault("resource", {})  # per variable and function: the walk is linear in the file
+    if key in memo:
+        owner, bound = memo[key]
+        return owner if bound < at else None
     binds = [b for b in bindings.by_name.get(name, ()) if bindings._scope[b.pos] == body]
     if scopes.parameter(name, at):
-        return None if binds else _typed(parsed, name, body, uses, static)
-    if len(binds) != 1 or binds[0].pos > at:
+        found = (None if binds or not _plain(parsed, name, body) else _typed(parsed, name, body, uses, static), -1)
+        memo[key] = found
+        return found[0]
+    if len(binds) != 1 or not _plain(parsed, name, body):
+        memo[key] = (None, -1)
         return None
+    if binds[0].pos > at:
+        return None  # the assignment comes later in the text (a loop): asked again after it
     call = starts.get(binds[0].value)
-    if call is None or src.text[src.skip_space(src.pairs[call.pos] + 1) : src.skip_space(src.pairs[call.pos] + 1) + 1] != ";":
-        return None  # ``$x = X::retrieve($id)->charges;``, ``$x = X::create($p) ?: null;``
-    return owner_of(call.resolved)
+    after = src.skip_space(src.pairs[call.pos] + 1) if call is not None else -1
+    owner = owner_of(call.resolved) if call is not None and src.text[after : after + 1] == ";" else None
+    memo[key] = (owner, binds[0].pos)  # ``$x = X::retrieve($id)->charges;``, ``... ?: null;``: None
+    return owner
+
+
+def _plain(parsed, name: str, body) -> bool:
+    """No reference, ``foreach ... as``, ``global`` or ``catch`` of ``$name`` in its function, and nothing there
+    that changes variables unnamed (computed once per function)."""
+    bindings = parsed.bindings
+    memo = parsed.memo.setdefault("unbounded", {})
+    lo, hi = (body[0], body[1]) if body else (0, parsed.src.n)
+    if (lo, hi) not in memo:
+        memo[(lo, hi)] = bindings.unbounded(lo, hi)
+    if memo[(lo, hi)]:
+        return False
+    return not any(u.kind == OPAQUE and bindings._scope[u.pos] == body for u in bindings.uses.get(name, ()))
 
 
 def _typed(parsed, name: str, body, uses, static) -> Owner | None:
@@ -168,8 +191,13 @@ def saved_fields(parsed, name: str, start: int, at: int, out: Fields) -> None:
 
     src, text, bindings = parsed.src, parsed.src.text, parsed.bindings
     body = parsed.scopes.innermost(at)
+    lo, hi = parsed.scopes.extent(at)
     if bindings._same_loop(at, at):
         out.hide("")  # values assigned after the call reach it on the next pass
+    if not any(bindings._scope[b.pos] == body and b.pos < at for b in bindings.by_name.get(name, ())):
+        out.hide("")  # not made here (a parameter): whoever made it may have set values that save() sends too
+    if READS_ALL.search(src.code, lo, hi) or THIS_CALL.search(src.code, start, at):
+        out.hide("")  # ``compact()``, or a method of ``$this`` that may reach the object through a property
     for u in bindings.uses.get(name, ()):
         if bindings._scope[u.pos] != body or not start <= u.pos < at or u.kind == BIND:
             continue

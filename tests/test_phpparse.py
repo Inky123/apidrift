@@ -319,6 +319,20 @@ def test_a_write_in_the_loop_after_the_call_reaches_it_on_the_next_pass(index):
     assert one(text, index)[3:] == (["amount", "currency"], True)
 
 
+def test_a_write_after_the_call_does_not_reach_it_when_the_loop_binds_the_variable_first(index):
+    text = H + (
+        "function pay($stripe, $rows) {\n"
+        "    foreach ($rows as $r) {\n"
+        "        $d = ['amount' => 1];\n"
+        "        $stripe->charges->create($d);\n"
+        "        $d['currency'] = 'usd';\n"
+        "        log_it($d);\n"
+        "    }\n"
+        "}\n"
+    )
+    assert one(text, index)[3:] == (["amount"], True)
+
+
 def test_a_wordpress_filter_of_the_variable_keeps_its_fields_and_hides_the_rest(index):
     text = H + (
         "function pay($stripe, $order) {\n"

@@ -3,8 +3,10 @@
 WordPress plugins often ship their own copy of stripe-php with every namespace prefixed, so two plugins can
 load different SDK versions side by side. Their calls read ``\\EDD\\Vendor\\Stripe\\PaymentIntent::create(...)``.
 A name like ``Foo\\Stripe\\Charge`` is just as often an application class (``App\\PaymentDrivers\\Stripe\\...``),
-so a prefix counts only when the checkout holds the copy itself: a file ``ApiResource.php`` that declares
-``namespace <Prefix>\\Stripe;`` and stripe-php's ``abstract class ApiResource``. That file is looked for, once
+so a prefix counts only when the checkout holds the copy itself, in stripe-php's own shape: a file
+``ApiResource.php`` that declares ``namespace <Prefix>\\Stripe;`` and ``abstract class ApiResource extends
+StripeObject`` with ``baseUrl``, ``classUrl`` and ``resourceUrl``, next to ``StripeObject.php`` and
+``ApiRequestor.php`` in the same namespace (an application's own ``App\\Stripe\\ApiResource`` is not). That file is looked for, once
 per scan and only when a prefixed name turns up, anywhere in the checkout but ``.git``-style and
 ``node_modules`` directories (the copy usually sits in ``libraries/``, ``vendor-prefixed/`` or ``vendor/``).
 
@@ -24,7 +26,9 @@ from pathlib import Path
 
 MARKER = "ApiResource.php"
 NAMESPACE = re.compile(r"^[ \t]*namespace\s+((?:[A-Za-z_]\w*\\)+)Stripe\s*;", re.M)
-RESOURCE_CLASS = re.compile(r"\babstract\s+class\s+ApiResource\b")
+RESOURCE_CLASS = re.compile(r"\babstract\s+class\s+ApiResource\s+extends\s+StripeObject\b")
+URL_METHODS = ("baseUrl", "classUrl", "resourceUrl")  # what every stripe-php ApiResource defines
+SIBLINGS = ("StripeObject.php", "ApiRequestor.php")  # next to it, in the same namespace
 READ_LIMIT = 200_000
 NOT_WALKED = {"node_modules"}
 
@@ -103,6 +107,21 @@ def _find(root: Path) -> frozenset[tuple[str, ...]]:
         except OSError:
             continue
         m = NAMESPACE.search(text)
-        if m and RESOURCE_CLASS.search(text):
-            found.add(tuple(p for p in m.group(1).split("\\") if p))
+        if m and RESOURCE_CLASS.search(text) and all(re.search(rf"\bfunction\s+{f}\s*\(", text) for f in URL_METHODS):
+            space = m.group(0).strip()
+            if all(_declares(Path(dirpath) / sibling, space) for sibling in SIBLINGS):
+                found.add(tuple(p for p in m.group(1).split("\\") if p))
     return frozenset(found)
+
+
+def _declares(path: Path, space: str) -> bool:
+    """``path`` is a regular file whose namespace statement is ``space``."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        with path.open("rb") as fh:
+            text = fh.read(READ_LIMIT).decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    m = NAMESPACE.search(text)
+    return m is not None and m.group(0).strip() == space
