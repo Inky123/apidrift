@@ -23,6 +23,9 @@ from .jshelpers import MAX_DEPTH, SUFFIX
 
 NAMED = re.compile(r"(?<![\w$>:\\])function\s*(?:&\s*)?([A-Za-z_]\w*)\s*\(")
 RETURN = re.compile(r"(?<![\w$>:\\])return\b")
+# the two shapes callers_of looks for, with the callee captured: the heads and look-behinds as before
+METHOD_CALLS = re.compile(r"(?:\$this\s*->\s*|(?:self|static)\s*::\s*)([A-Za-z_]\w*)\s*\(", re.I)
+FUNCTION_CALLS = re.compile(r"(?<![\w$>:\\])(?<!function )([A-Za-z_]\w*)\s*\(", re.I)
 CALLEE = re.compile(r"(?:\$this\s*->\s*|(?:self|static)\s*::\s*)?([A-Za-z_]\w*)\s*\(")
 THROUGH = " [through {name}, line {line}]"
 
@@ -78,6 +81,23 @@ class PhpHelpers:
             d = Definition(m.group(1), m.start(1), j, self.src.pairs[j], params, method)
             self.defs.setdefault(d.name.lower(), []).append(d)
         self.callers: list[Caller] = []
+        self._calls: tuple[dict[str, list[re.Match]], dict[str, list[re.Match]]] | None = None  # callee -> calls
+        self._by_open: dict[int, Definition] | None = None  # body brace -> its definition, for enclosing()
+
+    def calls_of(self, name: str, method: bool) -> list[re.Match]:
+        """Every ``$this->NAME(`` / ``self::NAME(`` / ``static::NAME(`` (method) or plain ``NAME(`` (function) in
+        the code, NAME compared as PHP does (case-insensitively), in text order: what callers_of once found
+        with one pattern per wrapper over the whole file. The calls are indexed once, by the callee written."""
+        if self._calls is None:
+            found: tuple[dict, dict] = ({}, {})
+            for m in METHOD_CALLS.finditer(self.src.code):
+                found[0].setdefault(m.group(1), []).append(m)
+            for m in FUNCTION_CALLS.finditer(self.src.code):
+                found[1].setdefault(m.group(1), []).append(m)
+            self._calls = found
+        index = self._calls[0 if method else 1]
+        pattern = re.compile(re.escape(name), re.I)
+        return sorted((m for callee, ms in index.items() if pattern.fullmatch(callee) for m in ms), key=lambda m: m.start())
 
     def line(self, pos: int) -> int:
         return self.src.line(pos)
@@ -90,7 +110,12 @@ class PhpHelpers:
         body = self.scopes.innermost(pos)
         if body is None:
             return None
-        return next((d for ds in self.defs.values() for d in ds if d.open == body[0]), None)
+        if self._by_open is None:  # the first definition with each body brace, as the scan over defs found it
+            self._by_open = {}
+            for ds in self.defs.values():
+                for d in ds:
+                    self._by_open.setdefault(d.open, d)
+        return self._by_open.get(body[0])
 
     # --- builders ----------------------------------------------------------------------
 
@@ -228,9 +253,7 @@ class PhpHelpers:
             return []
         d, k = got
         src, text, out = self.src, self.src.text, []
-        name = re.escape(d.name)
-        head = r"(?:\$this\s*->\s*|(?:self|static)\s*::\s*)" if d.method else r"(?<![\w$>:\\])(?<!function )"
-        for m in re.finditer(rf"{head}{name}\s*\(", src.code, re.I):
+        for m in self.calls_of(d.name, d.method):
             paren = m.end() - 1
             if d.open <= m.start() < d.close or paren not in src.pairs:
                 continue

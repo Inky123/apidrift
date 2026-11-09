@@ -177,8 +177,8 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
     if not names:
         return
     pattern = "|".join(re.escape(w.name) for w in names.values())
-    definition = re.compile(rf"(?<![\w.])def\s+({pattern})\s*\(")
-    mention = re.compile(rf"(?<!\w)(?:{pattern})(?!\w)")
+    definition = re.compile(rf"def(?<![\w.]def)\s+({pattern})\s*\(")
+    mention = re.compile(rf"(?:{crosstable.names_pattern([re.escape(w.name) for w in names.values()], r'\w')})(?!\w)")
     defs: dict[str, int] = {}
     facts = Facts(set(), set(), set(), {}, set())
     source = {str(p) for p in sources}
@@ -190,7 +190,7 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
                 table.note(w, "cap: too many Python files")
             return
         path, text = item
-        facts.files.add(path.relative_to(base).as_posix())
+        facts.files.add(scanner.rel_path(path, base))
         for m in definition.finditer(text):
             defs[m.group(1)] = defs.get(m.group(1), 0) + 1
         if "class" in text:
@@ -220,11 +220,13 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
             table.followed.pop(w.key)
         return
     for path in mentioned:
-        rel, text = path.relative_to(base).as_posix(), scanner._read(path)
+        rel, text = scanner.rel_path(path, base), scanner._read(path)
         ctx = Module(text, rel) if text is not None else None
         for w in followed:
             for line, _, visible in (uses(ctx, w, table) if ctx is not None and ctx.tree is not None else [(0, None, None)]):
                 crosstable.record(table, w, rel, line, visible is not None)
+        if crosstable.over_cap(table, LANG):
+            break  # settled below: nothing more is followed
     crosstable.settle(table, LANG)
 
 

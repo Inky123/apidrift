@@ -137,7 +137,9 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
         return
     pattern = "|".join(re.escape(w.name) for w in names.values())
     definition = re.compile(rf"^func[ \t]*(?:\([^()\n]*\)[ \t]*)?({pattern})[ \t]*[(\[]", re.M)
-    mention = re.compile(rf"\b(?:{pattern})\b")
+    escaped = [re.escape(w.name) for w in names.values()]  # identifiers: ``\b`` before one is "no word character before"
+    mention = re.compile(rf"(?:{crosstable.names_pattern(escaped, r'\w')})\b" if all(re.match(r"\w", n) for n in escaped)
+                         else rf"\b(?:{pattern})\b")
     defs: dict[str, int] = {}
     source = {str(p) for p in sources}
     mentioned: list[Path] = []
@@ -167,11 +169,13 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
             table.followed.pop(w.key)
         return
     for path in mentioned:
-        rel, text = path.relative_to(base).as_posix(), scanner._read(path)
+        rel, text = scanner.rel_path(path, base), scanner._read(path)
         f = goparse.calls(text, index.go)[2] if text is not None else None
         for w in followed:
             for line, _, visible in (uses(f, text, w, rel, table) if f is not None else [(0, -1, None)]):
                 crosstable.record(table, w, rel, line, visible is not None)
+        if crosstable.over_cap(table, LANG):
+            break  # settled below: nothing more is followed
     crosstable.settle(table, LANG)
 
 

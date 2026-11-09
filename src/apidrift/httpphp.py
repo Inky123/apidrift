@@ -9,6 +9,7 @@ wrapper: path parameter 1 appended to ``const ENDPOINT = 'https://api.stripe.com
 
 from __future__ import annotations
 
+import functools
 import re
 from dataclasses import dataclass, replace
 from typing import NamedTuple
@@ -16,23 +17,24 @@ from typing import NamedTuple
 from . import httpphpbody, httpphppath, httpurl, httpwrap, phpfilters, phpparse
 from .httpphpbody import Writes, _writes
 from .jsparse import Fields
-from .phplex import STRING, Lex
+from .phplex import STRING, lex
 
-FUNC = re.compile(r"(?<![\w$>:\\])function\s*(?:&\s*)?([A-Za-z_]\w*)\s*\(")
-CLASS = re.compile(r"(?<![\w$>:\\])(?:class|trait)\s+([A-Za-z_]\w*)[^{;]*?\{")
-CONST = re.compile(r"(?<![\w$>:\\])const\s+([A-Za-z_]\w*)\s*=")
-DEFINE = re.compile(r"(?<![\w$>:\\])define\s*\(")
+FUNC = re.compile(r"function(?<![\w$>:\\]function)\s*(?:&\s*)?([A-Za-z_]\w*)\s*\(")
+CLASS = re.compile(r"(?:class(?<![\w$>:\\]class)|trait(?<![\w$>:\\]trait))\s+([A-Za-z_]\w*)[^{;]*?\{")
+CONST = re.compile(r"const(?<![\w$>:\\]const)\s+([A-Za-z_]\w*)\s*=")
+DEFINE = re.compile(r"define(?<![\w$>:\\]define)\s*\(")
 HTTP = re.compile(
-    r"(?<![\w$>:\\])(wp_(?:safe_)?remote_(?:get|post|request)|curl_init|file_get_contents)\s*\("
+    r"(wp_(?<![\w$>:\\]wp_)(?:safe_)?remote_(?:get|post|request)|curl_init(?<![\w$>:\\]curl_init)"
+    r"|file_get_contents(?<![\w$>:\\]file_get_contents))\s*\("
     r"|->\s*(request|get|post|delete)\s*\("
 )
-STATIC_CALL = re.compile(r"(?<![\w$\\>])(\\?[A-Za-z_][\w\\]*)\s*::\s*([A-Za-z_]\w*)\s*\(")
+STATIC_CALL = re.compile(r"(?<![\w$\\>])(\\?[A-Za-z_][\w\\]*+)\s*::\s*([A-Za-z_]\w*+)\s*\(")
 THIS_CALL = re.compile(r"\$this\s*->\s*([A-Za-z_]\w*)\s*\(")
-PLAIN_CALL = re.compile(r"(?<![\w$>:\\])([A-Za-z_]\w*)\s*\(")
-NAMESPACE = re.compile(r"(?<![\w$>:\\])namespace\s+([\w\\]+)\s*[;{]")
-USE_STMT = re.compile(r"(?<![\w$>:\\])use\s+(?!function\b|const\b)([\w\\][\w\\\s,]*?)\s*;")
+PLAIN_CALL = re.compile(r"(?<![\w$>:\\])([A-Za-z_]\w*+)\s*\(")
+NAMESPACE = re.compile(r"namespace(?<![\w$>:\\]namespace)\s+([\w\\]+)\s*[;{]")
+USE_STMT = re.compile(r"use(?<![\w$>:\\]use)\s+(?!function\b|const\b)([\w\\][\w\\\s,]*?)\s*;")
 USE_PART = re.compile(r"\s*\\?([\w\\]+)(?:\s+as\s+(\w+))?\s*")
-EXTENDS = re.compile(r"\bextends\s+(\\?[\w\\]+)")
+EXTENDS = re.compile(r"extends(?<!\wextends)\s+(\\?[\w\\]+)")
 CALLED = re.compile(r"(?<!\w)[^\W_A-Za-z]*+([A-Za-z_]\w*+)\s*(?:\(|::)")  # linear: one try per word (a long word is no cost)
 PARAM = re.compile(r"^\s*(?:[\w\\?|]+\s+)?(&\s*)?(\.\.\.)?\s*\$([A-Za-z_]\w*)\s*(?:=\s*(.*?))?\s*$", re.S)
 ENCODERS = re.compile(r"^(?:http_build_query|json_encode|wp_json_encode)\s*\(\s*\$([A-Za-z_]\w*)\s*\)$")
@@ -56,7 +58,7 @@ class Func:
 class File:
     def __init__(self, text: str) -> None:
         self.text = text
-        self.src = src = Lex(text)
+        self.src = src = lex(text)
         self.code = src.code
         ns = NAMESPACE.search(self.code)
         self.namespace = ns.group(1).strip("\\") if ns else ""
@@ -106,12 +108,22 @@ class File:
             owner = self.class_at(m.start())
             self.funcs.append(Func(m.group(1), owner, paren, j, src.pairs[j], tuple(params), tuple(defaults), bool(owner)))
         self._parsed: phpparse.Parsed | None = None
+        self._calls: tuple[list[re.Match], list[re.Match], list[re.Match]] | None = None
 
     @property
     def parsed(self) -> phpparse.Parsed:
         if self._parsed is None:
             self._parsed = phpparse.parse(self.text, lambda chain: None)
         return self._parsed
+
+    @property
+    def call_matches(self) -> tuple[list[re.Match], list[re.Match], list[re.Match]]:
+        """Every STATIC_CALL, THIS_CALL and PLAIN_CALL match of the code, in order, found once: :func:`_calls`
+        walks them for each wrapper set it is asked about (the survey, the forwarding passes, the sites)."""
+        if self._calls is None:
+            self._calls = (list(STATIC_CALL.finditer(self.code)), list(THIS_CALL.finditer(self.code)),
+                           list(PLAIN_CALL.finditer(self.code)))
+        return self._calls
 
     def fq(self, short: str) -> str:
         """The fully qualified name of a class declared in this file."""
@@ -335,20 +347,21 @@ def _calls(f: File, wrappers: list[httpwrap.Wrapper], rel: str, registry) -> lis
         here = [w for w in found if w.rel == rel]
         return (here or found)[0] if len(here) == 1 or len(found) == 1 else None
 
-    for m in STATIC_CALL.finditer(f.code):
+    static_calls, this_calls, plain_calls = f.call_matches
+    for m in static_calls:
         if m.group(1).lower() == "parent":
             continue
         w = one((f.resolve(m.group(1), m.start()).lower(), m.group(2).lower()))  # namespaces and ``use`` resolved
         if w is not None:
             out.append((w, m.start(), m.end() - 1, re.sub(r"\s+", "", m.group(0)[:-1])))
-    for m in THIS_CALL.finditer(f.code):
+    for m in this_calls:
         short = f.class_at(m.start())
         w = one((f.fq(short).lower(), m.group(1).lower()))
         if w is None and short in f.extends:  # an inherited method: only a parent this file names
             w = one((f.extends[short].lower(), m.group(1).lower()))
         if w is not None and w.is_method:
             out.append((w, m.start(), m.end() - 1, re.sub(r"\s+", "", m.group(0)[:-1])))
-    for m in PLAIN_CALL.finditer(f.code):
+    for m in plain_calls:
         name = m.group(1)
         if name.lower() in NOT_CALLS or re.search(r"(?:function|new)\s*&?\s*$", f.code[max(0, m.start() - 12) : m.start()]):
             continue
@@ -358,7 +371,24 @@ def _calls(f: File, wrappers: list[httpwrap.Wrapper], rel: str, registry) -> lis
     return out
 
 
-def survey(text: str, rel: str) -> tuple[list[httpwrap.Wrapper], set[str], dict[str, bool]]:
+@functools.lru_cache(maxsize=8)
+def _recent(text: str) -> File:
+    return File(text)
+
+
+def _file(text: str, cache: dict | None) -> File:
+    """The :class:`File` of ``text``, built once: the survey and the first pass's same-file sites read a
+    file back to back (the LRU), and the registry keeps the survey's Files (``cache``, text -> File) for
+    :func:`sites`, which reads the same files again once every wrapper is known. A File is read-only."""
+    if cache is None:
+        return _recent(text)
+    f = cache.get(text)
+    if f is None:
+        f = cache[text] = _recent(text)
+    return f
+
+
+def survey(text: str, rel: str, cache: dict | None = None) -> tuple[list[httpwrap.Wrapper], set[str], dict[str, bool]]:
     called = httpwrap.called_names(text, CALLED) if re.search(r"::|\(", text) else {}
     for m in EXTENDS.finditer(text):  # a subclass calls its parent's methods through ``$this->``
         called.setdefault(m.group(1).rsplit("\\", 1)[-1], True)
@@ -370,7 +400,7 @@ def survey(text: str, rel: str) -> tuple[list[httpwrap.Wrapper], set[str], dict[
     defined = set(FUNC.findall(text))  # methods counted too: a plain function's name is unique only if no method has it
     if "stripe.com" not in text:
         return [], defined, called
-    return wrappers_in(File(text), rel, []), defined, called
+    return wrappers_in(_file(text, cache), rel, []), defined, called
 
 
 def wrappers_in(f: File, rel: str, known: list[httpwrap.Wrapper]) -> list[httpwrap.Wrapper]:
@@ -440,7 +470,7 @@ def sites(text: str, rel: str, index, reads: frozenset[str], language: str, regi
     known = [w for w in (registry.wrappers if registry is not None else []) if w.language == "php"]
     if not known and "stripe.com" not in text:
         return []
-    f = File(text)
+    f = _file(text, registry.files if registry is not None else None)
     here = wrappers_in(f, rel, known) if "stripe.com" in text or known else []
     wrappers = here + [w for w in known if w.rel != rel]
     out = httpphppath.constant_sites(f, text, rel, index, reads, language) if f.consts else []

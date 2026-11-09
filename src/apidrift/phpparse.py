@@ -18,27 +18,24 @@ from dataclasses import dataclass, field
 
 from . import phpdispatch, phpflow, phpinstance, phpvendor
 from .jsparse import Fields, Found, Span
-from .phplex import OPENERS, STRING, Lex
+from .phpchain import Seg, display, walk_back  # noqa: F401  the chain reader (re-exported)
+from .phplex import OPENERS, STRING, Lex, lex
 from .phpscope import WRITE, Bindings, Scopes
 from .sdkmap import Resolved, without_id
 
 VERB = re.compile(r"(\?->|->|::)\s*([A-Za-z_]\w*)\s*\(")
-NEW = re.compile(r"new\s+(\\?[A-Za-z_][\w\\]*)")
-USE_HEAD = re.compile(r"(?<![\w$>:\\])use\s+(?!function\b|const\b)")
+USE_HEAD = re.compile(r"use(?<![\w$>:\\]use)\s+(?!function\b|const\b)")
 USE_STOP = re.compile(r"[;(){}]")
-NAMESPACE_DECL = re.compile(r"(?<![\w$>:\\])namespace\s+([A-Za-z_][\w\\]*)\s*[;{]")
+NAMESPACE_DECL = re.compile(r"namespace(?<![\w$>:\\]namespace)\s+([A-Za-z_][\w\\]*)\s*[;{]")
 USE_REACH = 4000  # an import statement longer than this is not read
 CLIENT = re.compile(
-    r"(?:\$this\s*->\s*|\$)([A-Za-z_]\w*)\s*=\s*new\s+(\\?[A-Za-z_][\w\\]*)"  # $stripe = new StripeClient(
-    r"|(?<![\w\\])(\\?[A-Za-z_][\w\\]*)\s+\$([A-Za-z_]\w*)"  # a typed property or parameter: StripeClient $stripe
+    r"(?:\$this\s*->\s*|\$)([A-Za-z_]\w*+)\s*=\s*new\s+(\\?[A-Za-z_][\w\\]*)"  # $stripe = new StripeClient(
+    r"|(?<![\w\\])(\\?[A-Za-z_][\w\\]*+)\s+\$([A-Za-z_]\w*)"  # a typed property or parameter: StripeClient $stripe
 )
 MERGE = re.compile(r"(?:array_merge|array_replace|array_merge_recursive|array_replace_recursive|array_filter)\s*\(")
-VARIABLE, PLAIN_KEY = re.compile(r"\$([A-Za-z_]\w*)"), re.compile(r"'([A-Za-z_]\w*)'|\"([A-Za-z_]\w*)\"")
-INTEGER, WORD = re.compile(r"\d+"), re.compile(r"[A-Za-z_]\w*$")
-NOT_CALLED = {  # ``return (new StripeClient($k))->...``: the parenthesis after these is not a call
-    "return", "echo", "print", "yield", "throw", "and", "or", "xor", "case", "else", "clone", "await", "from",
-    "include", "include_once", "require", "require_once",
-}
+VARIABLE = re.compile(r"\$([A-Za-z_]\w*)")
+PLAIN_KEY = re.compile(r"'([A-Za-z_]\w*)'|\"([A-Za-z_]\w*)\"")
+INTEGER = re.compile(r"\d+")
 CLIENT_CLASSES = {"Stripe\\StripeClient", "Stripe\\StripeClientInterface", "Stripe\\BaseStripeClient"}
 
 
@@ -51,13 +48,6 @@ class Element:
     value: int  # first token of the value
     end: int  # end of the last token of the value
     stop: int  # the comma after it, or the array's closing bracket
-
-
-@dataclass(frozen=True)
-class Seg:
-    name: str
-    called: bool = False
-    hint: bool = False  # a call whose arguments mention stripe: ``app('stripe')``, ``resolve(StripeClient::class)``
 
 
 @dataclass
@@ -114,7 +104,7 @@ def extract(text: str, resolve, table=None, rel: str = "") -> tuple[list[Found],
 
 
 def parse(text: str, resolve) -> Parsed:
-    src = Lex(text)
+    src = lex(text)
     scopes = Scopes(src)
     parsed = Parsed(src, scopes, Bindings(src, scopes), [], [])
     uses = _uses(src)
@@ -122,10 +112,11 @@ def parse(text: str, resolve) -> Parsed:
     other: dict[int, tuple[int, str]] = {}  # chain start -> a Stripe-looking call that matched no endpoint
     resolved_at: dict[int, Call] = {}
     pending = phpdispatch.calls(src)  # ``wrapper('PaymentIntent', 'create', $p)``, read in text order with the rest
+    chains, shown = parsed.memo.setdefault("chains", {}), parsed.memo.setdefault("shown", {})  # a chain is walked once
     for m in VERB.finditer(src.code):
         while pending and pending[0][0] < m.start():
             phpdispatch.add(parsed, pending.pop(0), resolve, resolved_at, other)
-        walked = walk_back(src, m.start())
+        walked = walk_back(src, m.start(), chains)
         if walked is None:
             continue
         start, segs, root = walked
@@ -145,7 +136,7 @@ def parse(text: str, resolve) -> Parsed:
             resolved = _service(chain, verb, clients, resolve)
             if resolved is None and root == "var" and segs[0].name != "this":
                 resolved = next((r for c in _aliased(parsed, segs, start, uses) if (r := _service(c, verb, clients, resolve))), None)
-        call = display(src, start, m.end(2))
+        call = display(src, start, m.end(2), shown)
         if resolved is None:
             if any("stripe" in n.lower() for n in chain[0] + [verb]) or chain[0][0] in clients:
                 other[start] = (src.line(start), call)
@@ -172,66 +163,6 @@ def parse(text: str, resolve) -> Parsed:
 
 
 # --- call chains ---------------------------------------------------------------------
-
-
-def _word(c: str) -> bool:
-    return c.isalnum() or c == "_"
-
-
-def walk_back(src: Lex, end: int) -> tuple[int, list[Seg], str] | None:
-    """The receiver chain that ends at ``end``: where it starts, its segments root first, and what the root
-    is (``var``, ``class``, ``new``, ``func`` or ``expr`` for anything this reader does not follow)."""
-    text, segs, root, i = src.text, [], "expr", end
-    while True:
-        j = src.back_space(i)
-        start, called, hint = j, False, False
-        if j > 0 and text[j - 1] == ")":
-            opener = src.back.get(j - 1)
-            if opener is None:
-                return None
-            k = src.back_space(opener)
-            word = WORD.search(text, max(0, k - 16), k)
-            if word and word.group(0) not in NOT_CALLED:
-                called, hint, j = True, "stripe" in text[opener:j].lower(), k
-            else:  # a parenthesised receiver: (new \Stripe\StripeClient($key))->customers
-                m = NEW.match(text, src.skip_space(opener + 1))
-                if m:
-                    segs.append(Seg(m.group(1)))
-                    root = "new"
-                start = opener
-                break
-        if j == 0 or not _word(text[j - 1]):
-            break
-        s = j
-        while s > 0 and _word(text[s - 1]):
-            s -= 1
-        name = text[s:j]
-        if s > 0 and text[s - 1] == "$":
-            p = src.back_space(s - 1)
-            if text[p - 2 : p] == "::":  # a static property: self::$stripe->customers
-                segs.append(Seg(name, called, hint))
-                i = p - 2
-                continue
-            start = s - 1
-            if text[p - 2 : p] != "->" and text[p - 1 : p] != "$":  # not ->$prop or $$name
-                segs.append(Seg(name, called, hint))
-                root = "var"
-            break
-        p = src.back_space(s)
-        if text[p - 2 : p] in ("->", "::"):
-            segs.append(Seg(name, called, hint))
-            i = p - 2 - (1 if text[p - 2 : p] == "->" and text[p - 3 : p - 2] == "?" else 0)
-            continue
-        q = s
-        while q > 0 and (_word(text[q - 1]) or text[q - 1] == "\\"):
-            q -= 1
-        before = src.back_space(q)
-        is_new = text[max(0, before - 3) : before] == "new" and not _word(text[before - 4 : before - 3])
-        segs.append(Seg(text[q:j], called, hint))
-        root, start = ("new" if is_new else "func") if called else "class", q
-        break
-    segs.reverse()
-    return (start, segs, root) if segs else None
 
 
 def _uses(src: Lex) -> dict[str, list[str]]:
@@ -299,7 +230,7 @@ def _aliased(parsed: Parsed, segs: list[Seg], at: int, uses) -> list[Chain]:
     found: set[tuple[tuple, tuple, tuple]] = set()
     for binding in parsed.bindings.reaching(segs[0].name, at):
         end = src.skip_scalar(binding.value, ";") if binding.value >= 0 else -1
-        walked = walk_back(src, end) if end > binding.value >= 0 and binding.literal is None else None
+        walked = walk_back(src, end, parsed.memo.setdefault("chains", {})) if end > binding.value >= 0 and binding.literal is None else None
         if walked is None or walked[0] != binding.value:
             return []
         names, called, hints = _names(walked[1], walked[2], uses)
@@ -343,32 +274,6 @@ def _service(chain: Chain, verb: str, clients: set[str], resolve) -> Resolved | 
     # and nothing else (``$stripe_customer->sources`` is a Customer's collection, not the client's ``sources``)
     is_client = phpinstance.client_name(owner) or hints[c] or (owner in clients and (c == 0 or names[c - 1] == "this"))
     return resolved if is_client else None
-
-
-def display(src: Lex, start: int, end: int) -> str:
-    """A call chain as shown to the user: arguments collapsed to ``()``, whitespace and comments removed."""
-    text, out, i = src.text, [], start
-    while i < end:
-        j = src.skip_space(i)
-        if j > i:
-            if out and out[-1] == "new":
-                out.append(" ")
-            i = j
-            continue
-        if text[i] == "(" and i in src.pairs:
-            inner = src.skip_space(i + 1)
-            if i == start and text.startswith("new", inner):
-                out.append("(" + display(src, inner, src.pairs[i]) + ")")
-            else:
-                out.append("()")
-            i = src.pairs[i] + 1
-        elif text.startswith("new", i) and not _word(text[i + 3 : i + 4]) and (i == 0 or not _word(text[i - 1])):
-            out.append("new")
-            i += 3
-        else:
-            out.append(text[i])
-            i += 1
-    return "".join(out)
 
 
 # --- arguments -----------------------------------------------------------------------

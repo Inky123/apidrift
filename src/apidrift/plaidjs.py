@@ -162,7 +162,7 @@ def extract(text: str, index: PlaidIndex) -> tuple[list[Found], list[tuple[int, 
         if not (holds or clients.may_hold(chain)):
             continue
         resolved = index.method(chain[-1]) if "_" not in chain[-1] else None
-        line = src.text.count("\n", 0, m.start()) + 1
+        line = src.line(m.start())
         if resolved is None and holds and chain[-1] in NODE_METHODS:  # the pre-2021 client: positional arguments
             resolved = index.endpoint(NODE_METHODS[chain[-1]], chain[-1])
             if resolved is not None:

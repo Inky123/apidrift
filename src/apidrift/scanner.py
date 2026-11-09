@@ -16,7 +16,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import crosstable, goparse, httplit, httpurl, httpwrap, jsparse, phpparse, phpvendor, pyparse, pyrepo, pysyntax, scanfiles
+from . import (
+    crosstable, goparse, httplit, httpurl, httpwrap, jsparse, phpparse, phpvendor, pyparse, pyrepo, pysyntax, scanfiles,
+    textpos,
+)
 from .scanfiles import BUILD_DIRS, MAX_BYTES, PROJECT_FILES, SKIP_DIRS, SKIP_NAMES  # noqa: F401 - the scan's file rules
 from .sdkmap import Resolved, SdkIndex
 
@@ -190,7 +193,7 @@ def scan_repo(root: Path, index: SdkIndex, reader: Reader | None = None) -> Scan
         if text is None:
             skipped_files += 1
             continue
-        rel = path.relative_to(base).as_posix()
+        rel = rel_path(path, base)
         if registry is not None:
             registry.collect(text, rel)
         if not reader.hint.search(text):
@@ -268,13 +271,7 @@ def unread_sentence(unread: dict[str, int], vendor: str = "Stripe") -> str:
     return f"apidrift does not read {names} call sites yet: {listed} mention {vendor} and were not checked."
 
 
-def _iter_files(root: Path, suffixes: set[str] | None = None) -> tuple[list[Path], int, int]:
-    """The files a scan reads (``suffixes``: of these extensions instead of every text file), with the
-    counts of files and directories left out (:func:`scanfiles.iter_files`)."""
-    return scanfiles.iter_files(root, TEXT_EXT if suffixes is None else suffixes)
-
-
-_read = scanfiles.read
+_iter_files, _read, rel_path = scanfiles.iter_files, scanfiles.read, scanfiles.rel_path  # one walk per scan (scanfiles)
 
 
 def _doc_like(rel: str, suffix: str) -> bool:
@@ -383,12 +380,13 @@ def _scan_urls(
     text: str, rel: str, index: SdkIndex, reads: frozenset[str], taken: set[int], language: str = "http"
 ) -> list[Usage]:
     usages: list[Usage] = []
+    lines = textpos.LineCounter(text)
     for m in URL_RE.finditer(text):
         better = httplit.site(text, m.start(), rel, index)  # the whole joined template and the call's own method
         spec_path = better[0] if better else index.match_path(m.group(1))
         if spec_path is None:
             continue
-        line = text.count("\n", 0, m.start()) + 1
+        line = lines.line(m.start())
         if line in taken:
             continue
         if better and better[1]:

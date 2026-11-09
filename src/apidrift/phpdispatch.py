@@ -31,15 +31,15 @@ import re
 from dataclasses import dataclass, field
 
 from . import phpinstance, phpvendor
-from .phplex import STRING, Lex
+from .phplex import STRING, Lex, lex
 from .phpscope import BIND, OPAQUE, WRITE, Bindings, Scopes
 
-NAMED_FUNC = re.compile(r"(?<![\w$>:\\])function\s*&?\s*([A-Za-z_]\w*)\s*\(")
-CALLERS = re.compile(r"(?<![\w$>:\\])(call_user_func_array|call_user_func)\s*\(")
-NAMESPACE = re.compile(r"(?<![\w$>:\\])namespace\s+([A-Za-z_][\w\\]*)\s*[;{]")
-CLASS_NAME = re.compile(r"(?<![\w$>:\\])(?:class|trait)\s+([A-Za-z_]\w*)[^{;]*\{")
+NAMED_FUNC = re.compile(r"function(?<![\w$>:\\]function)\s*&?\s*([A-Za-z_]\w*)\s*\(")
+CALLERS = re.compile(r"(call_user_func_array(?<![\w$>:\\]call_user_func_array)|call_user_func(?<![\w$>:\\]call_user_func))\s*\(")
+NAMESPACE = re.compile(r"namespace(?<![\w$>:\\]namespace)\s+([A-Za-z_][\w\\]*)\s*[;{]")
+CLASS_NAME = re.compile(r"(?:class(?<![\w$>:\\]class)|trait(?<![\w$>:\\]trait))\s+([A-Za-z_]\w*)[^{;]*\{")
 PAIR = re.compile(r"\(\s*(['\"])[A-Z][\w\\]*\1\s*,\s*(['\"])[A-Za-z_]\w*\2")  # f('PaymentIntent', 'create'
-FREE_CALL = re.compile(r"(?<![\w$>:\\])\\?([A-Za-z_]\w*)\s*\(")
+FREE_CALL = re.compile(r"(?<![\w$>:\\])\\?([A-Za-z_]\w*+)\s*\(")
 PARAM = re.compile(r"^\s*(?:\??[\\\w|]+\s+)?(&\s*)?(\.\.\.\s*)?\$([A-Za-z_]\w*)\s*(?:=.*)?$", re.S)
 FORWARD = re.compile(
     r"\s*(?:\$([A-Za-z_]\w*)\s*=\s*new\s+(\\?[A-Za-z_][\w\\]*)\s*(?:\(\s*\))?\s*;\s*)?"
@@ -208,7 +208,10 @@ def _definitions(key: tuple, paths) -> int:
         raw = _read(path)
         if raw is None or short.encode() not in raw.lower():
             continue
-        src = Lex(raw.decode("utf-8", errors="replace"))
+        text = raw.decode("utf-8", errors="replace")
+        if not _may_define(key[0], short, text):
+            continue  # nothing below could count: the lex is spared
+        src = lex(text)
         if key[0] == "func":
             count += sum(1 for m in NAMED_FUNC.finditer(src.code) if m.group(1).lower() == short)
         else:
@@ -219,10 +222,31 @@ def _definitions(key: tuple, paths) -> int:
     return count
 
 
+OPAQUE_START = r"(?:/\*|//|#|['\"`]|<<<|\?>)"  # what begins a span the lex blanks out of the code
+CLASS_HEAD = re.compile(r"(?:class|trait)\s+([A-Za-z_]\w*)")
+CLASS_THEN_OPAQUE = re.compile(rf"(?:class|trait)\s*{OPAQUE_START}")
+FUNC_HEAD = re.compile(r"function\s*&?\s*([A-Za-z_]\w*)")
+FUNC_THEN_OPAQUE = re.compile(rf"function[\s&]*{OPAQUE_START}")
+
+
+def _may_define(kind: str, short: str, text: str) -> bool:
+    """False only when :func:`_definitions` would count nothing in ``text``, read from the text alone.
+
+    The counts are taken on the lexed code (strings and comments blanked to spaces, offsets kept), so a
+    counted ``class Name`` / ``function name`` is in the text too, either as written, or with a blanked span
+    (a comment, a string, inline HTML) between the keyword and the name, which then begins right after
+    the keyword and any whitespace. The several-namespaces count needs two ``namespace`` keywords."""
+    if kind == "func":
+        return any(m.lower() == short for m in FUNC_HEAD.findall(text)) or FUNC_THEN_OPAQUE.search(text) is not None
+    if any(m.lower() == short for m in CLASS_HEAD.findall(text)) or CLASS_THEN_OPAQUE.search(text) is not None:
+        return True
+    return text.count("namespace") >= 2 and short in text.lower()
+
+
 def _functions(text: str) -> list[_Fn]:
     from .phpparse import _uses  # phpparse builds on this module
 
-    src = Lex(text)
+    src = lex(text)
     if not src.balanced or src.uncertain:
         return []
     scopes = Scopes(src)

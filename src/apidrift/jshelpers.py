@@ -90,7 +90,7 @@ class Helpers:
         return self._defs
 
     def line(self, pos: int) -> int:
-        return self.src.text.count("\n", 0, pos) + 1
+        return self.src.line(pos)
 
     # --- definitions ----------------------------------------------------------------
 

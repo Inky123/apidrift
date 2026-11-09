@@ -81,6 +81,7 @@ class Repo:
         self.skipped: list[bool] = []  # a file the scanner does not read: naming a class there leaves it unproven
         self.usable = True  # False: some Python source is out of sight (too much, a symlinked directory, unreadable)
         self._facts: dict[int, Facts | None] = {}
+        self._full: set[int] = set()  # entries of _facts with the class facts too (facts(n, light=False))
 
     # --- the one pass ----------------------------------------------------------------------
 
@@ -140,18 +141,28 @@ class Repo:
         *dirs, name = self.paths[n].relative_to(self.base).parts
         return any(d in TEST_DIRS for d in dirs) or bool(TEST_FILE.match(name))
 
-    def facts(self, n: int) -> Facts:
+    def facts(self, n: int, *, light: bool = False) -> Facts:
+        """The module's facts; ``light``: only ``writes``, ``any_write`` and ``strings`` are needed (the
+        question most files are parsed for), so the class facts are not collected unless asked for later."""
         if n not in self._facts:
             if len(self._facts) >= MAX_PARSED:
                 raise Unknown(str(self.paths[n]))
-            try:
-                tree = pysyntax.parse(self.paths[n].read_text(errors="replace"))
-                self._facts[n] = collect(tree) if tree is not None else None
-            except (OSError, RecursionError, MemoryError):
-                self._facts[n] = None
+            self._facts[n] = self._collect(n, light)
+            if not light:
+                self._full.add(n)
+        elif not light and n not in self._full and self._facts[n] is not None:
+            self._facts[n] = self._collect(n, False)  # the same file read and parsed again: the same tree
+            self._full.add(n)
         if self._facts[n] is None:
             raise Unknown(str(self.paths[n]))
         return self._facts[n]
+
+    def _collect(self, n: int, light: bool) -> Facts | None:
+        try:
+            tree = pysyntax.parse(self.paths[n].read_text(errors="replace"))
+            return collect(tree, light=light) if tree is not None else None
+        except (OSError, RecursionError, MemoryError):
+            return None
 
     # --- questions (each raises Unknown when it cannot be answered) -----------------------
 
@@ -223,7 +234,7 @@ class Repo:
         for n in self.mentions(attr):
             if self.test_file(n):
                 continue
-            facts = self.facts(n)
+            facts = self.facts(n, light=True)
             if facts.any_write and attr in facts.strings:
                 raise Unknown(attr)  # setattr(obj, name, v) in a file that spells the name as a string
             total += facts.writes.get(attr, 0)
@@ -254,33 +265,52 @@ class Repo:
         return seen
 
 
-def collect(tree: ast.Module) -> Facts:
+def collect(tree: ast.Module, *, light: bool = False) -> Facts:
+    """The module's facts; ``light``: ``writes``, ``any_write`` and ``strings`` only (``classes``, ``calls``,
+    ``cls_calls``, ``escapes`` and ``dynamic`` stay empty), which needs the bindings only for a call whose
+    callee is itself a call or a subscript."""
     from .pyalias import Binders  # pyalias builds on pyparse, which reads this module's answers
 
-    binders, facts, parents = Binders(tree), Facts(), {}
+    facts, parents = Facts(), {}
+    built: list[Binders] = [] if light else [Binders(tree)]
+
+    def binders() -> Binders:
+        if not built:
+            built.append(Binders(tree))
+        return built[0]
+
     annotations: set[int] = set()
+    in_all: set[int] = set()  # light: the string constants of an ``__all__`` assignment (what _in_all climbs to)
+    resolve = lambda node: _resolve(node, binders())  # noqa: E731
+    # One breadth-first walk: a node's parent, and whether it sits in an annotation, were recorded when its
+    # ancestors came off the queue, which is before it does. The light collection reads parents only to
+    # tell the strings of ``__all__``, so it notes those at the assignment instead of mapping every node.
     for node in ast.walk(tree):
-        for child in ast.iter_child_nodes(node):
-            parents[child] = node
+        if not light:
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        elif isinstance(node, (ast.Assign, ast.AugAssign)):
+            in_all |= _all_strings(node)
         for ann in (getattr(node, "annotation", None), getattr(node, "returns", None)):
             if isinstance(ann, ast.AST):
                 annotations |= {id(n) for n in ast.walk(ann)}
-    resolve = lambda node: _resolve(node, binders)  # noqa: E731
-    for node in ast.walk(tree):
         if id(node) in annotations:
             continue
         if isinstance(node, ast.ClassDef):
-            bases = [_base(b, binders) for b in node.bases]
+            if light:
+                continue
+            bases = [_base(b, binders()) for b in node.bases]
             for b, name in zip(node.bases, bases):
                 if name is None:
-                    facts.dynamic |= _names(b, binders)
+                    facts.dynamic |= _names(b, binders())
             decorators = [_dotted(d) for d in node.decorator_list]
-            facts.classes.append(Klass(node.name, bases, set(binders.by_scope.get(node, {})), decorators, bool(node.keywords)))
+            facts.classes.append(Klass(node.name, bases, set(binders().by_scope.get(node, {})), decorators, bool(node.keywords)))
         elif isinstance(node, ast.Call):
-            _call(node, parents, binders, facts)
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and len(node.value) < 300 and not _in_all(node, parents):
+            _call(node, parents, binders, facts, light)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and len(node.value) < 300 and not (
+                id(node) in in_all if light else _in_all(node, parents)):
             facts.strings.add(node.value.rpartition(".")[2].rpartition(":")[2])  # getattr(m, "Cls"), "app.svc.Cls"
-        if isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load):
+        if not light and isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load):
             name = resolve(node)
             if name is not None and not _allowed(node, parents):
                 facts.escapes.add(name)
@@ -293,7 +323,8 @@ def collect(tree: ast.Module) -> Facts:
     return facts
 
 
-def _call(node: ast.Call, parents, binders, facts: Facts) -> None:
+def _call(node: ast.Call, parents, binders, facts: Facts, light: bool = False) -> None:
+    """``binders()`` gives the module's :class:`pyalias.Binders`; ``light``: only what :meth:`Repo.writes` reads."""
     func = node.func
     callee = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else None)
     if callee in SETATTRS:
@@ -308,21 +339,25 @@ def _call(node: ast.Call, parents, binders, facts: Facts) -> None:
         return
     if isinstance(func, ast.Attribute) and func.attr == "update" and _dict_of(func.value):
         facts.any_write = True  # obj.__dict__.update(...)
+    if light:
+        if isinstance(func, (ast.Call, ast.Subscript)):  # the one string fact below that a name cannot carry
+            facts.strings |= _names(func, binders())
+        return
     if callee in DYNAMIC:
         for arg in [*node.args, *(kw.value for kw in node.keywords)]:
-            facts.dynamic |= _names(arg, binders)
-    args = [None if isinstance(a, ast.Starred) else _is_stripe(a, binders) for a in node.args]
-    kwargs: dict[str | None, bool | None] = {kw.arg: _is_stripe(kw.value, binders) for kw in node.keywords}
+            facts.dynamic |= _names(arg, binders())
+    args = [None if isinstance(a, ast.Starred) else _is_stripe(a, binders()) for a in node.args]
+    kwargs: dict[str | None, bool | None] = {kw.arg: _is_stripe(kw.value, binders()) for kw in node.keywords}
     if isinstance(func, ast.Name):
-        owner = _cls_owner(func, parents, binders)
+        owner = _cls_owner(func, parents, binders())
         if owner is not None:
             facts.cls_calls.append((owner, args, kwargs))
             return
-    name = _resolve(func, binders)
+    name = _resolve(func, binders())
     if name is not None:
         facts.calls.append((name, args, kwargs))
     elif isinstance(func, (ast.Call, ast.Subscript)):
-        facts.strings |= _names(func, binders)  # getattr(m, "Cls")(...), m.__dict__["Cls"](...): built out of sight
+        facts.strings |= _names(func, binders())  # getattr(m, "Cls")(...), m.__dict__["Cls"](...): built out of sight
     owner = _class_of(node, parents)
     if owner is not None and _builds_own_type(func):
         facts.escapes.add(owner)  # type(self)(...), self.__class__(...): built out of sight
@@ -332,6 +367,22 @@ def _builds_own_type(func: ast.expr) -> bool:
     if isinstance(func, ast.Call) and isinstance(func.func, ast.Name) and func.func.id == "type":
         return True
     return isinstance(func, ast.Attribute) and func.attr == "__class__"
+
+
+def _all_strings(node: ast.Assign | ast.AugAssign) -> set[int]:
+    """ids of the constants :func:`_in_all` is true for under this statement: those reached from its value
+    through list and tuple displays only, when a target is the name ``__all__``."""
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    if not any(isinstance(t, ast.Name) and t.id == "__all__" for t in targets):
+        return set()
+    out, todo = set(), [node.value]
+    while todo:
+        n = todo.pop()
+        if isinstance(n, (ast.List, ast.Tuple)):
+            todo += n.elts
+        elif isinstance(n, ast.Constant):
+            out.add(id(n))
+    return out
 
 
 def _in_all(node: ast.AST, parents) -> bool:

@@ -31,7 +31,7 @@ import re
 from collections import Counter
 from pathlib import Path
 
-from . import crosstable, jsparse, jsreach, jsroots, scanner
+from . import crosstable, jsparse, jsreach, jsroots, scanner, textpos
 from .crosstable import Table, Wrapper
 from .jshelpers import Helpers
 from .jsparse import Fields, Found, Mask, Source
@@ -133,7 +133,7 @@ def collect(calls: list[jsparse.Call], helpers: Helpers, table: Table, rel: str)
         if len(args) != 1 or args[0][1] not in names or not re.fullmatch(IDENT, args[0][1]):
             continue
         name = args[0][1]
-        word = re.compile(rf"(?<![\w$.]){re.escape(name)}(?![\w$])")
+        word = re.compile(rf"{re.escape(name)}(?<![\w$.]{re.escape(name)})(?![\w$])")
         if sum(1 for m in word.finditer(text, d.open, d.close) if not _comment(helpers, m.start())) != 1:
             continue  # also read, written or passed on in the wrapper (in a template's ``${}`` too)
         if d.kind == "method":
@@ -176,10 +176,11 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
     if not names:
         return
     funcs = [w.name for w in names.values() if not w.method]
+    counted = _definitions_pattern(funcs)  # one pass per file for every name (was one per name and file)
     source = {str(p) for p in sources}
     facts = jsreach.Facts()
     defined: Counter[str] = Counter()
-    mention = re.compile(rf"(?<![\w$])(?:{'|'.join(re.escape(w.name) for w in names.values())})(?![\w$])")
+    mention = re.compile(rf"(?:{crosstable.names_pattern([re.escape(w.name) for w in names.values()], r'\w$')})(?![\w$])")
     mentioned: list[Path] = []
     test = lambda rel: scanner._doc_like(rel, Path(rel).suffix.lower())  # noqa: E731  a test's mocks reach its own calls
     for item in crosstable.walk(base, DEFINES, skip=test):
@@ -189,9 +190,9 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
             return
         path, text = item
         facts.learn(text)
-        for f in funcs:
-            if f in text:
-                defined[f] += len(re.findall(rf"(?<![\w$])function\s*\*?\s*{re.escape(f)}\s*[<(]|(?<![\w$])(?:const|let|var)\s+{re.escape(f)}(?![\w$])", text))
+        if counted is not None:
+            for m in counted.finditer(text):
+                defined[m.group(1) or m.group(2) or m.group(3) or m.group(4)] += 1
         if str(path) in source and path.suffix.lower() in SUFFIXES and mention.search(text):
             mentioned.append(path)
     for key, w in names.items():
@@ -209,7 +210,7 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
             table.followed.pop(w.key)
         return
     for path in mentioned:
-        rel, text = path.relative_to(base).as_posix(), scanner._read(path)
+        rel, text = scanner.rel_path(path, base), scanner._read(path)
         try:
             ctx = Context(text) if text is not None else None
             found = {w.key: list(uses(ctx, w, rel, table)) if ctx else [(0, -1, None)] for w in followed}
@@ -218,7 +219,20 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
         for w in followed:
             for line, _, visible in found[w.key]:
                 crosstable.record(table, w, rel, line, visible is not None)
+        if crosstable.over_cap(table, LANG):
+            break  # settled below: nothing more is followed
     crosstable.settle(table, LANG)
+
+
+def _definitions_pattern(funcs: list[str]) -> re.Pattern[str] | None:
+    """``function NAME(`` / ``const|let|var NAME`` for every function wrapper name at once, the name captured:
+    a definition is one whole identifier, so each occurrence counts for exactly the name it spells, as the
+    one-name-at-a-time patterns counted it."""
+    if not funcs:
+        return None
+    n = "|".join(re.escape(f) for f in funcs)
+    return re.compile(rf"function(?<![\w$]function)\s*\*?\s*({n})\s*[<(]|const(?<![\w$]const)\s+({n})(?![\w$])"
+                      rf"|let(?<![\w$]let)\s+({n})(?![\w$])|var(?<![\w$]var)\s+({n})(?![\w$])")
 
 
 def _library(base: Path, rel: str) -> bool:
@@ -251,12 +265,13 @@ def uses(ctx: Context, w: Wrapper, rel: str, table: Table):
     aliases = set() if w.method else {
         k for k, v in ctx.imports.items() if v[0] == w.name and _resolves(base, rel, v[1], w.file)
     }
+    lines = textpos.LineCounter(text)
     for name in sorted({w.name} | aliases):
         for m in re.finditer(rf"(?<![\w$]){re.escape(name)}(?![\w$])", text):
             p = m.start()
             if ctx.comment(p):
                 continue
-            line = text.count("\n", 0, p) + 1
+            line = lines.line(p)
             if ctx.mask.covers(p):
                 yield line, -1, None  # a string naming it: maybe a dynamic call
                 continue

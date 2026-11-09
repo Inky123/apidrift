@@ -33,6 +33,7 @@ import re
 from dataclasses import dataclass
 
 from .fixtokens import _Offsets
+from . import phplex
 from .fixtestjs import wiring as _js_wiring
 from .jsparse import OPENERS, RUBY_KEYWORD, Mask, Source
 from .phplex import Lex
@@ -76,7 +77,7 @@ PHPUNIT = re.compile(
     r"\s*->\s*with\s*\("
 )
 PHP_MOCK = r"(?:(?:\\?Mockery|\bm)::(?:mock|spy)|\$this\s*->\s*(?:createMock|createStub))\(\s*(?P<cls>[^,()]+?)\s*[,)]"
-PHP_USE = re.compile(r"^\s*use\s+\\?([A-Za-z_][\w\\]*)(?:\s+as\s+(\w+))?\s*;", re.M)
+PHP_USE = re.compile(r"^[^\S\n]*use\s+\\?([A-Za-z_][\w\\]*)(?:\s+as\s+(\w+))?\s*;", re.M)
 RUBY_WRAPPERS = ("a_hash_including(", "hash_including(")
 JS_WRAPPERS = ("expect.objectContaining(",)
 PHP_WRAPPERS = ("$this->equalTo(", "self::equalTo(", "static::equalTo(", "\\Mockery::subset(", "Mockery::subset(")
@@ -376,7 +377,7 @@ def _stripe_tail(dotted: str | None) -> str | None:
 
 
 def _php(text: str) -> list[Expect]:
-    lex = Lex(text)
+    lex = phplex.lex(text)
     if not lex.balanced or lex.uncertain:
         return []
     uses = {(alias or full.rsplit("\\", 1)[-1]): full for full, alias in PHP_USE.findall(text)}

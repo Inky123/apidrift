@@ -27,15 +27,19 @@ from dataclasses import dataclass, field
 from .jsparse import QUOTES, OPENERS
 
 IDENT = r"[A-Za-z_$][\w$]*"
-SUPERS = re.compile(r"(?<![\w$.])(?:extends|implements)\s+([^{};=]{1,300})\{")  # bounded: no backtracking
-NEW = re.compile(rf"(?<![\w$.])new\s+({IDENT})\s*[(<]")
-PROVIDE = re.compile(r"(?<![\w$.])provide\s*:")
-CLASS_DECL = re.compile(rf"(?<![\w$.])class\s+({IDENT})")
+IDENT_START = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_$")
+SUPERS = re.compile(r"(?:extends(?<![\w$.]extends)|implements(?<![\w$.]implements))\s+([^{};=]{1,300})\{")  # bounded
+NEW = re.compile(rf"new(?<![\w$.]new)\s+({IDENT})\s*[(<]")
+PROVIDE = re.compile(r"provide(?<![\w$.]provide)\s*:")
+CLASS_DECL = re.compile(rf"class(?<![\w$.]class)\s+({IDENT})")
 # ``x.p = `` / ``x['p'] = ``: group 1 the receiver word ("" after ``)`` or ``]``), group 2 a ``?.``
 WRITE = re.compile(
-    rf"(?:(?<![\w$])({IDENT})|[)\]])\s*(\?)?(?:\.\s*({IDENT})|\[\s*['\"]({IDENT})['\"]\s*\])\s*"
+    rf"(?:(?<![\w$])({IDENT}+)|[)\]])\s*+(\?)?(?:\.\s*({IDENT}+)|\[\s*['\"]({IDENT}+)['\"]\s*\])\s*"
     r"(?:[-+*/%&|^]|\?\?|\|\||&&)?=(?![=>])"
 )
+# The same writes found from the member access on (``.p =``, ``['p'] =``), which the engine scans for, the
+# receiver then read back from it by :func:`property_writes` as WRITE's first two groups would
+WRITE_AT = re.compile(rf"(?:\.\s*({IDENT}+)|\[\s*['\"]({IDENT}+)['\"]\s*\])\s*(?:[-+*/%&|^]|\?\?|\|\||&&)?=(?![=>])")
 
 
 @dataclass
@@ -62,9 +66,34 @@ class Facts:
             self.prototyped |= set(re.findall(rf"(?<![\w$])({IDENT})\s*\.\s*prototype\b", text))
         if "new" in text:
             self.constructed |= {m.group(1) for m in NEW.finditer(text)}
-        for m in WRITE.finditer(text):
-            if m.group(1) != "this" or m.group(2):
-                self.written.add(m.group(3) or m.group(4))
+        for receiver, optional, name in property_writes(text):
+            if receiver != "this" or optional:
+                self.written.add(name)
+
+
+def property_writes(text: str):
+    """(receiver word or None after ``)`` / ``]``, whether through ``?.``, property) for every WRITE match,
+    found from the member access: WRITE's receiver is the maximal word-or-``$`` run before it (its look-behind
+    admits no start inside one) beginning with an ASCII letter, ``_`` or ``$``, or a closing bracket, with
+    whitespace and then an optional ``?`` between."""
+    for m in WRITE_AT.finditer(text):
+        i = m.start() - 1
+        optional = i >= 0 and text[i] == "?"
+        if optional:
+            i -= 1
+        while i >= 0 and text[i].isspace():
+            i -= 1
+        if i < 0:
+            continue
+        if text[i] in ")]":
+            yield None, optional, m.group(1) or m.group(2)
+            continue
+        j = i
+        while j >= 0 and (text[j] in "_$" or text[j].isalnum()):  # ``\w`` is alphanumeric or ``_``
+            j -= 1
+        if j == i or text[j + 1] not in IDENT_START:
+            continue  # no word there, or one that cannot begin an identifier
+        yield text[j + 1 : i + 1], optional, m.group(1) or m.group(2)
 
 
 def _windows(starts) -> list[tuple[int, int]]:

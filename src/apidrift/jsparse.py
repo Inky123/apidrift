@@ -11,7 +11,7 @@ import bisect
 import re
 from dataclasses import dataclass, field
 
-from . import jsbare, jsroots, jsspread, jswrites
+from . import jsbare, jsroots, jsspread, jswrites, textpos
 from .jsroots import CALL_ARGS, NAME
 from .sdkmap import Resolved, SdkIndex
 
@@ -90,6 +90,12 @@ class Source:
         self.n = len(self.text)
         self.ruby = ruby
         self.spreads = None  # reads ``...helper(x)`` (jsspread.Reader), installed by :func:`extract`
+        self._newlines: list[int] | None = None
+
+    def line(self, pos: int) -> int:  # text.count("\n", 0, pos) + 1, from the newline positions found once
+        if self._newlines is None:
+            self._newlines = textpos.newlines(self.text)
+        return textpos.line_of(self._newlines, pos)
 
     def skip_space(self, i: int) -> int:
         text = self.text
@@ -408,7 +414,7 @@ def calls(text: str, index: SdkIndex, *, ruby: bool = False, resolve=None) -> tu
         if len(chain) < 2 or not (hint or eligible(chain, roots)):
             continue
         call = jsroots.display(m.group(1))
-        line = src.text.count("\n", 0, m.start()) + 1
+        line = src.line(m.start())
         resolved = resolve(chain)
         if resolved is None:
             unresolved[m.start(1)] = (line, call)

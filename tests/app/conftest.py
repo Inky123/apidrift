@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import gzip
 import io
 import json
 import re
@@ -455,7 +456,7 @@ def claim(conn):
 def tar_bytes(entries, compress=True) -> bytes:
     """entries: (name, kind, payload) with kind in file/dir/sym/lnk/chr/blk; payload is data or linkname."""
     buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz" if compress else "w") as tar:
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
         for name, kind, payload in entries:
             info = tarfile.TarInfo(name)
             if kind == "file":
@@ -470,7 +471,8 @@ def tar_bytes(entries, compress=True) -> bytes:
             if payload:
                 info.linkname = payload
             tar.addfile(info)
-    return buffer.getvalue()
+    # mtime=0: two archives of the same entries are the same bytes, whatever second each was built in
+    return gzip.compress(buffer.getvalue(), mtime=0) if compress else buffer.getvalue()
 
 
 def extract(tmp_path, data: bytes, **caps):

@@ -147,7 +147,9 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
     if not names:
         return
     pattern = "|".join(re.escape(w.name) for w in names.values())
-    definition = re.compile(rf"(?<![\w$])function\s*&?\s*({pattern})\s*\(", re.I)
+    # ``[fF]`` is exactly what ``f`` matches under re.I (no other character lower-cases to it), and a literal
+    # class first lets the engine scan for it instead of trying the look-behind at every character
+    definition = re.compile(rf"[fF](?<![\w$][fF])(?i:unction\s*&?\s*({pattern})\s*\()")
     mention = re.compile(rf"(?<![\w$])(?:{pattern})(?!\w)", re.I)
     defs: Counter[str] = Counter()
     source = {p.resolve() for p in sources}
@@ -159,7 +161,7 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
             return
         path, text = item
         defs.update(m.group(1).lower() for m in definition.finditer(text))
-        rel = path.relative_to(base).as_posix()
+        rel = scanner.rel_path(path, base)
         if path.resolve() in source and not scanner._doc_like(rel, path.suffix.lower()) and mention.search(text):
             mentioned.append(path)
     for key, w in names.items():
@@ -174,7 +176,7 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
             table.followed.pop(w.key)
         return
     for path in mentioned:
-        rel, text = path.relative_to(base).as_posix(), scanner._read(path)
+        rel, text = scanner.rel_path(path, base), scanner._read(path)
         if text is None:  # binary: its uses are not known
             for w in followed:
                 crosstable.record(table, w, rel, 0, False)
@@ -183,6 +185,8 @@ def finish(table: Table, base: Path, sources: list[Path], resolve) -> None:
         for w in followed:
             for line, _, visible in uses(ctx, w, rel):
                 crosstable.record(table, w, rel, line, visible is not None)
+        if crosstable.over_cap(table, LANG):
+            break  # settled below: nothing more is followed
     crosstable.settle(table, LANG)
 
 

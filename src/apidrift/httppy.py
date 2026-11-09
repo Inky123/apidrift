@@ -14,8 +14,9 @@ import re
 from . import httpurl, httpwrap
 
 RAW = {"raw_request", "raw_request_async"}
+DEF_LINE = re.compile(r"(?m)^[^\S\n]*(?:async\s+)?def\s+([A-Za-z_]\w*)")  # the same lines as ``^\s*``, each read once
 CALL = re.compile(r"(?<!\w)[^\W_A-Za-z]*+([A-Za-z_]\w*+)\s*\(")  # linear: one try per word
-IMPORT_LINE = re.compile(r"(?m)^\s*from\s+\S+\s+import\s+\(?([^)\n]*)")
+IMPORT_LINE = re.compile(r"(?m)^[^\S\n]*from\s+\S+\s+import\s+\(?([^)\n]*)")  # not ``^\s*``: a newline run is not re-read per line
 OPTIONS = {
     "stripe_version", "stripe_account", "stripe_context", "api_key", "idempotency_key", "api_mode", "headers",
     "max_network_retries", "usage", "base_address", "options",
@@ -234,7 +235,7 @@ def _parse(text: str):
 
 
 def survey(text: str, rel: str):
-    defined = set(re.findall(r"(?m)^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)", text))
+    defined = set(DEF_LINE.findall(text))
     called = httpwrap.called_names(text, CALL) if "(" in text else {}
     for m in IMPORT_LINE.finditer(text):  # ``from .api import post as stripe_post``: the wrapper's own name
         for name in re.findall(r"[A-Za-z_]\w*", m.group(1)):

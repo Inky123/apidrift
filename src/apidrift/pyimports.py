@@ -5,11 +5,25 @@ Kept apart from :mod:`pyparse` so the parser stays small."""
 from __future__ import annotations
 
 import ast
+from collections import deque
+
+STATEMENT_HOLDERS = (ast.stmt, ast.ExceptHandler, ast.match_case)  # every node a statement can sit under
+
+
+def statements(tree: ast.AST):
+    """The statements of a module in :func:`ast.walk`'s (breadth-first) order, without visiting expressions:
+    a statement's ancestors are all statements, except handlers and match cases, so dropping the other
+    children of every node keeps each statement's depth and its place among its depth."""
+    todo = deque([tree])
+    while todo:
+        node = todo.popleft()
+        todo.extend(child for child in ast.iter_child_nodes(node) if isinstance(child, STATEMENT_HOLDERS))
+        yield node
 
 
 def import_aliases(tree: ast.AST) -> dict[str, str]:
     aliases: dict[str, str] = {}
-    for node in ast.walk(tree):
+    for node in statements(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name == "stripe" or alias.name.startswith("stripe."):
