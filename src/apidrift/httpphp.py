@@ -16,6 +16,7 @@ from typing import NamedTuple
 
 from . import httpphpbody, httpphppath, httpurl, httpwrap, phpfilters, phpparse
 from .httpphpbody import Writes, _writes
+from .httpphppath import client_method, real_client
 from .jsparse import Fields
 from .phplex import STRING, lex
 
@@ -248,39 +249,6 @@ class File:
                 return None  # a spread or a computed key could be anything, ``method`` included
             out[key[0]] = (el.value, el.end)
         return out
-
-
-def real_client(f: File, m: re.Match) -> bool:
-    """A WordPress / file function, or ``->request|get|post|delete`` on something named as an HTTP client
-    (``$this->client``, ``$http``, ``$guzzle``), not ``$this->cache->get(...)``."""
-    if m.group(1):
-        return True
-    owner = re.search(r"(\$?[A-Za-z_]\w*)\s*(?:\(\s*\))?\s*$", f.code[max(0, m.start() - 80) : m.start()])
-    return owner is not None and re.search(r"http|client|guzzle", owner.group(1), re.I) is not None
-
-
-def client_method(f: File, m: re.Match, args) -> tuple[str | None, str | None, dict | None, tuple[str, ...]]:
-    """(method the call names or None, the variable it takes the method from, its options, the option keys
-    that carry a body). A WordPress default holds only when the options are a visible array without
-    ``method``; options that are not visible leave the method unknown."""
-    callee, verb = m.group(1), m.group(2)
-    if verb == "request":  # Guzzle: request($method, $uri, $options)
-        got = f.pieces(*args[0]) if args else []
-        word = httpurl.method_word(got[0][1]) if len(got) == 1 and got[0][0] == "lit" else None
-        var = got[0][1] if len(got) == 1 and got[0][0] == "var" else None
-        return word, var, (f.array_items(*args[2]) if len(args) > 2 else {}), ("form_params", "json", "body", "multipart", "query")
-    if verb:
-        return verb, None, (f.array_items(*args[1]) if len(args) > 1 else {}), ("form_params", "json", "body", "query")
-    options = f.array_items(*args[1]) if len(args) > 1 else {}
-    if callee == "file_get_contents":
-        return ("get" if len(args) == 1 else None), None, {}, ()
-    if options is None:
-        return None, None, None, ("body",)
-    if "method" in options:
-        got = f.pieces(*options["method"])
-        word = httpurl.method_word(got[0][1]) if len(got) == 1 and got[0][0] == "lit" else None
-        return word, (got[0][1] if len(got) == 1 and got[0][0] == "var" else None), options, ("body",)
-    return ("post" if callee.endswith("_post") else "get"), None, options, ("body",)
 
 
 def _default(text: str | None) -> str | None:
